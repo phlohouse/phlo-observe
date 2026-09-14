@@ -1,0 +1,469 @@
+"""FastAPI application factory for phlo-observer.
+
+Routes:
+
+- ``POST /v1/events``                 canonical ingestion (single or array, gzip ok)
+- ``POST /v1/ingest/{dagster,dbt,generic}``  source-specific ingestion
+- ``POST /v1/ingest/dbt/artifacts``   run_results + manifest document
+- ``POST /v1/ingest/otlp``            minimal OTLP/HTTP JSON logs ingestion
+- ``GET  /v1/events``                 filtered, cursor-paginated query
+- ``GET  /v1/events/{event_id}``      single event
+- ``GET  /v1/runs`` / ``/v1/runs/{id}`` / ``/v1/runs/{id}/timeline``
+- ``GET  /healthz`` / ``/readyz`` / ``/metrics``
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import gzip
+import logging
+import time
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.responses import JSONResponse
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from phlo_observer import __version__
+from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
+from phlo_observer.adapters.base import record_normalization
+from phlo_observer.auth import require_ingest_token, require_read_token
+from phlo_observer.db import check_database, make_engine, make_sessionmaker
+from phlo_observer.forward import forward_events
+from phlo_observer.metrics import (
+    HTTP_DURATION,
+    HTTP_REQUESTS,
+    INGEST_BATCHES,
+    INGEST_EVENTS,
+    NORMALIZATION_DURATION,
+    PERSIST_DURATION,
+)
+from phlo_observer.retention import retention_loop
+from phlo_observer.settings import ObserverSettings
+from phlo_observer.store import (
+    DEFAULT_PAGE_SIZE,
+    _fmt,
+    count_events,
+    persist_events,
+    query_events,
+    query_runs,
+    store_raw,
+)
+from phlo_observer.timeline import event_by_id, run_timeline
+
+logger = logging.getLogger("phlo_observer")
+
+_UNAUTHENTICATED = {"/healthz", "/readyz", "/metrics", "/docs", "/openapi.json"}
+
+
+def create_app(settings: ObserverSettings | None = None) -> FastAPI:
+    """Build the application. ``settings`` defaults to environment config."""
+    settings = settings or ObserverSettings()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        engine = make_engine(settings)
+        factory = make_sessionmaker(engine)
+        app.state.engine = engine
+        app.state.session_factory = factory
+        stop = asyncio.Event()
+        retention_task = asyncio.create_task(
+            retention_loop(
+                factory, settings, interval_seconds=settings.retention_interval_s, stop=stop
+            )
+        )
+        try:
+            yield
+        finally:
+            stop.set()
+            retention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await retention_task
+            await engine.dispose()
+
+    app = FastAPI(title="phlo-observer", version=__version__, lifespan=lifespan)
+    app.state.settings = settings
+
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next: Any) -> Response:
+        """Count HTTP traffic and enforce the configured body limit."""
+        if request.url.path not in _UNAUTHENTICATED:
+            length = request.headers.get("content-length")
+            if length and int(length) > settings.max_body_bytes:
+                return JSONResponse(
+                    {"detail": "request body too large"},
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                )
+        start = time.perf_counter()
+        response = await call_next(request)
+        if settings.metrics_enabled:
+            route = request.scope.get("route")
+            path = getattr(route, "path", request.url.path)
+            HTTP_REQUESTS.labels(route=path, status=str(response.status_code)).inc()
+            HTTP_DURATION.labels(route=path).observe(time.perf_counter() - start)
+        return response
+
+    async def _body(request: Request) -> bytes:
+        body = await request.body()
+        if request.headers.get("content-encoding") == "gzip":
+            try:
+                body = gzip.decompress(body)
+            except OSError as exc:
+                raise _http_error(400, f"invalid gzip body: {exc}") from exc
+        if len(body) > settings.max_body_bytes:
+            raise _http_error(413, "request body too large")
+        return body
+
+    def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+        """FastAPI dependency: the session factory created at startup."""
+        return request.app.state.session_factory
+
+    async def _ingest(
+        request: Request,
+        *,
+        producer: str,
+        source_kind: str,
+        adapter_name: str | None,
+    ) -> JSONResponse:
+        """Shared ingestion pipeline: read -> raw store -> normalize -> persist."""
+        body = await _body(request)
+        async with app.state.session_factory() as session, session.begin():
+            raw = await store_raw(
+                session,
+                producer=producer,
+                source_kind=source_kind,
+                body=body,
+                content_type=request.headers.get("content-type", "application/json"),
+                adapter=adapter_name,
+                retention_days=settings.raw_retention_days,
+            )
+            events, errors = _normalize(adapter_name, body)
+            if len(events) > settings.max_batch_events:
+                raw.normalization_status = "rejected"
+                raw.normalization_error = "batch too large"
+                INGEST_BATCHES.labels(status="rejected").inc()
+                return JSONResponse(
+                    {
+                        "accepted": 0,
+                        "rejected": len(events),
+                        "errors": [
+                            {
+                                "index": -1,
+                                "code": "BATCH_TOO_LARGE",
+                                "message": f"batch exceeds {settings.max_batch_events} events",
+                            }
+                        ],
+                    },
+                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                )
+            start = time.perf_counter()
+            result = await persist_events(session, events, raw_event_id=raw.id)
+            PERSIST_DURATION.observe(time.perf_counter() - start)
+            if settings.otlp_endpoint and result.accepted:
+                await forward_events(events, settings.otlp_endpoint)
+            result.errors = errors + result.errors
+            result.rejected += len(errors)
+            raw.normalization_status = "ok" if not errors else "partial"
+            if errors and not events:
+                raw.normalization_status = "failed"
+                raw.normalization_error = errors[0]["message"]
+        INGEST_BATCHES.labels(status="accepted" if result.accepted else "rejected").inc()
+        INGEST_EVENTS.labels(producer=producer, status="accepted").inc(result.accepted)
+        INGEST_EVENTS.labels(producer=producer, status="rejected").inc(result.rejected)
+        code = status.HTTP_202_ACCEPTED
+        if result.accepted == 0 and result.rejected:
+            code = status.HTTP_422_UNPROCESSABLE_CONTENT
+        return JSONResponse(
+            {
+                "accepted": result.accepted,
+                "rejected": result.rejected,
+                "duplicates": result.duplicates,
+                "errors": result.errors,
+            },
+            status_code=code,
+        )
+
+    def _normalize(
+        adapter_name: str | None, body: bytes
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Run the adapter; collect per-item failures as structured errors."""
+        adapter = ADAPTERS[adapter_name or "canonical"]
+        try:
+            start = time.perf_counter()
+            batch = adapter.normalize(
+                RawPayload(producer=adapter.name, source_kind=adapter.name, body=body)
+            )
+            NORMALIZATION_DURATION.observe(time.perf_counter() - start)
+            record_normalization(adapter.name, "success" if not batch.errors else "partial")
+            return batch.events, batch.errors
+        except AdapterError as exc:
+            record_normalization(adapter.name, "error")
+            return [], [{"index": -1, "code": exc.code, "message": str(exc)}]
+
+    # -- ingestion ----------------------------------------------------------
+
+    @app.post(
+        "/v1/events",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_events(request: Request) -> Response:
+        """Canonical ingestion: single event object or array."""
+        return await _ingest(
+            request, producer="canonical", source_kind="envelope", adapter_name="canonical"
+        )
+
+    @app.post(
+        "/v1/ingest/dagster",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_dagster(request: Request) -> Response:
+        """Dagster event payloads."""
+        return await _ingest(
+            request, producer="dagster", source_kind="events", adapter_name="dagster"
+        )
+
+    @app.post(
+        "/v1/ingest/dbt",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_dbt(request: Request) -> Response:
+        """Dbt run_results JSON documents."""
+        return await _ingest(request, producer="dbt", source_kind="run_results", adapter_name="dbt")
+
+    @app.post(
+        "/v1/ingest/dbt/artifacts",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_dbt_artifacts(request: Request) -> Response:
+        """Dbt artifacts bundle: ``{"run_results": ..., "manifest": ...}``."""
+        return await _ingest(request, producer="dbt", source_kind="artifacts", adapter_name="dbt")
+
+    @app.post(
+        "/v1/ingest/generic",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_generic(request: Request) -> Response:
+        """Last-resort generic JSON ingestion."""
+        return await _ingest(
+            request, producer="generic", source_kind="json", adapter_name="generic"
+        )
+
+    @app.post(
+        "/v1/ingest/otlp",
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=[Depends(require_ingest_token)],
+    )
+    async def ingest_otlp(request: Request) -> Response:
+        """Minimal OTLP/HTTP JSON ingestion (collector-forwarded logs)."""
+        return await _ingest(request, producer="otlp", source_kind="logs", adapter_name="generic")
+
+    # -- queries -------------------------------------------------------------
+
+    @app.get("/v1/events", dependencies=[Depends(require_read_token)])
+    async def list_events(
+        session_factory: async_sessionmaker[AsyncSession] = Depends(get_session_factory),
+        event: str | None = None,
+        category: str | None = None,
+        outcome: str | None = None,
+        severity: str | None = None,
+        service: str | None = None,
+        environment: str | None = None,
+        run_id: str | None = None,
+        asset_key: str | None = None,
+        partition_key: str | None = None,
+        branch: str | None = None,
+        table: str | None = None,
+        trace_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Filter events; paginate with the returned ``next_cursor``."""
+        filters = {
+            k: v
+            for k, v in {
+                "event": event,
+                "category": category,
+                "outcome": outcome,
+                "severity": severity,
+                "service": service,
+                "environment": environment,
+                "run_id": run_id,
+                "asset_key": asset_key,
+                "partition_key": partition_key,
+                "branch": branch,
+                "table": table,
+                "trace_id": trace_id,
+                "since": since,
+                "until": until,
+            }.items()
+            if v is not None
+        }
+        async with session_factory() as session:
+            page = await query_events(session, filters=filters, cursor=cursor, limit=limit)
+            return {
+                "items": [_event_json(row) for row in page.items],
+                "next_cursor": page.next_cursor,
+            }
+
+    @app.get("/v1/events/{event_id}", dependencies=[Depends(require_read_token)])
+    async def get_event(event_id: str, request: Request) -> dict[str, Any]:
+        """Fetch one event by ID."""
+        async with request.app.state.session_factory() as session:
+            row = await event_by_id(session, event_id)
+            if row is None:
+                raise _http_error(404, "event not found")
+            return _event_json(row)
+
+    @app.get("/v1/runs", dependencies=[Depends(require_read_token)])
+    async def list_runs(
+        request: Request,
+        status_filter: str | None = Query(None, alias="status"),
+        job_name: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """List run projections."""
+        async with request.app.state.session_factory() as session:
+            runs, next_cursor = await query_runs(
+                session, status=status_filter, job_name=job_name, cursor=cursor, limit=limit
+            )
+            return {"items": [_run_json(run) for run in runs], "next_cursor": next_cursor}
+
+    @app.get("/v1/runs/{run_id}", dependencies=[Depends(require_read_token)])
+    async def get_run(run_id: str, request: Request) -> dict[str, Any]:
+        """One run projection."""
+        async with request.app.state.session_factory() as session:
+            timeline = await run_timeline(session, run_id)
+            if timeline is None:
+                raise _http_error(404, "run not found")
+            return timeline["run"]
+
+    @app.get("/v1/runs/{run_id}/timeline", dependencies=[Depends(require_read_token)])
+    async def get_run_timeline(run_id: str, request: Request) -> dict[str, Any]:
+        """Run projection plus phase-grouped events."""
+        async with request.app.state.session_factory() as session:
+            timeline = await run_timeline(session, run_id)
+            if timeline is None:
+                raise _http_error(404, "run not found")
+            return timeline
+
+    # -- health / metrics ----------------------------------------------------
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        """Liveness: process is up."""
+        return {"status": "ok", "version": __version__}
+
+    @app.get("/readyz")
+    async def readyz(request: Request) -> Response:
+        """Readiness: database reachable and schema-compatible."""
+        ok = await check_database(request.app.state.session_factory)
+        if not ok:
+            return JSONResponse({"status": "not_ready", "database": "unreachable"}, status_code=503)
+        async with request.app.state.session_factory() as session:
+            try:
+                version = (
+                    await session.execute(text("select version_num from alembic_version"))
+                ).scalar()
+            except Exception:
+                # missing alembic_version (unmigrated schema) aborts the txn
+                await session.rollback()
+                version = None
+            return JSONResponse(
+                {
+                    "status": "ready",
+                    "database": "ok",
+                    "schema_version": version,
+                    "events_stored": await count_events(session),
+                }
+            )
+
+    metrics_deps = [] if settings.metrics_public else [Depends(require_read_token)]
+
+    @app.get("/metrics", dependencies=metrics_deps)
+    async def metrics_endpoint() -> Response:
+        """Prometheus exposition."""
+        if not settings.metrics_enabled:
+            raise _http_error(404, "metrics disabled")
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+    return app
+
+
+def _http_error(code: int, message: str) -> HTTPException:
+    return HTTPException(status_code=code, detail=message)
+
+
+def _event_json(row: Any) -> dict[str, Any]:
+    return {
+        "event_id": str(row.event_id),
+        "schema_version": row.schema_version,
+        "event": row.event,
+        "category": row.category,
+        "outcome": row.outcome,
+        "severity": row.severity,
+        "delivery": row.delivery,
+        "started_at": _fmt(row.started_at),
+        "ended_at": _fmt(row.ended_at),
+        "duration_ms": row.duration_ms,
+        "observed_at": _fmt(row.observed_at),
+        "received_at": _fmt(row.received_at),
+        "service": {
+            "name": row.service_name,
+            "version": row.service_version,
+            "environment": row.environment,
+        },
+        "correlation": {
+            "trace_id": row.trace_id,
+            "span_id": row.span_id,
+            "run_id": row.run_id,
+            "job_id": row.job_id,
+            "invocation_id": row.invocation_id,
+            "asset_key": row.asset_key,
+            "partition_key": row.partition_key,
+            "branch": row.branch,
+            "table": row.table_name,
+            "snapshot_id": row.snapshot_id,
+            "pipeline": row.pipeline,
+        },
+        "correlation_method": row.correlation_method,
+        "attributes": row.attributes,
+        "error": row.error,
+        "source": row.source,
+    }
+
+
+def _run_json(run: Any) -> dict[str, Any]:
+    return {
+        "run_id": run.run_id,
+        "status": run.status,
+        "job_name": run.job_name,
+        "service_name": run.service_name,
+        "environment": run.environment,
+        "branch": run.branch,
+        "trigger": run.trigger,
+        "started_at": _fmt(run.started_at),
+        "ended_at": _fmt(run.ended_at),
+        "duration_ms": run.duration_ms,
+        "event_count": run.event_count,
+        "error_count": run.error_count,
+        "warning_count": run.warning_count,
+        "asset_count": run.asset_count,
+        "summary": run.summary,
+        "updated_at": _fmt(run.updated_at),
+    }
+
+
+# Type aliases used only for dependency wiring clarity.
+SessionFactory = async_sessionmaker[AsyncSession]

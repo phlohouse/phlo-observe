@@ -8,6 +8,7 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Phlo" }]
 dependencies = [
     "observe-core",
+    "phlo-observe",
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "pydantic>=2.8",
@@ -34,3 +35,4 @@ module-name = "phlo_observer"
 
 [tool.uv.sources]
 observe-core = { workspace = true }
+phlo-observe = { workspace = true }

@@ -22,14 +22,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "config":
-        from observe_core.config import ObserveSettings  # noqa: PLC0415 - lazy CLI import
+        from observe_core.config import ObserveSettings
 
         settings = ObserveSettings()
         print(json.dumps(settings.model_dump(mode="json"), indent=2, default=str))
         return 0
 
     if args.command == "emit-test":
-        from observe_core import (  # noqa: PLC0415 - lazy CLI import
+        from observe_core import (
             configure,
             event,
             flush,
@@ -43,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "stats":
-        from observe_core import get_stats  # noqa: PLC0415 - lazy CLI import
+        from observe_core import get_stats
 
         print(json.dumps(get_stats(), indent=2, default=str))
         return 0

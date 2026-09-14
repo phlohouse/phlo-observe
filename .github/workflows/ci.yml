@@ -117,7 +117,7 @@ jobs:
             -e PHLO_OBSERVER_DATABASE_URL="postgresql+asyncpg://x:x@localhost:1/x" \
             phlo-observer:ci
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/health/live; then exit 0; fi
+            if curl -sf http://localhost:8080/healthz; then exit 0; fi
             sleep 1
           done
           docker logs observer
