@@ -44,6 +44,7 @@ select = [
 ]
 ignore = [
     "ANN401",   # Any is acceptable in serialization boundaries
+    "D107",     # __init__ does not need its own docstring
     "D203",     # conflicts with D211
     "D213",     # conflicts with D212
     "PLW2901",  # loop variable reuse is fine in tests/fixtures
@@ -51,7 +52,7 @@ ignore = [
 pydocstyle = { convention = "google" }
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101", "D", "ANN"]
+"**/tests/**" = ["S101", "D", "ANN", "S105", "S106", "S108", "DTZ001", "PLC0415"]
 "**/conftest.py" = ["D", "ANN"]
 "examples/**" = ["D", "ANN", "S"]
 "**/migrations/**" = ["D", "ANN"]

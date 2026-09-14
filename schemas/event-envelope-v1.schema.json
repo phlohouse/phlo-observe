@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phlohouse.dev/schemas/event-envelope-v1.schema.json",
+  "title": "Phlo Canonical Event Envelope",
+  "description": "Canonical normalized event envelope for phlo-observe schema version 1.x",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "event",
+    "category",
+    "outcome",
+    "severity",
+    "delivery",
+    "observed_at",
+    "service",
+    "correlation",
+    "attributes",
+    "error",
+    "source"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.\\d+$",
+      "description": "Canonical schema version. Must be 1.x for V1."
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Globally unique sortable identifier (UUIDv7)."
+    },
+    "event": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)*$",
+      "description": "Dot-delimited stable operation/event name."
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "application",
+        "pipeline",
+        "data",
+        "quality",
+        "wap",
+        "query",
+        "storage",
+        "infrastructure",
+        "security",
+        "observer",
+        "other"
+      ]
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["success", "failure", "cancelled", "partial", "unknown"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["trace", "debug", "info", "warn", "error", "critical"]
+    },
+    "delivery": {
+      "type": "string",
+      "enum": ["debug", "telemetry", "critical"]
+    },
+    "started_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "UTC RFC3339 operation start. Null for instantaneous events."
+    },
+    "ended_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "UTC RFC3339 operation end. Null for instantaneous events."
+    },
+    "duration_ms": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Operation duration in milliseconds. Consistent with started_at/ended_at."
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC RFC3339 timestamp for when this record was emitted or observed."
+    },
+    "service": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": ["string", "null"]},
+        "instance_id": {"type": ["string", "null"]},
+        "environment": {"type": ["string", "null"]},
+        "host": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "correlation": {
+      "type": "object",
+      "properties": {
+        "trace_id": {"type": ["string", "null"]},
+        "span_id": {"type": ["string", "null"]},
+        "parent_span_id": {"type": ["string", "null"]},
+        "run_id": {"type": ["string", "null"]},
+        "job_id": {"type": ["string", "null"]},
+        "invocation_id": {"type": ["string", "null"]},
+        "asset_key": {"type": ["string", "null"]},
+        "partition_key": {"type": ["string", "null"]},
+        "branch": {"type": ["string", "null"]},
+        "table": {"type": ["string", "null"]},
+        "snapshot_id": {"type": ["string", "null"]},
+        "pipeline": {"type": ["string", "null"]},
+        "experiment_id": {"type": ["string", "null"]},
+        "request_id": {"type": ["string", "null"]},
+        "extra": {
+          "type": "object",
+          "description": "Producer-specific correlation keys that are not part of the canonical set."
+        }
+      },
+      "additionalProperties": false
+    },
+    "attributes": {
+      "type": "object",
+      "description": "Event-specific structured data. Values must be JSON serializable after normalization."
+    },
+    "error": {
+      "oneOf": [{"type": "null"}, {"$ref": "error-v1.schema.json"}],
+      "description": "Structured error details. Null unless the event failed."
+    },
+    "source": {
+      "oneOf": [{"type": "null"}, {"$ref": "source-payload-v1.schema.json"}],
+      "description": "Canonical source representation."
+    }
+  },
+  "additionalProperties": true
+}

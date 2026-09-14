@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phlohouse.dev/schemas/source-payload-v1.schema.json",
+  "title": "Phlo Event Source",
+  "description": "Canonical representation of the system/producer an event originated from.",
+  "type": "object",
+  "required": ["producer"],
+  "properties": {
+    "producer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Producer identifier, e.g. dagster, dbt, trino, or the application name for first-party events."
+    },
+    "producer_version": {"type": ["string", "null"]},
+    "kind": {
+      "type": ["string", "null"],
+      "description": "Source-native event kind, e.g. ASSET_MATERIALIZATION."
+    },
+    "raw_ref": {
+      "type": ["string", "null"],
+      "description": "Reference to the preserved raw payload, e.g. raw://<id>."
+    },
+    "adapter": {
+      "type": ["string", "null"],
+      "description": "Adapter that normalized this event, e.g. dagster.v1."
+    },
+    "ingested_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "UTC RFC3339 time the observer ingested the source payload."
+    }
+  },
+  "additionalProperties": false
+}

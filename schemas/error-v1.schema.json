@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phlohouse.dev/schemas/error-v1.schema.json",
+  "title": "Phlo Structured Error",
+  "type": "object",
+  "required": ["message"],
+  "properties": {
+    "code": {
+      "type": ["string", "null"],
+      "description": "Machine-readable error code, e.g. SCHEMA_NULL_VIOLATION."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "why": {
+      "type": ["string", "null"],
+      "description": "Concrete explanation of the failure cause."
+    },
+    "fix": {
+      "type": ["string", "null"],
+      "description": "Suggested remediation. May be null when no remediation is known."
+    },
+    "exception_type": {
+      "type": ["string", "null"],
+      "description": "Exception class name, e.g. SchemaError."
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "Whether retrying the operation may plausibly succeed."
+    },
+    "stacktrace": {
+      "type": ["string", "null"]
+    },
+    "details": {
+      "type": "object",
+      "description": "Structured machine-readable error details. Never arbitrary exception locals."
+    }
+  },
+  "additionalProperties": false
+}

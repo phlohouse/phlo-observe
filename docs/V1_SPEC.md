@@ -1,8 +1,8 @@
 # phlo-observe V1 Implementation Specification
 
-Status: **Proposed V1**  
-Audience: maintainers and implementation engineers  
-Primary implementation language: **Python 3.12+**  
+Status: **Proposed V1**
+Audience: maintainers and implementation engineers
+Primary implementation language: **Python 3.12+**
 Repository: `phlohouse/phlo-observe`
 
 ---
