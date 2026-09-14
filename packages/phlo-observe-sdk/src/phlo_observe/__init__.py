@@ -29,6 +29,7 @@ from phlo_observe.helpers import (
     asset_materialize,
     pipeline_run,
     quality_validate,
+    wap_promote,
 )
 from phlo_observe.logging_bridge import configure_logging
 
@@ -51,4 +52,5 @@ __all__ = [
     "quality_validate",
     "table_context",
     "wap_context",
+    "wap_promote",
 ]

@@ -1,0 +1,38 @@
+# OTel Collector: receive OTLP, forward to phlo-observer.
+# Enabled via `docker compose --profile otel up`.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+  transform/canonical:
+    # Forward structured log bodies; the observer's generic adapter wraps them.
+    log_statements: []
+
+exporters:
+  otlphttp/phlo:
+    # The observer's /v1/ingest/otlp endpoint accepts collector-forwarded
+    # OTLP JSON payloads.
+    endpoint: http://phlo-observer:8080
+    logs_endpoint: http://phlo-observer:8080/v1/ingest/otlp
+    headers:
+      Authorization: Bearer ${env:PHLO_OBSERVER_INGEST_TOKEN}
+    retry_on_failure:
+      enabled: true
+      initial_interval: 2s
+      max_interval: 30s
+      max_elapsed_time: 5m
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phlo]

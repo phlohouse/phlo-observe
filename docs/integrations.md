@@ -18,11 +18,18 @@ Or emit canonical events straight to the observer over HTTP:
 from observe_core.config import ObserveConfig
 from observe_core.runtime import configure
 
-configure(ObserveConfig(
-    service_name="my-service",
-    drains=[{"type": "http", "endpoint": "http://observer:8080/v1/events",
-             "api_key": "<ingest-token>"}],
-))
+configure(
+    ObserveConfig(
+        service_name="my-service",
+        drains=[
+            {
+                "type": "http",
+                "endpoint": "http://observer:8080/v1/events",
+                "api_key": "<ingest-token>",
+            }
+        ],
+    )
+)
 ```
 
 ## Dagster

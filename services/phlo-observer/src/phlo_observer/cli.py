@@ -96,7 +96,7 @@ def config() -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True))
 
 
-def _alembic_config() -> Config:
+def _alembic_config(database_url: str | None = None) -> Config:
     """Alembic Config pointing at the packaged migrations."""
     from pathlib import Path
 
@@ -107,7 +107,7 @@ def _alembic_config() -> Config:
     alembic_dir = Path(__file__).resolve().parent.parent.parent / "migrations"
     cfg = Config(str(alembic_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(alembic_dir))
-    cfg.set_main_option("sqlalchemy.url", load_settings().database_url)
+    cfg.set_main_option("sqlalchemy.url", database_url or load_settings().database_url)
     return cfg
 
 

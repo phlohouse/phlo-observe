@@ -59,6 +59,9 @@ class ObserverSettings(BaseSettings):
     otlp_endpoint: str | None = None
     """Optional OTLP HTTP endpoint for forwarding normalized events."""
 
+    run_migrations: bool = False
+    """When true, apply Alembic migrations to head during startup."""
+
     auth_optional_dev: bool = True
     """Documented dev escape hatch; set false to hard-fail without tokens."""
 

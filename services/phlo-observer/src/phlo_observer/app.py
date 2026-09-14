@@ -66,6 +66,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if settings.run_migrations:
+            await asyncio.to_thread(_run_migrations, settings)
         engine = make_engine(settings)
         factory = make_sessionmaker(engine)
         app.state.engine = engine
@@ -399,6 +401,17 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _run_migrations(settings: ObserverSettings) -> None:
+    """Apply Alembic migrations to head (startup path, sync thread)."""
+    from alembic import command  # noqa: PLC0415 - keep alembic off the hot path
+
+    from phlo_observer.cli import _alembic_config  # noqa: PLC0415
+
+    cfg = _alembic_config(settings.database_url)
+    command.upgrade(cfg, "head")
+    logger.info("database migrated to head")
 
 
 def _http_error(code: int, message: str) -> HTTPException:
