@@ -13,3 +13,5 @@ Start with the [architecture](architecture.md) overview or the
 such as WAP promotion for visibility, but V1 is not by itself a validated
 authoritative electronic audit trail for GxP records — see
 [architecture](architecture.md#audit-versus-observability).
+
+For the planned post-V1 evolution, see the [V2 specification](V2_SPEC.md). V2 keeps the V1 contracts and adds a state engine, relationship graph, runtime lineage, baselines and insights, incident/change intelligence, agent-safe query interfaces, stronger fleet ingestion, and evidence-driven scale/performance options.
