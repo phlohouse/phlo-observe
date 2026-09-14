@@ -19,6 +19,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("config", help="print resolved configuration as JSON")
     sub.add_parser("stats", help="print internal counters after a flush")
 
+    replay_p = sub.add_parser(
+        "replay-spool", help="replay a local critical-event spool into the configured drains"
+    )
+    replay_p.add_argument("--dir", required=True, help="spool directory path")
+    replay_p.add_argument("--max-events", type=int, default=None)
+
     args = parser.parse_args(argv)
 
     if args.command == "config":
@@ -46,6 +52,25 @@ def main(argv: list[str] | None = None) -> int:
         from observe_core import get_stats
 
         print(json.dumps(get_stats(), indent=2, default=str))
+        return 0
+
+    if args.command == "replay-spool":
+        from pathlib import Path
+
+        from observe_core.config import ObserveSettings
+        from observe_core.runtime import Runtime
+        from observe_core.spool import Spool
+
+        settings = ObserveSettings()
+        drains = [Runtime._build_drain(cfg) for cfg in settings.drains]
+        if not drains:
+            print("no drains configured", file=sys.stderr)
+            return 1
+        spool = Spool(Path(args.dir))
+        replayed = spool.replay(drains[0], max_events=args.max_events)
+        for drain in drains:
+            drain.close()
+        print(json.dumps({"replayed": replayed}))
         return 0
 
     return 1
