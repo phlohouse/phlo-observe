@@ -97,14 +97,32 @@ def config() -> None:
 
 
 def _alembic_config(database_url: str | None = None) -> Config:
-    """Alembic Config pointing at the packaged migrations."""
+    """Alembic Config pointing at the packaged migrations.
+
+    Resolution order: ``PHLO_OBSERVER_MIGRATIONS_DIR``, then the source-tree
+    layout (``services/phlo-observer/migrations``), then the Docker image
+    layout (``/app/migrations``).
+    """
+    import os
     from pathlib import Path
 
     from alembic.config import Config
 
     from phlo_observer.settings import load_settings
 
-    alembic_dir = Path(__file__).resolve().parent.parent.parent / "migrations"
+    candidates = [
+        Path(os.environ["PHLO_OBSERVER_MIGRATIONS_DIR"])
+        if os.environ.get("PHLO_OBSERVER_MIGRATIONS_DIR")
+        else None,
+        Path(__file__).resolve().parent.parent.parent / "migrations",
+        Path("/app/migrations"),
+    ]
+    alembic_dir = next(
+        (c for c in candidates if c is not None and (c / "alembic.ini").exists()),
+        None,
+    )
+    if alembic_dir is None:
+        raise FileNotFoundError("alembic.ini not found; set PHLO_OBSERVER_MIGRATIONS_DIR")
     cfg = Config(str(alembic_dir / "alembic.ini"))
     cfg.set_main_option("script_location", str(alembic_dir))
     cfg.set_main_option("sqlalchemy.url", database_url or load_settings().database_url)

@@ -31,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, sdk, contract, integration]
+        suite: [core, sdk, contract, integration, performance]
         include:
           - suite: core
             testpaths: packages/observe-core/tests
@@ -41,6 +41,8 @@ jobs:
             testpaths: tests/contract
           - suite: integration
             testpaths: tests/integration
+          - suite: performance
+            testpaths: tests/performance
     services:
       postgres:
         image: postgres:16
