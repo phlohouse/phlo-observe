@@ -1,0 +1,36 @@
+[project]
+name = "phlo-observer"
+version = "1.0.0"
+description = "Central ingestion, normalization, correlation, persistence and query service for phlo-observe."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Phlo" }]
+dependencies = [
+    "observe-core",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "httpx>=0.27",
+    "prometheus-client>=0.20",
+    "orjson>=3.10",
+    "typer>=0.12",
+]
+
+[project.scripts]
+phlo-observer = "phlo_observer.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "phlo_observer"
+
+[tool.uv.sources]
+observe-core = { workspace = true }

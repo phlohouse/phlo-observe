@@ -1,0 +1,30 @@
+[project]
+name = "phlo-observe"
+version = "1.0.0"
+description = "Phlo-specific observability SDK: domain contexts, typed event attributes and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Phlo" }]
+dependencies = [
+    "observe-core",
+    "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+dagster = ["dagster>=1.8"]
+dlt = ["dlt>=1.0"]
+pandera = ["pandera>=0.20"]
+trino = ["trino>=0.330"]
+all = ["phlo-observe[dagster,dlt,pandera,trino]"]
+
+[build-system]
+requires = ["uv_build>=0.8,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "src"
+module-name = "phlo_observe"
+
+[tool.uv.sources]
+observe-core = { workspace = true }

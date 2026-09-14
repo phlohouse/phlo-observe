@@ -1,0 +1,58 @@
+name: phlo-observe
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-phlo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-phlo}
+      POSTGRES_DB: ${POSTGRES_DB:-phlo_observer}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-phlo} -d $${POSTGRES_DB:-phlo_observer}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  phlo-observer:
+    build:
+      context: .
+      dockerfile: services/phlo-observer/Dockerfile
+    image: phlo-observer:dev
+    environment:
+      PHLO_OBSERVER_HOST: 0.0.0.0
+      PHLO_OBSERVER_PORT: "8080"
+      PHLO_OBSERVER_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-phlo}:${POSTGRES_PASSWORD:-phlo}@postgres:5432/${POSTGRES_DB:-phlo_observer}
+      PHLO_OBSERVER_INGEST_TOKENS: ${PHLO_OBSERVER_INGEST_TOKENS:-dev-ingest-token}
+      PHLO_OBSERVER_READ_TOKENS: ${PHLO_OBSERVER_READ_TOKENS:-dev-read-token}
+      PHLO_OBSERVER_RUN_MIGRATIONS: "true"
+      PHLO_OBSERVER_LOG_LEVEL: ${PHLO_OBSERVER_LOG_LEVEL:-INFO}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/live').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    profiles: ["otel"]
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./examples/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "4317:4317"
+    depends_on:
+      - phlo-observer
+
+volumes:
+  pgdata:

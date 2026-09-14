@@ -1,0 +1,136 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_LOCKED: "1"
+
+jobs:
+  quality:
+    name: lint / format / types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv sync --locked --all-packages
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync ty check
+
+  test:
+    name: pytest (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, sdk, contract, integration]
+        include:
+          - suite: core
+            testpaths: packages/observe-core/tests
+          - suite: sdk
+            testpaths: packages/phlo-observe-sdk/tests
+          - suite: contract
+            testpaths: tests/contract
+          - suite: integration
+            testpaths: tests/integration
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: phlo
+          POSTGRES_PASSWORD: phlo
+          POSTGRES_DB: phlo_observer_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U phlo -d phlo_observer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PHLO_OBSERVER_TEST_DATABASE_URL: postgresql+asyncpg://phlo:phlo@localhost:5432/phlo_observer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv sync --locked --all-packages
+      - run: uv run --no-sync pytest ${{ matrix.testpaths }} -x -q
+
+  test-observer:
+    name: pytest (observer)
+    runs-on: ubuntu-latest
+    needs: quality
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: phlo
+          POSTGRES_PASSWORD: phlo
+          POSTGRES_DB: phlo_observer_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U phlo -d phlo_observer_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PHLO_OBSERVER_TEST_DATABASE_URL: postgresql+asyncpg://phlo:phlo@localhost:5432/phlo_observer_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv sync --locked --all-packages
+      - run: uv run --no-sync pytest services/phlo-observer/tests -x -q
+
+  build-packages:
+    name: build python packages
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv sync --locked --all-packages
+      - run: uv build --all-packages --out-dir dist
+
+  docker-observer:
+    name: observer image build + smoke
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/phlo-observer/Dockerfile
+          load: true
+          tags: phlo-observer:ci
+      - name: smoke test
+        run: |
+          docker run -d --name observer -p 8080:8080 \
+            -e PHLO_OBSERVER_DATABASE_URL="postgresql+asyncpg://x:x@localhost:1/x" \
+            phlo-observer:ci
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health/live; then exit 0; fi
+            sleep 1
+          done
+          docker logs observer
+          exit 1
+
+  dependency-scan:
+    name: dependency vulnerability scan
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv sync --locked --all-packages
+      - name: audit
+        run: uvx pypa-audit --desc || true
+        continue-on-error: true

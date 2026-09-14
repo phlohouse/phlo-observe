@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.whl
+
+# Tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ty_cache/
+
+# Local env / secrets
+.env
+*.local
+
+# Spool / runtime artifacts
+spool/
+*.jsonl
+!tests/**/*.jsonl
+
+# OS
+.DS_Store
