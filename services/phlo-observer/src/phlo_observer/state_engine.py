@@ -237,6 +237,44 @@ def apply_run_event(state: dict[str, Any], event: dict[str, Any]) -> None:
 # -- entity registry --------------------------------------------------------
 
 
+def _branch_attributes(event: dict[str, Any]) -> dict[str, Any]:
+    """WAP/Nessie lifecycle fields for a branch entity (spec §11, §9.2).
+
+    Branch state lives in ``Entity.attributes``: create/validate/promote/
+    reject/cleanup verbs update it, and ``iceberg.commit`` records the last
+    commit observed on the branch. Last-write-wins per field; replay order
+    matters only within a branch's own history, which is chronological.
+    """
+    name = str(event.get("event") or "")
+    attrs = event.get("attributes") or {}
+    outcome = event.get("outcome")
+    raw_observed = event.get("observed_at")
+    observed = raw_observed.isoformat() if hasattr(raw_observed, "isoformat") else raw_observed
+    if name in ("wap.branch.create", "nessie.branch.create"):
+        out: dict[str, Any] = {"state": "open", "created_at": observed}
+        if attrs.get("base_branch"):
+            out["base_branch"] = attrs["base_branch"]
+        return out
+    if name in ("wap.validate", "nessie.validate") or name.endswith(".validate"):
+        return {"validation": outcome, "validated_at": observed}
+    if name.endswith(".promote"):
+        return {
+            "state": "promoted" if outcome == "success" else "promotion_failed",
+            "promoted_at": observed,
+            "target": attrs.get("target"),
+        }
+    if name.endswith(".reject"):
+        return {"state": "rejected", "rejected_at": observed}
+    if name.endswith(".cleanup"):
+        return {"state": "cleaned", "cleaned_at": observed}
+    if name.endswith(".commit"):
+        out = {"last_commit_at": observed}
+        if attrs.get("snapshot_id"):
+            out["last_snapshot_id"] = attrs["snapshot_id"]
+        return out
+    return {}
+
+
 def entity_rows(event: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Entities touched by one event: ``entity_id -> partial row state``."""
     entities: dict[str, dict[str, Any]] = {}
@@ -251,6 +289,10 @@ def entity_rows(event: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 "derived_from": [],
             },
         )
+        if role == "branch":
+            updates = _branch_attributes(event)
+            if updates:
+                entities[eid]["attributes"] = updates
     return entities
 
 

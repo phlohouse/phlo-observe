@@ -13,8 +13,19 @@ from sqlalchemy import delete
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from phlo_observer.models import Event, RawEvent, Run
+from phlo_observer.models import (
+    AgentAnalysis,
+    Event,
+    Incident,
+    IngestFailure,
+    Insight,
+    RawEvent,
+    Run,
+)
 from phlo_observer.settings import ObserverSettings
+
+_TERMINAL_INSIGHT_STATES = ("resolved", "suppressed", "expired")
+_TERMINAL_INCIDENT_STATES = ("resolved", "suppressed")
 
 
 @dataclass
@@ -24,6 +35,10 @@ class RetentionReport:
     raw_events: int = 0
     events: int = 0
     runs: int = 0
+    insights: int = 0
+    incidents: int = 0
+    ingest_failures: int = 0
+    analyses: int = 0
 
 
 async def run_retention_once(
@@ -42,6 +57,32 @@ async def run_retention_once(
         run_cutoff = now - dt.timedelta(days=settings.run_retention_days)
         result = await session.execute(delete(Run).where(Run.updated_at <= run_cutoff))
         report.runs = _rowcount(result)
+        # Terminal-state insights/incidents age out on the run window; open
+        # items are live signal and never deleted by retention. Quarantined
+        # payloads and recorded analyses expire on the same window so failed
+        # payloads cannot be replayed forever.
+        result = await session.execute(
+            delete(Insight).where(
+                Insight.state.in_(_TERMINAL_INSIGHT_STATES),
+                Insight.updated_at <= run_cutoff,
+            )
+        )
+        report.insights = _rowcount(result)
+        result = await session.execute(
+            delete(Incident).where(
+                Incident.state.in_(_TERMINAL_INCIDENT_STATES),
+                Incident.updated_at <= run_cutoff,
+            )
+        )
+        report.incidents = _rowcount(result)
+        result = await session.execute(
+            delete(IngestFailure).where(IngestFailure.received_at <= run_cutoff)
+        )
+        report.ingest_failures = _rowcount(result)
+        result = await session.execute(
+            delete(AgentAnalysis).where(AgentAnalysis.created_at <= run_cutoff)
+        )
+        report.analyses = _rowcount(result)
     return report
 
 
@@ -72,6 +113,10 @@ async def retention_loop(
                         "raw_events_deleted": report.raw_events,
                         "events_deleted": report.events,
                         "runs_deleted": report.runs,
+                        "insights_deleted": report.insights,
+                        "incidents_deleted": report.incidents,
+                        "ingest_failures_deleted": report.ingest_failures,
+                        "analyses_deleted": report.analyses,
                     },
                 )
         except Exception:

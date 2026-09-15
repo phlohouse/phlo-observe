@@ -139,6 +139,64 @@ async def test_retention_cleanup(session_factory: Any, database_url: str, make_e
 
 
 @pytest.mark.asyncio
+async def test_retention_terminal_insights_incidents(
+    session_factory: Any, database_url: str
+) -> None:
+    """Terminal insights/incidents age out; open ones are live signal."""
+    from phlo_observer.models import Incident, Insight
+
+    settings = ObserverSettings(database_url=database_url, run_retention_days=365)
+    old = utcnow() - dt.timedelta(days=400)
+
+    def _insight(state: str) -> Insight:
+        return Insight(
+            insight_id=uuid.uuid4(),
+            rule_id="r",
+            rule_version=1,
+            title="t",
+            severity="warn",
+            state=state,
+            evidence_event_ids=[],
+            evidence_metric_ids=[],
+            created_at=old,
+            updated_at=old,
+            attributes={},
+        )
+
+    def _incident(state: str) -> Incident:
+        return Incident(
+            incident_id=uuid.uuid4(),
+            title="i",
+            state=state,
+            severity="warn",
+            entities=[],
+            insight_ids=[],
+            timeline={},
+            impact={},
+            attributes={},
+            updated_at=old,
+        )
+
+    async with session_factory() as session, session.begin():
+        session.add(_insight("resolved"))
+        session.add(_insight("open"))
+        session.add(_incident("resolved"))
+        session.add(_incident("open"))
+    report = await run_retention_once(session_factory, settings)
+    assert report.insights == 1
+    assert report.incidents == 1
+    async with session_factory() as session:
+        remaining_i = (
+            await session.execute(text("select count(*) from observe_insights"))
+        ).scalar()
+        remaining_c = (
+            await session.execute(text("select count(*) from observe_incidents"))
+        ).scalar()
+    assert remaining_i == 1
+    assert remaining_c == 1
+
+
+@pytest.mark.asyncio
 async def test_alembic_upgrade_and_downgrade(database_url: str) -> None:
     """Real migration: empty database -> head -> down to base -> head again."""
     import sys

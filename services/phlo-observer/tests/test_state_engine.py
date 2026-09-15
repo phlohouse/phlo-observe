@@ -317,3 +317,69 @@ class TestRebuildCLI:
         result = CliRunner().invoke(app, ["rebuild-projections", "--help"])
         assert result.exit_code == 0
         assert "--run" in result.output
+
+
+@pytest.mark.asyncio
+class TestBranchProjection:
+    async def test_branch_lifecycle_attributes(self, client: Any, session_factory: Any) -> None:
+        await _post(
+            client,
+            [
+                _event(
+                    event="wap.branch.create",
+                    run_id=None,
+                    branch="run-abc",
+                    attributes={"base_branch": "main"},
+                ),
+                _event(
+                    event="wap.promote",
+                    run_id=None,
+                    branch="run-abc",
+                    outcome="success",
+                    attributes={"target": "main"},
+                    observed_at="2025-01-01T01:00:00Z",
+                ),
+            ],
+        )
+        async with session_factory() as session:
+            ent = await session.get(Entity, "branch://dagster/run-abc")
+        assert ent is not None
+        assert ent.attributes["state"] == "promoted"
+        assert ent.attributes["base_branch"] == "main"
+        assert ent.attributes["target"] == "main"
+
+    async def test_branch_rejected_state(self, client: Any, session_factory: Any) -> None:
+        await _post(
+            client,
+            [
+                _event(event="wap.branch.create", run_id=None, branch="r2"),
+                _event(
+                    event="wap.reject",
+                    run_id=None,
+                    branch="r2",
+                    observed_at="2025-01-01T02:00:00Z",
+                ),
+            ],
+        )
+        async with session_factory() as session:
+            ent = await session.get(Entity, "branch://dagster/r2")
+        assert ent.attributes["state"] == "rejected"
+
+    async def test_branch_state_survives_rebuild(self, client: Any, session_factory: Any) -> None:
+        await _post(
+            client,
+            [
+                _event(event="wap.branch.create", run_id=None, branch="r3"),
+                _event(
+                    event="wap.cleanup",
+                    run_id=None,
+                    branch="r3",
+                    observed_at="2025-01-01T03:00:00Z",
+                ),
+            ],
+        )
+        async with session_factory() as session, session.begin():
+            await rebuild_projections(session)
+        async with session_factory() as session:
+            ent = await session.get(Entity, "branch://dagster/r3")
+        assert ent.attributes["state"] == "cleaned"

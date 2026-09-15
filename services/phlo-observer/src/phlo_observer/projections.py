@@ -76,7 +76,7 @@ async def _upsert_entities(
                         display_name=state["display_name"],
                         first_seen_at=now,
                         last_seen_at=now,
-                        attributes={},
+                        attributes=state.get("attributes") or {},
                         provenance={
                             "derived_from": [event_id],
                             "rule": se.ENTITY_RULE,
@@ -92,6 +92,9 @@ async def _upsert_entities(
         if existing is not None:
             if now > (existing.last_seen_at or now):
                 existing.last_seen_at = now
+            updates = state.get("attributes")
+            if updates:
+                existing.attributes = {**(existing.attributes or {}), **updates}
             refs = (existing.provenance or {}).get("derived_from") or []
             if event_id not in refs and len(refs) < se._MAX_DERIVED_FROM:
                 existing.provenance = {
@@ -286,6 +289,8 @@ async def rebuild_projections(
                 eid, {**est, "first_seen_at": None, "last_seen_at": None}
             )
             se._record(target, event)
+            if est.get("attributes"):
+                target["attributes"] = {**(target.get("attributes") or {}), **est["attributes"]}
             observed = event.get("observed_at")
             if observed:
                 if target["first_seen_at"] is None or observed < target["first_seen_at"]:
@@ -323,12 +328,15 @@ async def rebuild_projections(
     for eid, state in entity_states.items():
         first = state.get("first_seen_at") or now
         last = state.get("last_seen_at") or now
+        merged_attrs = dict(state.get("attributes") or {})
         if run_id:
-            # Scoped rebuild: keep history outside this run's window.
+            # Scoped rebuild: keep history outside this run's window and
+            # merge attribute updates rather than replacing them.
             existing = await session.get(Entity, eid)
             if existing is not None:
                 first = min(x for x in (existing.first_seen_at, first) if x)
                 last = max(x for x in (existing.last_seen_at, last) if x)
+                merged_attrs = {**(existing.attributes or {}), **merged_attrs}
         await session.merge(
             Entity(
                 entity_id=eid,
@@ -336,7 +344,7 @@ async def rebuild_projections(
                 display_name=state["display_name"],
                 first_seen_at=first,
                 last_seen_at=last,
-                attributes={},
+                attributes=merged_attrs,
                 provenance=se.provenance(state, se.ENTITY_RULE, se.ENTITY_RULE_VERSION, now),
             )
         )
