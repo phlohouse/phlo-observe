@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from phlo_observer.models import Incident, IngestFailure, Insight
 from phlo_observer.stream import StreamHub, sse_encode
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 def _event(
@@ -243,3 +243,42 @@ class TestRegistryEndpoints:
         assert listed.json()["items"][0]["model"] == "test-model"
         missing = await client.post("/v2/analyses", json={"model": "m"})
         assert missing.status_code == 400
+
+
+@pytest.mark.asyncio
+class TestArchiveRestore:
+    async def test_archive_restore_roundtrip(
+        self,
+        client: Any,
+        session_factory: Any,
+        database_url: str,
+        tmp_path: Any,
+        monkeypatch: Any,
+    ) -> None:
+        import asyncio
+
+        from phlo_observer.cli import app
+        from phlo_observer.models import Event
+        from typer.testing import CliRunner
+
+        await client.post("/v1/events", json=[_event(run_id="arch-1")])
+        out = tmp_path / "events.jsonl"
+        monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+        # The CLI calls asyncio.run internally; run it off the test loop.
+        result = await asyncio.to_thread(CliRunner().invoke, app, ["archive", str(out)])
+        assert result.exit_code == 0, result.output
+        assert "archived" in result.output
+
+        async with session_factory() as session, session.begin():
+            await session.execute(text("delete from events where run_id = 'arch-1'"))
+            await session.execute(text("delete from runs where run_id = 'arch-1'"))
+
+        result = await asyncio.to_thread(CliRunner().invoke, app, ["restore", str(out)])
+        assert result.exit_code == 0, result.output
+        async with session_factory() as session:
+            rows = (
+                (await session.execute(select(Event).where(Event.run_id == "arch-1")))
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
