@@ -71,6 +71,11 @@ class ObserverSettings(BaseSettings):
     metrics_public: bool = False
     """When False, /metrics requires a read token (if read tokens are set)."""
 
+    stream_notify: bool = True
+    """Republish this instance's stream messages to other replicas via
+    Postgres LISTEN/NOTIFY so SSE clients see every committed change
+    regardless of which instance they connected to (spec §26/§38)."""
+
     docs_enabled: bool = True
     """Serve /docs and /openapi.json. Disable for hardened deployments."""
 

@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import alerts, insights, metrics, projections
+from phlo_observer import alerts, insights, metrics, notify, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run
 from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
@@ -163,6 +163,7 @@ async def persist_events(
     stream: Any = None,
     alert_urls: list[str] | None = None,
     alert_tasks: set[Any] | None = None,
+    instance_id: str | None = None,
 ) -> IngestResult:
     """Insert canonical events idempotently and update run projections.
 
@@ -272,28 +273,45 @@ async def persist_events(
                 insight_state = await insights.BatchState.load(session, ordered_events)
                 await projections.apply_events_batch(session, accepted_rows)
 
+                # Every locally-published message is also collected for one
+                # pg_notify at flush: other replicas' SSE hubs republish them
+                # after commit (spec §26/§38). ``instance_id`` tags the origin
+                # so the publishing instance doesn't double-deliver.
+                pending_notifications: list[dict[str, Any]] = []
+
+                def _publish(kind: str, data: dict[str, Any]) -> None:
+                    if stream is not None:
+                        stream.publish(kind, data)
+                    pending_notifications.append({"kind": kind, "data": data})
+
+                # A replica with no local subscribers still emits notifications
+                # for other replicas (``instance_id``), so ``on_insight`` is
+                # built whenever any sink exists.
                 on_insight = None
-                if stream is not None or (alert_urls and alert_tasks is not None):
+                if (
+                    stream is not None
+                    or instance_id is not None
+                    or (alert_urls and alert_tasks is not None)
+                ):
 
                     async def on_insight(insight: Any, incident: Any) -> None:
-                        if stream is not None:
-                            stream.publish(
-                                "insight.opened",
+                        _publish(
+                            "insight.opened",
+                            {
+                                "insight_id": str(insight.insight_id),
+                                "rule": insight.rule_id,
+                                "entity": insight.entity_id,
+                                "severity": insight.severity,
+                            },
+                        )
+                        if incident is not None:
+                            _publish(
+                                "incident.updated",
                                 {
-                                    "insight_id": str(insight.insight_id),
-                                    "rule": insight.rule_id,
-                                    "entity": insight.entity_id,
-                                    "severity": insight.severity,
+                                    "incident_id": str(incident.incident_id),
+                                    "state": incident.state,
                                 },
                             )
-                            if incident is not None:
-                                stream.publish(
-                                    "incident.updated",
-                                    {
-                                        "incident_id": str(incident.incident_id),
-                                        "state": incident.state,
-                                    },
-                                )
                         if alert_urls and alert_tasks is not None:
                             await alerts.notify(
                                 alert_urls,
@@ -313,13 +331,12 @@ async def persist_events(
                     # Insights evaluate against baselines BEFORE this event's
                     # sample joins them — an observation must not judge itself.
                     await insight_state.step(session, event, on_insight=on_insight)
-                if stream is not None:
-                    for row in correlated:
-                        if row.run_id:
-                            stream.publish(
-                                "run.changed",
-                                {"run_id": row.run_id, "event": row.event},
-                            )
+                for row in correlated:
+                    if row.run_id:
+                        _publish(
+                            "run.changed",
+                            {"run_id": row.run_id, "event": row.event},
+                        )
                 # Register contract schemas seen on envelopes (spec §8.3):
                 # an event carrying contract.schema_id upserts the registry
                 # row so schemas stay queryable without a separate publish.
@@ -342,6 +359,10 @@ async def persist_events(
                         )
                         .on_conflict_do_nothing(index_elements=["schema_id"])
                     )
+                if instance_id is not None:
+                    packed = notify.pack_notify(instance_id, pending_notifications)
+                    if packed is not None:
+                        await notify.emit_notify(session, packed)
                 await session.flush()
         except Exception:
             # Fail-open covers code bugs too, not just DB errors: derived

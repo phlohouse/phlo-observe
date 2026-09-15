@@ -36,7 +36,7 @@ from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from phlo_observer import __version__, query_v2
+from phlo_observer import __version__, notify, query_v2
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_admin_token, require_ingest_token, require_read_token
@@ -129,11 +129,21 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             )
         )
         app.state.retention_task = retention_task
+        bridge = None
+        if settings.stream_notify:
+            bridge = notify.NotifyBridge(
+                settings.database_url,
+                app.state.stream,
+                instance_id=app.state.instance_id,
+            )
+            bridge.start()
         try:
             yield
         finally:
             stop.set()
             retention_task.cancel()
+            if bridge is not None:
+                await bridge.stop()
             with contextlib.suppress(asyncio.CancelledError):
                 await retention_task
             # Bound in-flight OTLP forwards: give them a moment, then cancel.
@@ -161,6 +171,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     app.state.forward_tasks = set()
     app.state.alert_tasks = set()
     app.state.stream = StreamHub()
+    app.state.instance_id = notify.new_instance_id()
 
     @app.exception_handler(InvalidQuery)
     async def invalid_query_handler(request: Request, exc: InvalidQuery) -> JSONResponse:
@@ -274,6 +285,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 stream=app.state.stream,
                 alert_urls=settings.alert_webhook_urls,
                 alert_tasks=app.state.alert_tasks,
+                instance_id=app.state.instance_id,
             )
             PERSIST_DURATION.observe(time.perf_counter() - start)
             if settings.otlp_endpoint and result.event_ids:
