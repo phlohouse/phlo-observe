@@ -41,10 +41,11 @@ jobs:
         run: |
           # Tag name is `phlo-observer/v<version>`; the image tag is the version.
           repo="ghcr.io/${GITHUB_REPOSITORY,,}/phlo-observer"
+          version="${RELEASE_TAG##*/v}"
           {
-            echo "version=${RELEASE_TAG##*/}"
+            echo "version=$version"
             echo "tags<<EOF"
-            echo "$repo:${RELEASE_TAG##*/}"
+            echo "$repo:$version"
             [ "$WANT_LATEST" = "true" ] && echo "$repo:latest"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
