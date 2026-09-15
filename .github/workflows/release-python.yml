@@ -31,6 +31,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # relx refreshes uv.lock when it bumps package versions.
+      - uses: jdx/mise-action@v2
+
       - name: Install relx for the pending-release check
         run: |
           curl -fsSL -o "$RUNNER_TEMP/relx" \
