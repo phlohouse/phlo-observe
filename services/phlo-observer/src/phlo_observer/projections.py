@@ -13,10 +13,9 @@ from typing import Any
 from observe_core.timestamps import utcnow
 from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import baselines, incidents, insights
+from phlo_observer import insights
 from phlo_observer import state_engine as se
 from phlo_observer.models import (
     Asset,
@@ -71,45 +70,73 @@ def _event_view(row: Event) -> dict[str, Any]:
     }
 
 
-async def _apply_asset(
-    session: AsyncSession, event: dict[str, Any], entity_id: str, now: Any
+async def _flush_assets(
+    session: AsyncSession,
+    pending: list[tuple[dict[str, Any], str, Any]],
+    now: Any,
 ) -> None:
-    corr = event.get("correlation") or {}
-    asset_key = corr.get("asset_key") or entity_id.split("://", 1)[-1]
-    row = await session.get(Asset, entity_id, with_for_update=True)
-    if row is None:
-        try:
-            async with session.begin_nested():
-                row = Asset(
-                    entity_id=entity_id,
-                    asset_key=asset_key,
-                    status="unknown",
-                    updated_at=now,
-                    attributes={},
-                    provenance={},
-                )
-                session.add(row)
-        except IntegrityError:
-            row = await session.get(Asset, entity_id, with_for_update=True)
-            if row is None:  # pragma: no cover - defensive
-                return
-    state = {
-        "entity_id": row.entity_id,
-        "asset_key": row.asset_key,
-        "status": row.status,
-        "last_materialized_at": row.last_materialized_at,
-        "last_event_at": row.last_event_at,
-        "freshness_sla_seconds": row.freshness_sla_seconds,
-        "attributes": row.attributes or {},
-        "derived_from": list((row.provenance or {}).get("derived_from") or []),
+    """Fold and persist asset state for a whole batch: 2 queries + K updates.
+
+    One ``INSERT .. ON CONFLICT DO NOTHING`` pre-creates missing rows, one
+    ``SELECT .. FOR UPDATE`` locks every touched asset, then events fold per
+    asset in arrival order. K = distinct assets in the batch, not events.
+    """
+    if not pending:
+        return
+    first_key: dict[str, str] = {}
+    for event, eid, _ in pending:
+        if eid not in first_key:
+            corr = event.get("correlation") or {}
+            first_key[eid] = corr.get("asset_key") or eid.split("://", 1)[-1]
+    eids = list(first_key)
+    await session.execute(
+        pg_insert(Asset)
+        .values(
+            [
+                {
+                    "entity_id": eid,
+                    "asset_key": first_key[eid],
+                    "status": "unknown",
+                    "updated_at": now,
+                    "attributes": {},
+                    "provenance": {},
+                }
+                for eid in eids
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["entity_id"])
+    )
+    rows = {
+        r.entity_id: r
+        for r in (
+            await session.execute(select(Asset).where(Asset.entity_id.in_(eids)).with_for_update())
+        ).scalars()
     }
-    se.apply_asset_event(state, event)
-    row.status = state["status"]
-    row.last_materialized_at = state["last_materialized_at"]
-    row.last_event_at = state["last_event_at"]
-    row.freshness_sla_seconds = state["freshness_sla_seconds"]
-    row.updated_at = now
-    row.provenance = se.provenance(state, se.ASSET_RULE, se.ASSET_RULE_VERSION, now)
+    states: dict[str, dict[str, Any]] = {}
+    for eid, row in rows.items():
+        states[eid] = {
+            "entity_id": row.entity_id,
+            "asset_key": row.asset_key,
+            "status": row.status,
+            "last_materialized_at": row.last_materialized_at,
+            "last_event_at": row.last_event_at,
+            "freshness_sla_seconds": row.freshness_sla_seconds,
+            "attributes": dict(row.attributes or {}),
+            "derived_from": list((row.provenance or {}).get("derived_from") or []),
+        }
+    for event, eid, _ in pending:
+        st = states.get(eid)
+        if st is not None:  # concurrent delete between insert and select
+            se.apply_asset_event(st, event)
+    for eid, st in states.items():
+        row = rows[eid]
+        row.status = st["status"]
+        row.last_materialized_at = st["last_materialized_at"]
+        row.last_event_at = st["last_event_at"]
+        row.freshness_sla_seconds = st["freshness_sla_seconds"]
+        row.attributes = st["attributes"]
+        row.updated_at = now
+        row.provenance = se.provenance(st, se.ASSET_RULE, se.ASSET_RULE_VERSION, now)
 
 
 def _accumulate(
@@ -292,17 +319,19 @@ async def apply_events_batch(session: AsyncSession, rows: list[Event]) -> None:
     entity_states: dict[str, dict[str, Any]] = {}
     edge_states: dict[tuple[str, str, str], dict[str, Any]] = {}
     pending_assets: list[tuple[dict[str, Any], str, Any]] = []
-    for row in rows:
+    # Fold in observed order: rebuild replays the same ordering, so
+    # incremental and rebuilt projections converge event for event.
+    ordered = sorted(rows, key=lambda r: (r.observed_at or r.received_at, r.event_id))
+    now = utcnow()
+    for row in ordered:
         event = _event_view(row)
         batch = se.derive(event)
-        now = row.received_at or utcnow()
         _accumulate(entity_states, edge_states, batch, event, str(row.event_id))
         if batch.asset_entity_id:
-            pending_assets.append((event, batch.asset_entity_id, now))
-    await _flush_entities(session, entity_states, utcnow())
-    await _flush_edges(session, edge_states, utcnow())
-    for event, eid, now in pending_assets:
-        await _apply_asset(session, event, eid, now)
+            pending_assets.append((event, batch.asset_entity_id, row.received_at or now))
+    await _flush_entities(session, entity_states, now)
+    await _flush_edges(session, edge_states, now)
+    await _flush_assets(session, pending_assets, now)
 
 
 async def apply_event(session: AsyncSession, row: Event) -> None:
@@ -424,6 +453,9 @@ async def rebuild_projections(
     asset_states: dict[str, dict[str, Any]] = {}
     edge_states: dict[tuple[str, str, str], dict[str, Any]] = {}
 
+    # Insight state shares the projection's asset_states dict: BatchState.step
+    # folds each event after evaluating it, so both consume the same fold.
+    insight_state = insights.BatchState.empty(asset_states)
     rows = (await session.execute(stmt)).scalars()
     for row in rows:
         event = _event_view(row)
@@ -446,16 +478,12 @@ async def rebuild_projections(
                     target["first_seen_at"] = observed
                 if target["last_seen_at"] is None or observed > target["last_seen_at"]:
                     target["last_seen_at"] = observed
-        # Insight pass runs before this event's own asset/baseline fold —
-        # the same ordering the incremental path uses, so both converge.
         if not run_id:
-            findings = await insights.evaluate(session, event, asset_states=asset_states)
-            if findings:
-                for insight in await insights.record_findings(session, event, findings):
-                    await incidents.group_insight(session, insight)
-            await insights.resolve_for_event(session, event)
-            counts["baselines"] += await baselines.update_baselines(session, event)
-        if batch.asset_entity_id:
+            # The shared insight pass: evaluate -> record -> group -> resolve
+            # -> baselines -> asset fold, identical to incremental ingest.
+            await insight_state.step(session, event)
+        elif batch.asset_entity_id:
+            # Scoped rebuild replays no insight pass; the asset fold applies.
             corr = event.get("correlation") or {}
             astate = asset_states.setdefault(
                 batch.asset_entity_id,
@@ -578,6 +606,7 @@ async def rebuild_projections(
         )
         counts["runs"] += 1
     if not run_id:
+        counts["baselines"] = await session.scalar(select(func.count()).select_from(Baseline)) or 0
         counts["insights"] = await session.scalar(select(func.count()).select_from(Insight)) or 0
         counts["incidents"] = await session.scalar(select(func.count()).select_from(Incident)) or 0
     return counts

@@ -55,12 +55,18 @@ def _last_signal(incident: Incident) -> dt.datetime:
     return incident.updated_at or utcnow()
 
 
-async def group_insight(session: AsyncSession, insight: Insight) -> Incident | None:
+async def group_insight(
+    session: AsyncSession,
+    insight: Insight,
+    *,
+    open_incidents: list[Incident] | None = None,
+) -> Incident | None:
     """Attach an insight to an open incident, or create one if warranted.
 
     Only error/critical insights drive grouping (§17.1); informational
     findings stay as insights without incident overhead. ``None`` means no
-    incident was touched.
+    incident was touched. ``open_incidents`` optionally supplies the
+    batch's preloaded open rows instead of a per-insight query.
     """
     # Only error/critical insights open or join incidents; informational
     # findings stay as insights without incident overhead.
@@ -68,9 +74,14 @@ async def group_insight(session: AsyncSession, insight: Insight) -> Incident | N
         return None
     now = utcnow()
     signal = _signal_time(insight)
-    candidates = (
-        (await session.execute(select(Incident).where(Incident.state == "open"))).scalars().all()
-    )
+    if open_incidents is None:
+        candidates = list(
+            (await session.execute(select(Incident).where(Incident.state == "open")))
+            .scalars()
+            .all()
+        )
+    else:
+        candidates = [c for c in open_incidents if c.state == "open"]
     for incident in candidates:
         if signal - _last_signal(incident) > GROUPING_WINDOW:
             continue
@@ -99,6 +110,8 @@ async def group_insight(session: AsyncSession, insight: Insight) -> Incident | N
         updated_at=now,
     )
     session.add(incident)
+    if open_incidents is not None:
+        open_incidents.append(incident)
     return incident
 
 

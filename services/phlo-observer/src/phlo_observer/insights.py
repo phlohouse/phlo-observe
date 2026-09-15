@@ -13,12 +13,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import baselines as bl
+from phlo_observer import incidents
 from phlo_observer import state_engine as se
-from phlo_observer.models import Baseline, Insight
+from phlo_observer.models import Asset, Baseline, Insight
 
 # Rule registry: rule_id -> version. Bump a version when a rule's logic
 # changes materially; the pair is stamped on every insight it emits.
@@ -66,6 +67,145 @@ async def _baseline(session: AsyncSession, entity_id: str, metric: str) -> Basel
     ).scalar_one_or_none()
 
 
+@dataclass
+class BatchState:
+    """Preloaded state for one ordered batch of canonical events.
+
+    One bulk load replaces the per-event round trips the insight pass used
+    to make: baselines for every (entity, metric) the batch observes, all
+    open insights (dedupe + resolution), all open incidents (grouping) and
+    reducer state for every touched asset (freshness). The per-event loop
+    then runs entirely in memory; ORM mutations flush once at the end.
+    """
+
+    baselines: dict[tuple[str, str], Baseline]
+    open_by_dedupe: dict[str, Insight]
+    open_insights: list[Insight]
+    open_incidents: list[Any]
+    asset_states: dict[str, dict[str, Any]]
+
+    @classmethod
+    async def load(cls, session: AsyncSession, events: list[dict[str, Any]]) -> BatchState:
+        """Bulk-load every row the batch's insight pass can touch."""
+        keys = {
+            (entity_id, metric)
+            for event in events
+            for entity_id, metric, _ in bl.observations_of(event)
+        }
+        baseline_rows: dict[tuple[str, str], Baseline] = {}
+        if keys:
+            baseline_rows = {
+                (row.entity_id, row.metric): row
+                for row in (
+                    await session.execute(
+                        select(Baseline).where(
+                            tuple_(Baseline.entity_id, Baseline.metric).in_(keys)
+                        )
+                    )
+                ).scalars()
+            }
+        open_insights = list(
+            (await session.execute(select(Insight).where(Insight.state == "open"))).scalars()
+        )
+        open_incidents = list(
+            (
+                await session.execute(
+                    select(incidents.Incident).where(incidents.Incident.state == "open")
+                )
+            ).scalars()
+        )
+        return cls(
+            baselines=baseline_rows,
+            open_by_dedupe={i.dedupe_key: i for i in open_insights if i.dedupe_key},
+            open_insights=open_insights,
+            open_incidents=open_incidents,
+            asset_states=await _load_asset_states(session, events),
+        )
+
+    @classmethod
+    def empty(cls, asset_states: dict[str, dict[str, Any]] | None = None) -> BatchState:
+        """Empty overlays for a rebuild replaying into cleared tables."""
+        return cls({}, {}, [], [], asset_states if asset_states is not None else {})
+
+    async def step(
+        self,
+        session: AsyncSession,
+        event: dict[str, Any],
+        *,
+        on_insight: Any = None,
+    ) -> list[Insight]:
+        """One event through the insight pipeline, in observed order.
+
+        Evaluate -> record -> group -> resolve -> fold baselines -> fold the
+        asset overlay LAST, so an event never judges itself against state it
+        created. Ingest and rebuild share this sequence so both converge.
+        """
+        created: list[Insight] = []
+        findings = await evaluate(
+            session, event, asset_states=self.asset_states, baselines=self.baselines
+        )
+        if findings:
+            for insight in await record_findings(
+                session, event, findings, open_by_dedupe=self.open_by_dedupe
+            ):
+                if insight not in self.open_insights:
+                    self.open_insights.append(insight)
+                incident = await incidents.group_insight(
+                    session, insight, open_incidents=self.open_incidents
+                )
+                if on_insight is not None:
+                    await on_insight(insight, incident)
+                created.append(insight)
+        await resolve_for_event(session, event, open_insights=self.open_insights)
+        await bl.update_baselines(session, event, rows=self.baselines)
+        asset_eid = se.event_entities(event).get("asset")
+        if asset_eid:
+            astate = self.asset_states.setdefault(
+                asset_eid,
+                se.new_asset_state(
+                    asset_eid,
+                    (event.get("correlation") or {}).get("asset_key")
+                    or asset_eid.split("://", 1)[-1],
+                ),
+            )
+            se.apply_asset_event(astate, event)
+        return created
+
+
+async def _load_asset_states(
+    session: AsyncSession, events: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Seed asset reducer state from rows: one SELECT for the whole batch."""
+    ids = {eid for eid in (se.event_entities(e).get("asset") for e in events) if eid}
+    if not ids:
+        return {}
+    existing = {
+        a.entity_id: a
+        for a in (await session.execute(select(Asset).where(Asset.entity_id.in_(ids)))).scalars()
+    }
+    states: dict[str, dict[str, Any]] = {}
+    for event in events:
+        eid = se.event_entities(event).get("asset")
+        if not eid or eid in states:
+            continue
+        row = existing.get(eid)
+        if row is not None:
+            states[eid] = {
+                "entity_id": row.entity_id,
+                "asset_key": row.asset_key,
+                "status": row.status,
+                "last_materialized_at": row.last_materialized_at,
+                "last_event_at": row.last_event_at,
+                "freshness_sla_seconds": row.freshness_sla_seconds,
+                "attributes": dict(row.attributes or {}),
+                "derived_from": list((row.provenance or {}).get("derived_from") or []),
+            }
+        else:
+            corr = event.get("correlation") or {}
+            states[eid] = se.new_asset_state(eid, corr.get("asset_key") or eid.split("://", 1)[-1])
+    return states
+
+
 def _metrics_for(event: dict[str, Any]) -> list[tuple[str, str, float]]:
     return bl.observations_of(event)
 
@@ -75,12 +215,14 @@ async def evaluate(
     event: dict[str, Any],
     *,
     asset_states: dict[str, dict[str, Any]] | None = None,
+    baselines: dict[tuple[str, str], Baseline] | None = None,
 ) -> list[Finding]:
     """Run every rule against one canonical event; return new findings.
 
     ``asset_states`` optionally supplies in-memory asset reducer state
     (projection rebuild) so freshness checks read the fold instead of rows
-    that have not been flushed yet.
+    that have not been flushed yet. ``baselines`` optionally supplies the
+    preloaded (entity, metric) -> Baseline map for a whole batch.
     """
     findings: list[Finding] = []
     name = str(event.get("event") or "")
@@ -124,7 +266,11 @@ async def evaluate(
 
     # Rule: duration-regression — completed run duration vs rolling median.
     for ent, metric, value in _metrics_for(event):
-        base = await _baseline(session, ent, metric)
+        base = (
+            baselines.get((ent, metric))
+            if baselines is not None
+            else await _baseline(session, ent, metric)
+        )
         base_metric = metric.split("|", 1)[0]
         if (
             base
@@ -208,7 +354,11 @@ async def evaluate(
 
 
 async def record_findings(
-    session: AsyncSession, event: dict[str, Any], findings: list[Finding]
+    session: AsyncSession,
+    event: dict[str, Any],
+    findings: list[Finding],
+    *,
+    open_by_dedupe: dict[str, Insight] | None = None,
 ) -> list[Insight]:
     """Persist findings as insights, deduping on an open insight's key.
 
@@ -216,6 +366,10 @@ async def record_findings(
     appends evidence rather than creating a duplicate row — the dedupe key
     pins (rule, entity, event name, producer). Returns the insight rows
     (new and refreshed) so callers can group them into incidents.
+
+    ``open_by_dedupe`` optionally supplies the batch's preloaded open
+    insights; new rows are registered into it so repeats inside the same
+    batch dedupe identically to repeats across batches.
     """
     touched: list[Insight] = []
     now = utcnow()
@@ -225,11 +379,16 @@ async def record_findings(
             finding.entity_id,
             event,
         )
-        existing = (
-            await session.execute(
-                select(Insight).where(Insight.dedupe_key == key, Insight.state == "open")
-            )
-        ).scalar_one_or_none()
+        if open_by_dedupe is None:
+            existing = (
+                await session.execute(
+                    select(Insight).where(Insight.dedupe_key == key, Insight.state == "open")
+                )
+            ).scalar_one_or_none()
+        else:
+            existing = open_by_dedupe.get(key)
+            if existing is not None and existing.state != "open":
+                existing = None
         if existing is not None:
             existing.updated_at = now
             merged = list(existing.evidence_event_ids or [])
@@ -263,16 +422,24 @@ async def record_findings(
             },
         )
         session.add(row)
+        if open_by_dedupe is not None:
+            open_by_dedupe[key] = row
         touched.append(row)
     return touched
 
 
-async def resolve_for_event(session: AsyncSession, event: dict[str, Any]) -> int:
+async def resolve_for_event(
+    session: AsyncSession,
+    event: dict[str, Any],
+    *,
+    open_insights: list[Insight] | None = None,
+) -> int:
     """Auto-resolve open insights when a later success arrives (§15.3).
 
     A successful ``quality.check`` resolves open quality-failure insights on
     the same asset; a successful terminal run resolves open run-failure
-    insights on the same run.
+    insights on the same run. ``open_insights`` optionally supplies the
+    batch's preloaded open rows instead of a per-event query.
     """
     name = str(event.get("event") or "")
     if event.get("outcome") != "success":
@@ -285,19 +452,24 @@ async def resolve_for_event(session: AsyncSession, event: dict[str, Any]) -> int
         targets.append(("run-failure", entities["run"]))
     resolved = 0
     for rule_id, entity_id in targets:
-        rows = (
-            (
-                await session.execute(
-                    select(Insight).where(
-                        Insight.rule_id == rule_id,
-                        Insight.entity_id == entity_id,
-                        Insight.state == "open",
+        if open_insights is None:
+            rows = list(
+                (
+                    await session.execute(
+                        select(Insight).where(
+                            Insight.rule_id == rule_id,
+                            Insight.entity_id == entity_id,
+                            Insight.state == "open",
+                        )
                     )
-                )
+                ).scalars()
             )
-            .scalars()
-            .all()
-        )
+        else:
+            rows = [
+                i
+                for i in open_insights
+                if i.state == "open" and i.rule_id == rule_id and i.entity_id == entity_id
+            ]
         for row in rows:
             row.state = "resolved"
             row.updated_at = utcnow()

@@ -19,17 +19,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import (
-    alerts,
-    baselines,
-    incidents,
-    insights,
-    metrics,
-    projections,
-    state_engine,
-)
+from phlo_observer import alerts, insights, metrics, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run
-from phlo_observer.models import Asset, Event, RawEvent, Run, SchemaRecord
+from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
 
@@ -266,72 +258,61 @@ async def persist_events(
                         .on_conflict_do_nothing(index_elements=["run_id"])
                     )
                 await projections.update_run_projections(session, correlated)
-                # Freshness needs each asset's state BEFORE this batch: snapshot
-                # last_materialized_at once, then keep an in-memory overlay the
-                # per-event loop folds into in observed order — identical to
-                # what rebuild_projections replays.
-                asset_overlay = await _asset_overlay(session, accepted_rows)
+                # The insight pass preloads every row it can touch — baselines
+                # for the batch's metrics, open insights, open incidents and
+                # per-asset reducer state — before apply_events_batch mutates
+                # asset rows, then runs the ordered events entirely in memory.
+                ordered_events = [
+                    projections._event_view(r)
+                    for r in sorted(
+                        accepted_rows,
+                        key=lambda r: (r.observed_at or received_at, r.event_id),
+                    )
+                ]
+                insight_state = await insights.BatchState.load(session, ordered_events)
                 await projections.apply_events_batch(session, accepted_rows)
-                ordered = sorted(
-                    accepted_rows,
-                    key=lambda r: (r.observed_at or received_at, r.event_id),
-                )
-                for row in ordered:
-                    event = projections._event_view(row)
+
+                on_insight = None
+                if stream is not None or (alert_urls and alert_tasks is not None):
+
+                    async def on_insight(insight: Any, incident: Any) -> None:
+                        if stream is not None:
+                            stream.publish(
+                                "insight.opened",
+                                {
+                                    "insight_id": str(insight.insight_id),
+                                    "rule": insight.rule_id,
+                                    "entity": insight.entity_id,
+                                    "severity": insight.severity,
+                                },
+                            )
+                            if incident is not None:
+                                stream.publish(
+                                    "incident.updated",
+                                    {
+                                        "incident_id": str(incident.incident_id),
+                                        "state": incident.state,
+                                    },
+                                )
+                        if alert_urls and alert_tasks is not None:
+                            await alerts.notify(
+                                alert_urls,
+                                "insight",
+                                {
+                                    "insight_id": str(insight.insight_id),
+                                    "rule": insight.rule_id,
+                                    "title": insight.title,
+                                    "severity": insight.severity,
+                                    "entity": insight.entity_id,
+                                },
+                                tasks=alert_tasks,
+                                cooldown_key=insight.dedupe_key or str(insight.insight_id),
+                            )
+
+                for event in ordered_events:
                     # Insights evaluate against baselines BEFORE this event's
                     # sample joins them — an observation must not judge itself.
-                    findings = await insights.evaluate(session, event, asset_states=asset_overlay)
-                    if findings:
-                        new_insights = await insights.record_findings(session, event, findings)
-                        for insight in new_insights:
-                            incident = await incidents.group_insight(session, insight)
-                            if stream is not None:
-                                stream.publish(
-                                    "insight.opened",
-                                    {
-                                        "insight_id": str(insight.insight_id),
-                                        "rule": insight.rule_id,
-                                        "entity": insight.entity_id,
-                                        "severity": insight.severity,
-                                    },
-                                )
-                                if incident is not None:
-                                    stream.publish(
-                                        "incident.updated",
-                                        {
-                                            "incident_id": str(incident.incident_id),
-                                            "state": incident.state,
-                                        },
-                                    )
-                            if alert_urls and alert_tasks is not None:
-                                await alerts.notify(
-                                    alert_urls,
-                                    "insight",
-                                    {
-                                        "insight_id": str(insight.insight_id),
-                                        "rule": insight.rule_id,
-                                        "title": insight.title,
-                                        "severity": insight.severity,
-                                        "entity": insight.entity_id,
-                                    },
-                                    tasks=alert_tasks,
-                                    cooldown_key=insight.dedupe_key or str(insight.insight_id),
-                                )
-                    await insights.resolve_for_event(session, event)
-                    await baselines.update_baselines(session, event)
-                    # Fold the event into the overlay after evaluation so a
-                    # materialization never masks its own freshness gap.
-                    asset_eid = state_engine.event_entities(event).get("asset")
-                    if asset_eid:
-                        overlay_state = asset_overlay.setdefault(
-                            asset_eid,
-                            state_engine.new_asset_state(
-                                asset_eid,
-                                (event.get("correlation") or {}).get("asset_key")
-                                or asset_eid.split("://", 1)[-1],
-                            ),
-                        )
-                        state_engine.apply_asset_event(overlay_state, event)
+                    await insight_state.step(session, event, on_insight=on_insight)
                 if stream is not None:
                     for row in correlated:
                         if row.run_id:
@@ -369,46 +350,6 @@ async def persist_events(
                 exc_info=True,
             )
     return result
-
-
-async def _asset_overlay(session: AsyncSession, rows: list[Event]) -> dict[str, dict[str, Any]]:
-    """Pre-batch asset reducer state for the insight pass.
-
-    One SELECT for every asset the batch touches; the per-event loop folds
-    into these dicts so freshness checks see state as of *earlier* events
-    only — the same ordering ``rebuild_projections`` replays.
-    """
-    views = [projections._event_view(r) for r in rows]
-    ids = {eid for eid in (state_engine.event_entities(v).get("asset") for v in views) if eid}
-    if not ids:
-        return {}
-    existing = {
-        a.entity_id: a
-        for a in (await session.execute(select(Asset).where(Asset.entity_id.in_(ids)))).scalars()
-    }
-    overlay: dict[str, dict[str, Any]] = {}
-    for view in views:
-        eid = state_engine.event_entities(view).get("asset")
-        if not eid or eid in overlay:
-            continue
-        row = existing.get(eid)
-        if row is not None:
-            overlay[eid] = {
-                "entity_id": row.entity_id,
-                "asset_key": row.asset_key,
-                "status": row.status,
-                "last_materialized_at": row.last_materialized_at,
-                "last_event_at": row.last_event_at,
-                "freshness_sla_seconds": row.freshness_sla_seconds,
-                "attributes": dict(row.attributes or {}),
-                "derived_from": list((row.provenance or {}).get("derived_from") or []),
-            }
-        else:
-            corr = view.get("correlation") or {}
-            overlay[eid] = state_engine.new_asset_state(
-                eid, corr.get("asset_key") or eid.split("://", 1)[-1]
-            )
-    return overlay
 
 
 async def _insert_rows(

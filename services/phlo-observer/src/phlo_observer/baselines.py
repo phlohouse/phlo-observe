@@ -104,15 +104,30 @@ def observations_of(event: dict[str, Any]) -> list[tuple[str, str, float]]:
     return out
 
 
-async def update_baselines(session: AsyncSession, event: dict[str, Any]) -> int:
-    """Fold one event's metric observations into rolling baselines."""
+async def update_baselines(
+    session: AsyncSession,
+    event: dict[str, Any],
+    *,
+    rows: dict[tuple[str, str], Baseline] | None = None,
+) -> int:
+    """Fold one event's metric observations into rolling baselines.
+
+    ``rows`` optionally supplies the batch's preloaded (entity, metric)
+    -> Baseline map; newly created rows are registered into it so later
+    events in the same batch see them without another query.
+    """
     updated = 0
     for entity_id, metric, value in observations_of(event):
-        row = (
-            await session.execute(
-                select(Baseline).where(Baseline.entity_id == entity_id, Baseline.metric == metric)
-            )
-        ).scalar_one_or_none()
+        if rows is None:
+            row = (
+                await session.execute(
+                    select(Baseline).where(
+                        Baseline.entity_id == entity_id, Baseline.metric == metric
+                    )
+                )
+            ).scalar_one_or_none()
+        else:
+            row = rows.get((entity_id, metric))
         samples = list(row.samples) if row else []
         samples.append(value)
         if len(samples) > MAX_SAMPLES:
@@ -121,6 +136,8 @@ async def update_baselines(session: AsyncSession, event: dict[str, Any]) -> int:
         if row is None:
             row = Baseline(entity_id=entity_id, metric=metric, samples=samples)
             session.add(row)
+            if rows is not None:
+                rows[(entity_id, metric)] = row
         row.samples = samples
         row.count = (row.count or 0) + 1
         row.median = stats["median"]
