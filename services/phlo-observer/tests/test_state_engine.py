@@ -316,7 +316,8 @@ class TestRebuildCLI:
 
         result = CliRunner().invoke(app, ["rebuild-projections", "--help"])
         assert result.exit_code == 0
-        assert "--run" in result.output
+        # Rich wraps options on narrow CI terminals; strip newlines first.
+        assert "--run" in result.output.replace("\n", "")
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /uvx /usr/local/bin/
 WORKDIR /workspace
 COPY pyproject.toml uv.lock ./
 COPY packages/observe-core ./packages/observe-core
+COPY packages/observe-query ./packages/observe-query
 COPY packages/phlo-observe-sdk ./packages/phlo-observe-sdk
 COPY services/phlo-observer ./services/phlo-observer
 RUN uv sync --all-packages --frozen --no-dev --no-editable
