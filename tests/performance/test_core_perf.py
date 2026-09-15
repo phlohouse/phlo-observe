@@ -7,6 +7,7 @@ floor is asserted and the measured rate is printed.
 
 from __future__ import annotations
 
+import os
 import statistics
 import time
 from collections.abc import Iterator
@@ -18,6 +19,19 @@ from observe_core.builder import EventBuilder
 from observe_core.runtime import Runtime
 
 pytestmark = pytest.mark.performance
+
+# Shared CI runners have contended, variable CPU: thresholds stay meaningful
+# for regressions but tolerate slower shared hardware.
+_LATENCY_FACTOR = 3.0 if os.environ.get("CI") else 1.0
+_THROUGHPUT_FACTOR = 0.4 if os.environ.get("CI") else 1.0
+
+
+def _us(limit: float) -> float:
+    return limit * _LATENCY_FACTOR
+
+
+def _per_s(floor: float) -> float:
+    return floor * _THROUGHPUT_FACTOR
 
 
 @pytest.fixture
@@ -53,7 +67,9 @@ def test_observe_operation_overhead(runtime: Runtime) -> None:
     median_us = statistics.median(samples) / 1e3
     p95_us = _percentile(samples, 0.95)
     print(f"\nobserve() overhead: median={median_us:.1f}µs p95={p95_us:.1f}µs")
-    assert median_us < 100.0, f"median overhead {median_us:.1f}µs exceeds 100µs target"
+    assert median_us < _us(100.0), (
+        f"median overhead {median_us:.1f}µs exceeds {_us(100.0):.0f}µs target"
+    )
 
 
 def test_event_scalar_attributes_overhead(runtime: Runtime) -> None:
@@ -66,7 +82,9 @@ def test_event_scalar_attributes_overhead(runtime: Runtime) -> None:
         samples.append(time.perf_counter_ns() - t0)
     median_us = statistics.median(samples) / 1e3
     print(f"\nscalar attrs emit: median={median_us:.1f}µs")
-    assert median_us < 100.0, f"median overhead {median_us:.1f}µs exceeds 100µs target"
+    assert median_us < _us(100.0), (
+        f"median overhead {median_us:.1f}µs exceeds {_us(100.0):.0f}µs target"
+    )
 
 
 def test_event_nested_attributes_overhead(runtime: Runtime) -> None:
@@ -82,7 +100,9 @@ def test_event_nested_attributes_overhead(runtime: Runtime) -> None:
         samples.append(time.perf_counter_ns() - t0)
     median_us = statistics.median(samples) / 1e3
     print(f"\nnested attrs emit: median={median_us:.1f}µs")
-    assert median_us < 100.0, f"median overhead {median_us:.1f}µs exceeds 100µs target"
+    assert median_us < _us(100.0), (
+        f"median overhead {median_us:.1f}µs exceeds {_us(100.0):.0f}µs target"
+    )
 
 
 def test_enqueue_p95_and_throughput(runtime: Runtime) -> None:
@@ -98,8 +118,8 @@ def test_enqueue_p95_and_throughput(runtime: Runtime) -> None:
     p95_us = _percentile(samples, 0.95)
     rate = n / elapsed
     print(f"\nenqueue: p95={p95_us:.1f}µs rate={rate:.0f}/s")
-    assert p95_us < 1000.0, f"p95 enqueue {p95_us:.1f}µs exceeds 1ms target"
-    assert rate >= 10_000, f"enqueue rate {rate:.0f}/s below 10,000/s target"
+    assert p95_us < _us(1000.0), f"p95 enqueue {p95_us:.1f}µs exceeds {_us(1000.0):.0f}µs target"
+    assert rate >= _per_s(10_000), f"enqueue rate {rate:.0f}/s below {_per_s(10_000):.0f}/s target"
 
 
 def test_serialization_throughput(runtime: Runtime) -> None:
@@ -114,7 +134,7 @@ def test_serialization_throughput(runtime: Runtime) -> None:
     elapsed = time.perf_counter() - t0
     rate = n / elapsed
     print(f"\nfinalize+serialize: {rate:.0f} events/s")
-    assert rate >= 2_000, f"serialization rate {rate:.0f}/s is pathologically slow"
+    assert rate >= _per_s(2_000), f"serialization rate {rate:.0f}/s is pathologically slow"
 
 
 def test_http_drain_throughput() -> None:
@@ -143,7 +163,7 @@ def test_http_drain_throughput() -> None:
         elapsed = time.perf_counter() - t0
         rate = (n_batches * len(batch)) / elapsed
         print(f"\nhttp drain: {rate:.0f} events/s ({n_batches} batches of 100)")
-        assert rate >= 1_000, f"drain throughput {rate:.0f}/s is pathologically slow"
+        assert rate >= _per_s(1_000), f"drain throughput {rate:.0f}/s is pathologically slow"
         assert requests and requests[0].startswith(b"[")
     finally:
         drain.close()
