@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import asc, select
+from sqlalchemy import String, asc, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer.models import (
@@ -112,13 +112,19 @@ def _incident_json(row: Incident) -> dict[str, Any]:
 # -- run queries ------------------------------------------------------------
 
 
-async def run_events(session: AsyncSession, run_id: str) -> list[Event]:
-    """All events correlated to one run, ordered."""
+_MAX_RUN_EVENTS = 10_000
+
+
+async def run_events(
+    session: AsyncSession, run_id: str, *, limit: int = _MAX_RUN_EVENTS
+) -> list[Event]:
+    """Events correlated to one run, ordered and bounded."""
     rows = (
         await session.execute(
             select(Event)
             .where(Event.run_id == run_id)
             .order_by(asc(Event.observed_at), asc(Event.event_id))
+            .limit(limit)
         )
     ).scalars()
     return list(rows)
@@ -149,11 +155,24 @@ async def run_failures(session: AsyncSession, run_id: str) -> dict[str, Any] | N
     run = await session.get(Run, run_id)
     if run is None:
         return None
-    rows = [
-        e
-        for e in await run_events(session, run_id)
-        if e.outcome == "failure" or e.error is not None
-    ]
+    rows = list(
+        (
+            await session.execute(
+                select(Event)
+                .where(
+                    Event.run_id == run_id,
+                    or_(
+                        Event.outcome == "failure",
+                        # JSON null is stored, not SQL NULL — check both.
+                        Event.error.is_not(None),
+                    ),
+                    func.coalesce(cast(Event.error, String), "null") != "null",
+                )
+                .order_by(asc(Event.observed_at), asc(Event.event_id))
+                .limit(_MAX_RUN_EVENTS)
+            )
+        ).scalars()
+    )
     return {
         "run_id": run_id,
         "failures": [_event_json(e) for e in rows],
@@ -446,6 +465,7 @@ async def investigation_bundle(session: AsyncSession, run_id: str) -> dict[str, 
         "impact": (impact or {}).get("impact", {}),
         "candidate_causes": _candidate_causes(failures, changes or {}),
         "evidence": [str(e.event_id) for e in events],
+        "truncated": len(events) >= _MAX_RUN_EVENTS,
     }
 
 
