@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import gzip
 import io
 import logging
@@ -29,10 +30,11 @@ import observe_core
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from phlo_observer import __version__
+from phlo_observer import __version__, query_v2
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_ingest_token, require_read_token
@@ -47,6 +49,7 @@ from phlo_observer.metrics import (
     PERSIST_DURATION,
     QUEUE_DEPTH,
 )
+from phlo_observer.models import Entity, Run
 from phlo_observer.retention import retention_loop
 from phlo_observer.settings import ObserverSettings, load_settings
 from phlo_observer.store import (
@@ -573,6 +576,188 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Events correlated to one table name."""
         return await _scoped_events(request, "table", table, since, until, cursor, limit)
+
+    # -- V2 operational queries (spec §22) ------------------------------------
+
+    @app.get("/v2/runs/{run_id}", dependencies=[Depends(require_read_token)])
+    async def v2_get_run(run_id: str, request: Request) -> dict[str, Any]:
+        """Run projection plus its entity links."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.get_run_v2(session, run_id)
+            if result is None:
+                raise _http_error(404, "run not found")
+            return result
+
+    @app.get("/v2/runs/{run_id}/timeline", dependencies=[Depends(require_read_token)])
+    async def v2_run_timeline(run_id: str, request: Request) -> dict[str, Any]:
+        """Run projection plus ordered events (same payload as v1 timeline)."""
+        async with request.app.state.session_factory() as session:
+            timeline = await run_timeline(session, run_id)
+            if timeline is None:
+                raise _http_error(404, "run not found")
+            return timeline
+
+    @app.get("/v2/runs/{run_id}/failures", dependencies=[Depends(require_read_token)])
+    async def v2_run_failures(run_id: str, request: Request) -> dict[str, Any]:
+        """Failed/error events for one run with evidence IDs."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.run_failures(session, run_id)
+            if result is None:
+                raise _http_error(404, "run not found")
+            return result
+
+    @app.get("/v2/runs/{run_id}/changes", dependencies=[Depends(require_read_token)])
+    async def v2_run_changes(
+        run_id: str,
+        request: Request,
+        window_hours: float = Query(24.0, ge=0.1, le=24 * 30),
+    ) -> dict[str, Any]:
+        """Change events preceding the run (spec §18)."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.run_changes(
+                session, run_id, window=dt.timedelta(hours=window_hours)
+            )
+            if result is None:
+                raise _http_error(404, "run not found")
+            return result
+
+    @app.get("/v2/runs/{run_id}/impact", dependencies=[Depends(require_read_token)])
+    async def v2_run_impact(run_id: str, request: Request) -> dict[str, Any]:
+        """Downstream entities reached through this run's edges."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.run_impact(session, run_id)
+            if result is None:
+                raise _http_error(404, "run not found")
+            return result
+
+    @app.get("/v2/runs/{run_id}/investigate", dependencies=[Depends(require_read_token)])
+    async def v2_run_investigate(run_id: str, request: Request) -> dict[str, Any]:
+        """Deterministic investigation bundle (spec §20)."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.investigation_bundle(session, run_id)
+            if result is None:
+                raise _http_error(404, "run not found")
+            return result
+
+    @app.get("/v2/assets/{entity_id:path}/health", dependencies=[Depends(require_read_token)])
+    async def v2_asset_health(entity_id: str, request: Request) -> dict[str, Any]:
+        """Asset health: status, freshness SLA state, open insights."""
+        if "://" not in entity_id:
+            entity_id = f"asset://{entity_id}"
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.asset_health(session, entity_id)
+            if result is None:
+                raise _http_error(404, "asset not found")
+            return result
+
+    @app.get("/v2/assets/{entity_id:path}/history", dependencies=[Depends(require_read_token)])
+    async def v2_asset_history(
+        entity_id: str,
+        request: Request,
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Ordered event history for one asset."""
+        if "://" not in entity_id:
+            entity_id = f"asset://{entity_id}"
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.asset_history(session, entity_id, limit=limit)
+            if result is None:
+                raise _http_error(404, "asset not found")
+            return result
+
+    @app.get("/v2/assets/{entity_id:path}/lineage", dependencies=[Depends(require_read_token)])
+    async def v2_asset_lineage(entity_id: str, request: Request) -> dict[str, Any]:
+        """Upstream/downstream relationship edges (spec §14)."""
+        if "://" not in entity_id:
+            entity_id = f"asset://{entity_id}"
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.asset_lineage(session, entity_id)
+            if result is None:
+                raise _http_error(404, "asset not found")
+            return result
+
+    # Registered last: the greedy :path converter must not swallow the
+    # /health, /history and /lineage sub-resource routes above.
+    @app.get("/v2/assets/{entity_id:path}", dependencies=[Depends(require_read_token)])
+    async def v2_get_asset(entity_id: str, request: Request) -> dict[str, Any]:
+        """Asset projection by canonical entity id (``asset://a/b``)."""
+        if "://" not in entity_id:
+            entity_id = f"asset://{entity_id}"
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.get_asset_v2(session, entity_id)
+            if result is None:
+                raise _http_error(404, "asset not found")
+            return result
+
+    @app.get("/v2/insights", dependencies=[Depends(require_read_token)])
+    async def v2_list_insights(
+        request: Request,
+        state: str | None = None,
+        entity: str | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Insights with optional state/entity filters."""
+        async with request.app.state.session_factory() as session:
+            return {
+                "items": await query_v2.list_insights(
+                    session, state=state, entity=entity, limit=limit
+                )
+            }
+
+    @app.get("/v2/incidents", dependencies=[Depends(require_read_token)])
+    async def v2_list_incidents(
+        request: Request,
+        state: str | None = None,
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Incidents with optional state filter."""
+        async with request.app.state.session_factory() as session:
+            return {"items": await query_v2.list_incidents(session, state=state, limit=limit)}
+
+    @app.get("/v2/incidents/{incident_id}", dependencies=[Depends(require_read_token)])
+    async def v2_get_incident(incident_id: str, request: Request) -> dict[str, Any]:
+        """One incident with its grouped insights."""
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.get_incident(session, incident_id)
+            if result is None:
+                raise _http_error(404, "incident not found")
+            return result
+
+    @app.get("/v2/events/{event_id}/provenance", dependencies=[Depends(require_read_token)])
+    async def v2_event_provenance(event_id: str, request: Request) -> dict[str, Any]:
+        """Which projections this event contributed to (spec §12.3)."""
+        async with request.app.state.session_factory() as session:
+            row = await event_by_id(session, event_id)
+            if row is None:
+                raise _http_error(404, "event not found")
+            eid = str(row.event_id)
+            contributing: dict[str, list[str]] = {"run": [], "entity": [], "edge": []}
+            if row.run_id:
+                run = await session.get(Run, row.run_id)
+                if run and eid in ((run.provenance or {}).get("derived_from") or []):
+                    contributing["run"].append(row.run_id)
+            entities = (
+                await session.execute(
+                    select(Entity.entity_id).where(
+                        Entity.provenance["derived_from"].cast(JSONB).contains([eid])
+                    )
+                )
+            ).scalars()
+            contributing["entity"] = list(entities)
+            return {"event_id": eid, "projections": contributing}
+
+    @app.post("/v2/query/compare-runs", dependencies=[Depends(require_read_token)])
+    async def v2_compare_runs(request: Request) -> dict[str, Any]:
+        """Compare two runs: ``{"run_a": ..., "run_b": ...}``."""
+        body = await request.json()
+        run_a, run_b = body.get("run_a"), body.get("run_b")
+        if not run_a or not run_b:
+            raise _http_error(400, "run_a and run_b are required")
+        async with request.app.state.session_factory() as session:
+            result = await query_v2.compare_runs(session, run_a, run_b)
+            if result is None:
+                raise _http_error(404, "one or both runs not found")
+            return result
 
     # -- health / metrics ----------------------------------------------------
 
