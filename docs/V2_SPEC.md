@@ -297,6 +297,7 @@ Example:
 ```python
 from observe import EventContract, field
 
+
 class AssetMaterialized(EventContract):
     name = "asset.materialized"
     version = 2
