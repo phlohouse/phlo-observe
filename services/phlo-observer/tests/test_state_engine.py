@@ -312,12 +312,10 @@ class TestIncrementalAndRebuild:
 class TestRebuildCLI:
     def test_rebuild_projections_command(self) -> None:
         from phlo_observer.cli import app
-        from typer.testing import CliRunner
+        from typer.main import get_command
 
-        result = CliRunner().invoke(app, ["rebuild-projections", "--help"])
-        assert result.exit_code == 0
-        # Rich wraps options on narrow CI terminals; strip newlines first.
-        assert "--run" in result.output.replace("\n", "")
+        command = get_command(app).commands["rebuild-projections"]
+        assert any("--run" in param.opts for param in command.params)
 
 
 @pytest.mark.asyncio
