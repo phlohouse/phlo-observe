@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async
 
 TEST_DATABASE_URL = os.environ.get(
     "PHLO_OBSERVER_TEST_DATABASE_URL",
-    "postgresql+asyncpg://phlo:phlo@localhost:5433/phlo_test",
+    "postgresql+asyncpg://phlo:phlo@localhost:5432/phlo_observer_test",
 )
 
 

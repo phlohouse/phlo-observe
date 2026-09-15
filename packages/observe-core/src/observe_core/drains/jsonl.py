@@ -67,10 +67,9 @@ class JsonlDrain:
             older = self.path.with_name(f"{self.path.name}.{i}")
             newer = self.path.with_name(f"{self.path.name}.{i + 1}")
             if older.exists():
-                if i + 1 > self.backup_count:
-                    older.unlink(missing_ok=True)
-                else:
-                    older.replace(newer)
+                # .{i} -> .{i+1}; the rename overwrites .{backup_count},
+                # which is how the oldest backup drops out.
+                older.replace(newer)
         self.path.replace(self.path.with_name(f"{self.path.name}.1"))
         self._fh = self.path.open("ab")
         self._size = 0

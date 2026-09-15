@@ -1,8 +1,9 @@
 """Shared fixtures for repo-level contract/integration/performance tests.
 
 Observer-backed fixtures reuse the same test Postgres as the service suite
-(PHLO_OBSERVER_TEST_DATABASE_URL, default localhost:5433) and skip cleanly
-when it is unreachable.
+(PHLO_OBSERVER_TEST_DATABASE_URL, default localhost:5432/phlo_observer_test —
+created by `docker compose up -d postgres`) and skip cleanly when it is
+unreachable.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 TEST_DATABASE_URL = os.environ.get(
     "PHLO_OBSERVER_TEST_DATABASE_URL",
-    "postgresql+asyncpg://phlo:phlo@localhost:5433/phlo_test",
+    "postgresql+asyncpg://phlo:phlo@localhost:5432/phlo_observer_test",
 )
 
 

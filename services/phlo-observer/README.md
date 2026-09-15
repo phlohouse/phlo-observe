@@ -60,8 +60,10 @@ overwritten.
 
 ```bash
 uv sync --all-packages
-uv run pytest services/phlo-observer/tests          # needs Postgres; see below
-PHLO_OBSERVER_TEST_DATABASE_URL=postgresql+asyncpg://phlo:phlo@localhost:5433/phlo_test
+docker compose up -d postgres                       # provisions phlo_observer_test
+uv run pytest services/phlo-observer/tests          # default: localhost:5432/phlo_observer_test
+# override if your test Postgres lives elsewhere:
+PHLO_OBSERVER_TEST_DATABASE_URL=postgresql+asyncpg://user:pass@host:5432/dbname
 ```
 
 Tests skip cleanly when Postgres is unreachable. Migrations live in
