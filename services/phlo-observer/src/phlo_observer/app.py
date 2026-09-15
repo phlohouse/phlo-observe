@@ -23,12 +23,14 @@ import gzip
 import io
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
 import observe_core
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
+from observe_core.timestamps import utcnow
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -37,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from phlo_observer import __version__, query_v2
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
-from phlo_observer.auth import require_ingest_token, require_read_token
+from phlo_observer.auth import require_admin_token, require_ingest_token, require_read_token
 from phlo_observer.db import check_database, make_engine, make_sessionmaker
 from phlo_observer.forward import forward_events
 from phlo_observer.metrics import (
@@ -49,7 +51,7 @@ from phlo_observer.metrics import (
     PERSIST_DURATION,
     QUEUE_DEPTH,
 )
-from phlo_observer.models import Entity, Run
+from phlo_observer.models import Entity, IngestFailure, Run
 from phlo_observer.retention import retention_loop
 from phlo_observer.settings import ObserverSettings, load_settings
 from phlo_observer.store import (
@@ -62,6 +64,7 @@ from phlo_observer.store import (
     query_runs,
     store_raw,
 )
+from phlo_observer.stream import StreamHub, sse_encode
 from phlo_observer.timeline import event_by_id, run_timeline
 
 logger = logging.getLogger("phlo_observer")
@@ -148,6 +151,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     app.state.self_observe = False
     app.state.observe_runtime = None
     app.state.forward_tasks = set()
+    app.state.alert_tasks = set()
+    app.state.stream = StreamHub()
 
     @app.exception_handler(InvalidQuery)
     async def invalid_query_handler(request: Request, exc: InvalidQuery) -> JSONResponse:
@@ -254,7 +259,13 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 )
             start = time.perf_counter()
             result = await persist_events(
-                session, events, raw_event_id=raw.id, source_indices=batch.indices
+                session,
+                events,
+                raw_event_id=raw.id,
+                source_indices=batch.indices,
+                stream=app.state.stream,
+                alert_urls=settings.alert_webhook_urls,
+                alert_tasks=app.state.alert_tasks,
             )
             PERSIST_DURATION.observe(time.perf_counter() - start)
             if settings.otlp_endpoint and result.event_ids:
@@ -277,6 +288,22 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     "partial" if (result.accepted or result.duplicates) else "failed"
                 )
                 raw.normalization_error = result.errors[0]["message"]
+            if raw.normalization_status == "failed":
+                # Payload-level quarantine (spec §24.2): nothing normalized,
+                # so the payload lands in observe_ingest_failures for the
+                # admin replay endpoint rather than only in raw_events.
+                session.add(
+                    IngestFailure(
+                        received_at=raw.received_at,
+                        producer=producer,
+                        adapter=adapter_name,
+                        payload_sha256=raw.payload_sha256,
+                        payload=raw.payload,
+                        error_code=result.errors[0]["code"],
+                        error_message=result.errors[0]["message"],
+                        replayed=0,
+                    )
+                )
         if result.rejected:
             batch_status = "partial" if (result.accepted or result.duplicates) else "rejected"
         else:
@@ -758,6 +785,146 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             if result is None:
                 raise _http_error(404, "one or both runs not found")
             return result
+
+    # -- search / stream / admin (spec §23, §26, §24.2) ------------------------
+
+    @app.get("/v2/search", dependencies=[Depends(require_read_token)])
+    async def v2_search(
+        request: Request,
+        q: str | None = None,
+        event: str | None = None,
+        service: str | None = None,
+        run_id: str | None = None,
+        asset_key: str | None = None,
+        table: str | None = None,
+        severity: str | None = None,
+        outcome: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Structured + text search over canonical events (spec §23)."""
+        filters = {
+            k: v
+            for k, v in {
+                "q": q,
+                "event": event,
+                "service": service,
+                "run_id": run_id,
+                "asset_key": asset_key,
+                "table": table,
+                "severity": severity,
+                "outcome": outcome,
+            }.items()
+            if v is not None
+        }
+        async with request.app.state.session_factory() as session:
+            page = await query_events(session, filters=filters, cursor=cursor, limit=limit)
+            return {
+                "items": [_event_json(row) for row in page.items],
+                "next_cursor": page.next_cursor,
+            }
+
+    @app.get("/v2/stream", dependencies=[Depends(require_read_token)])
+    async def v2_stream(request: Request) -> Response:
+        """Server-Sent Events notification stream (spec §26).
+
+        Notification-only: clients refetch authoritative state on receipt.
+        """
+        from fastapi.responses import StreamingResponse  # noqa: PLC0415
+
+        hub: StreamHub = request.app.state.stream
+        try:
+            queue = hub.subscribe()
+        except RuntimeError:
+            raise _http_error(503, "stream at capacity") from None
+
+        async def frames() -> AsyncIterator[bytes]:
+            try:
+                yield b": connected\n\n"
+                while True:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except TimeoutError:
+                        yield b": keepalive\n\n"
+                        continue
+                    yield sse_encode(message)
+            finally:
+                hub.unsubscribe(queue)
+
+        return StreamingResponse(frames(), media_type="text/event-stream")
+
+    @app.get("/v2/admin/quarantine", dependencies=[Depends(require_admin_token)])
+    async def v2_quarantine_list(
+        request: Request,
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Quarantined ingest payloads awaiting operator action."""
+        async with request.app.state.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(IngestFailure)
+                    .where(IngestFailure.replayed == 0)
+                    .order_by(IngestFailure.received_at.desc())
+                    .limit(limit)
+                )
+            ).scalars()
+            return {
+                "items": [
+                    {
+                        "id": str(r.id),
+                        "received_at": _fmt(r.received_at),
+                        "producer": r.producer,
+                        "adapter": r.adapter,
+                        "payload_sha256": r.payload_sha256,
+                        "error_code": r.error_code,
+                        "error_message": r.error_message,
+                    }
+                    for r in rows
+                ]
+            }
+
+    @app.post(
+        "/v2/admin/quarantine/{failure_id}/replay",
+        dependencies=[Depends(require_admin_token)],
+    )
+    async def v2_quarantine_replay(failure_id: str, request: Request) -> dict[str, Any]:
+        """Re-run the adapter over a quarantined payload (spec §34)."""
+        async with request.app.state.session_factory() as session, session.begin():
+            row = await session.get(IngestFailure, uuid.UUID(failure_id))
+            if row is None:
+                raise _http_error(404, "quarantine entry not found")
+            if row.replayed:
+                return {"replayed": False, "reason": "already replayed"}
+            adapter = ADAPTERS.get(row.adapter or "canonical")
+            if (
+                adapter is None
+                or row.payload is None
+                or "_encoding" in (row.payload if isinstance(row.payload, dict) else {})
+            ):
+                raise _http_error(422, "payload not replayable")
+            import json as _json  # noqa: PLC0415
+
+            body = _json.dumps(row.payload).encode()
+            batch = adapter.normalize(
+                RawPayload(
+                    producer=row.producer,
+                    source_kind="quarantine-replay",
+                    body=body,
+                    keep_payload=True,
+                    metadata={},
+                )
+            )
+            result = await persist_events(session, batch.events)
+            row.replayed = 1
+            row.replayed_at = utcnow()
+            return {
+                "replayed": True,
+                "accepted": result.accepted,
+                "rejected": result.rejected,
+                "errors": result.errors,
+            }
 
     # -- health / metrics ----------------------------------------------------
 

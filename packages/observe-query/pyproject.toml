@@ -1,0 +1,24 @@
+[build-system]
+build-backend = "uv_build"
+requires = ["uv_build>=0.8,<0.13"]
+
+[project]
+dependencies = [
+    "httpx>=0.28",
+    "pydantic>=2.8",
+]
+description = "Typed read client for the phlo-observer V2 query API: runs, assets, lineage, insights, incidents and agent-facing tool functions (spec 19)."
+name = "observe-query"
+readme = "README.md"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[[project.authors]]
+name = "Phlo"
+
+[project.license]
+text = "Apache-2.0"
+
+[tool.uv.build-backend]
+module-name = "observe_query"
+module-root = "src"

@@ -47,6 +47,13 @@ class ObserverSettings(BaseSettings):
     """Tokens allowed to write events (comma-separated). Empty = dev mode."""
     read_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Tokens allowed to query (comma-separated). Empty = dev mode."""
+    admin_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    """Tokens allowed to administer (quarantine replay, archive). Falls back
+    to read tokens when unset so small deployments stay simple."""
+
+    alert_webhook_urls: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    """POST insight/incident notifications to these URLs (comma-separated).
+    Delivery is fire-and-forget; failures never delay ingestion (§34)."""
 
     raw_retention_days: int = 14
     event_retention_days: int = 90
@@ -82,7 +89,9 @@ class ObserverSettings(BaseSettings):
     auth_optional_dev: bool = True
     """Documented dev escape hatch; set false to hard-fail without tokens."""
 
-    @field_validator("ingest_tokens", "read_tokens", mode="before")
+    @field_validator(
+        "ingest_tokens", "read_tokens", "admin_tokens", "alert_webhook_urls", mode="before"
+    )
     @classmethod
     def _split_tokens(cls, value: object) -> object:
         """Accept ``a,b`` or ``["a","b"]``; either arrives here as a raw string."""
@@ -127,6 +136,11 @@ class ObserverSettings(BaseSettings):
     def read_token_set(self) -> frozenset[str]:
         """Read tokens, including any merged from ``_FILE`` variants."""
         return frozenset(self.read_tokens)
+
+    @property
+    def admin_token_set(self) -> frozenset[str]:
+        """Admin tokens; falls back to read tokens when unset."""
+        return frozenset(self.admin_tokens) or frozenset(self.read_tokens)
 
     def require_tokens(self) -> None:
         """Fail fast when auth is disabled outside a dev deployment.
@@ -229,6 +243,7 @@ def load_settings() -> ObserverSettings:
     for env_name, attr in (
         ("PHLO_OBSERVER_INGEST_TOKENS", "ingest_tokens"),
         ("PHLO_OBSERVER_READ_TOKENS", "read_tokens"),
+        ("PHLO_OBSERVER_ADMIN_TOKENS", "admin_tokens"),
     ):
         # Only the _FILE variant is merged here: the plain env var already
         # arrives via pydantic-settings' env source, so merging it again

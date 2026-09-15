@@ -28,6 +28,7 @@ members = ["packages/*", "services/*"]
 
 [tool.uv.sources]
 observe-core = { workspace = true }
+observe-query = { workspace = true }
 phlo-observe = { workspace = true }
 phlo-observer = { workspace = true }
 

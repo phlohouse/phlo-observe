@@ -49,3 +49,15 @@ async def require_read_token(
     """Dependency gating query endpoints on the read token set."""
     if not _token_ok(_extract_token(request), settings.read_token_set):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or missing read token")
+
+
+async def require_admin_token(
+    request: Request, settings: ObserverSettings = Depends(get_settings)
+) -> None:
+    """Dependency gating admin endpoints (quarantine replay, archive).
+
+    Scoped authorization (spec §34): admin falls back to the read token set
+    when no admin tokens are configured, keeping small deployments simple.
+    """
+    if not _token_ok(_extract_token(request), settings.admin_token_set):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or missing admin token")

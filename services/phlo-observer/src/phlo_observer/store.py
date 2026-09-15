@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import baselines, incidents, insights, metrics, projections
+from phlo_observer import alerts, baselines, incidents, insights, metrics, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
 from phlo_observer.models import Event, RawEvent, Run
 
@@ -160,6 +160,9 @@ async def persist_events(
     *,
     raw_event_id: uuid.UUID | None = None,
     source_indices: list[int] | None = None,
+    stream: Any = None,
+    alert_urls: list[str] | None = None,
+    alert_tasks: set[Any] | None = None,
 ) -> IngestResult:
     """Insert canonical events idempotently and update run projections.
 
@@ -244,9 +247,47 @@ async def persist_events(
                     if findings:
                         new_insights = await insights.record_findings(session, event, findings)
                         for insight in new_insights:
-                            await incidents.group_insight(session, insight)
+                            incident = await incidents.group_insight(session, insight)
+                            if stream is not None:
+                                stream.publish(
+                                    "insight.opened",
+                                    {
+                                        "insight_id": str(insight.insight_id),
+                                        "rule": insight.rule_id,
+                                        "entity": insight.entity_id,
+                                        "severity": insight.severity,
+                                    },
+                                )
+                                if incident is not None:
+                                    stream.publish(
+                                        "incident.updated",
+                                        {
+                                            "incident_id": str(incident.incident_id),
+                                            "state": incident.state,
+                                        },
+                                    )
+                            if alert_urls and alert_tasks is not None:
+                                await alerts.notify(
+                                    alert_urls,
+                                    "insight",
+                                    {
+                                        "insight_id": str(insight.insight_id),
+                                        "rule": insight.rule_id,
+                                        "title": insight.title,
+                                        "severity": insight.severity,
+                                        "entity": insight.entity_id,
+                                    },
+                                    tasks=alert_tasks,
+                                )
                     await insights.resolve_for_event(session, event)
                     await baselines.update_baselines(session, event)
+                if stream is not None:
+                    for row in correlated:
+                        if row.run_id:
+                            stream.publish(
+                                "run.changed",
+                                {"run_id": row.run_id, "event": row.event},
+                            )
                 await session.flush()
         except SQLAlchemyError:
             logger.warning(
@@ -401,6 +442,22 @@ async def query_events(
         stmt = stmt.where(Event.observed_at >= _parse_dt_filter(filters["since"], "since"))
     if filters.get("until"):
         stmt = stmt.where(Event.observed_at <= _parse_dt_filter(filters["until"], "until"))
+    if filters.get("q"):
+        # Postgres-first text search (spec §23): substring match over the
+        # highest-signal text columns rather than a full tsvector index —
+        # adequate until the §24.4 volume thresholds force a re-evaluation.
+        from sqlalchemy import String, cast, or_  # noqa: PLC0415
+
+        term = f"%{filters['q']}%"
+        stmt = stmt.where(
+            or_(
+                Event.event.ilike(term),
+                Event.table_name.ilike(term),
+                Event.asset_key.ilike(term),
+                Event.service_name.ilike(term),
+                cast(Event.error["message"], String).ilike(term),
+            )
+        )
     if cursor:
         cur_ts, cur_id = _cursor_decode(cursor)
         stmt = stmt.where(
