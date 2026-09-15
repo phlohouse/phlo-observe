@@ -73,6 +73,32 @@ Enable the `otel` compose profile to run a collector that forwards to
 `POST /v1/ingest/otlp` (OTLP/HTTP JSON; each log record normalizes to one
 canonical event). See `examples/otel-collector-config.yaml`.
 
+### OTLP attribute mapping
+
+Both the `observe-core` OTLP drain and the observer's OTLP forwarder encode a
+canonical event as an OTel log record: the event name is the record `body`,
+`severity` maps to `severityNumber`/`severityText`, and the rest of the
+envelope is carried as `observe.*` record attributes (shared encoder:
+`observe_core.otlp_mapping`):
+
+| OTLP attribute | Canonical field |
+| --- | --- |
+| `observe.event_id`, `observe.event`, `observe.schema_version` | envelope identity |
+| `observe.category`, `observe.outcome`, `observe.severity`, `observe.delivery` | classification |
+| `observe.started_at`, `observe.ended_at`, `observe.duration_ms`, `observe.observed_at` | timing |
+| `observe.correlation.<key>` | every canonical correlation key |
+| `observe.correlation.extra` | non-canonical correlation (JSON) |
+| `observe.trace_id`, `observe.span_id` | trace-join shortcuts |
+| `observe.service`, `observe.error`, `observe.source`, `observe.attributes` | structured sections (JSON) |
+
+The `/v1/ingest/otlp` adapter restores these attributes: a record carrying
+`observe.event_id` re-enters as the original canonical event — same
+`event_id` (so re-ingest dedupes), full correlation (`run_id`, trace/span
+and friends), timing, service, error and attributes. Records without
+`observe.*` attributes are normalized generically: `traceId`/`spanId` map to
+correlation, `event.name` becomes the event name, and remaining attributes
+land under `attributes` (resource attributes under `resource.*`).
+
 ## Ingestion headers
 
 All `POST /v1/ingest/*` endpoints accept:

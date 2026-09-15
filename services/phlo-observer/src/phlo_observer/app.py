@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from phlo_observer import __version__
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
-from phlo_observer.adapters.base import record_normalization
+from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_ingest_token, require_read_token
 from phlo_observer.db import check_database, make_engine, make_sessionmaker
 from phlo_observer.forward import forward_events
@@ -53,8 +53,8 @@ from phlo_observer.store import (
     DEFAULT_PAGE_SIZE,
     InvalidQuery,
     _fmt,
-    count_events,
     persist_events,
+    probe_events_table,
     query_events,
     query_runs,
     store_raw,
@@ -190,7 +190,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(413, "request body too large")
             chunks.append(chunk)
         body = b"".join(chunks)
-        if request.headers.get("content-encoding") == "gzip":
+        content_encoding = (request.headers.get("content-encoding") or "").lower()
+        if "gzip" in (token.strip() for token in content_encoding.split(",")):
             try:
                 with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
                     body = gz.read(settings.max_body_bytes + 1)
@@ -228,7 +229,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 max_payload_bytes=settings.max_raw_payload_bytes,
                 retention_days=settings.raw_retention_days,
             )
-            events, errors = _normalize(adapter_name, body, source_version, request)
+            batch = _normalize(adapter_name, body, source_version, request)
+            events, errors = batch.events, batch.errors
             if len(events) > settings.max_batch_events:
                 raw.normalization_status = "rejected"
                 raw.normalization_error = "batch too large"
@@ -248,7 +250,9 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                 )
             start = time.perf_counter()
-            result = await persist_events(session, events, raw_event_id=raw.id)
+            result = await persist_events(
+                session, events, raw_event_id=raw.id, source_indices=batch.indices
+            )
             PERSIST_DURATION.observe(time.perf_counter() - start)
             if settings.otlp_endpoint and result.event_ids:
                 accepted_ids = set(result.event_ids)
@@ -307,7 +311,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         body: bytes,
         source_version: str | None = None,
         request: Request | None = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> NormalizedBatch:
         """Run the adapter; collect per-item failures as structured errors."""
         adapter = ADAPTERS[adapter_name or "canonical"]
         metadata: dict[str, Any] = {}
@@ -338,21 +342,23 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             )
             NORMALIZATION_DURATION.observe(time.perf_counter() - start)
             record_normalization(adapter.name, "success" if not batch.errors else "partial")
-            return batch.events, batch.errors
+            return batch
         except AdapterError as exc:
             record_normalization(adapter.name, "error")
-            return [], [{"index": -1, "code": exc.code, "message": str(exc)}]
+            return NormalizedBatch(errors=[{"index": -1, "code": exc.code, "message": str(exc)}])
         except Exception as exc:
             # Spec §35: a malformed source event must never crash the observer.
             logger.exception("adapter %s raised unexpectedly", adapter.name)
             record_normalization(adapter.name, "error")
-            return [], [
-                {
-                    "index": -1,
-                    "code": "NORMALIZATION_FAILED",
-                    "message": f"{adapter.name} adapter failed: {exc}",
-                }
-            ]
+            return NormalizedBatch(
+                errors=[
+                    {
+                        "index": -1,
+                        "code": "NORMALIZATION_FAILED",
+                        "message": f"{adapter.name} adapter failed: {exc}",
+                    }
+                ]
+            )
 
     # -- ingestion ----------------------------------------------------------
 
@@ -603,7 +609,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 await session.rollback()
                 version = None
             try:
-                events_stored = await count_events(session)
+                await probe_events_table(session)
             except Exception:
                 # Database reachable but the events schema is absent or
                 # incompatible: report not-ready rather than a 500.
@@ -617,7 +623,6 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     "status": "ready",
                     "database": "ok",
                     "schema_version": version,
-                    "events_stored": events_stored,
                 }
             )
 

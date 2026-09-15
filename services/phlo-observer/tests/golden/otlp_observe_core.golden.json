@@ -1,0 +1,63 @@
+[
+  {
+    "attributes": {
+      "otel.scope": "observe-core",
+      "rows_out": 42
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": "staging.orders",
+      "branch": null,
+      "experiment_id": null,
+      "extra": {
+        "attempt": 2
+      },
+      "invocation_id": null,
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "etl",
+      "request_id": null,
+      "run_id": "run-7",
+      "snapshot_id": null,
+      "span_id": "00f067aa0ba902b7",
+      "table": null,
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+    },
+    "delivery": "critical",
+    "duration_ms": 1500.0,
+    "ended_at": "2025-01-01T00:00:01.500Z",
+    "error": {
+      "code": "LOAD_FAILED",
+      "details": {},
+      "exception_type": null,
+      "fix": null,
+      "message": "load failed",
+      "retryable": true,
+      "stacktrace": null,
+      "why": null
+    },
+    "event": "pipeline.run",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "failure",
+    "schema_version": "1.0",
+    "service": {
+      "environment": "prod",
+      "host": null,
+      "instance_id": null,
+      "name": "etl",
+      "version": "2.0"
+    },
+    "severity": "error",
+    "source": {
+      "adapter": "otlp.1.0",
+      "ingested_at": null,
+      "kind": "sdk",
+      "producer": "phlo-observe",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": "2025-01-01T00:00:00.000Z"
+  }
+]

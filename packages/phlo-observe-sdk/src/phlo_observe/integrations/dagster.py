@@ -60,7 +60,9 @@ def dagster_run_scope(context: Any, *, asset_key: str | None = None) -> Iterator
 
 def _dagster_asset_key(context: Any) -> str | None:
     key = _attr(context, "asset_key", "asset_key_for_output")
-    if key is None:
+    if key is None or callable(key):
+        # ``asset_key_for_output`` is a bound method needing an output name —
+        # it cannot be called here, and str() of it would produce garbage.
         return None
     # AssetKey has a .path tuple; strings/others str() cleanly.
     path = getattr(key, "path", None)

@@ -190,7 +190,10 @@ class Runtime:
         try:
             event = self._finalize(builder, exc)
         except Exception as error:  # fail open by default
-            if self.settings.fail_fast:
+            # TelemetryError is only raised when telemetry_required is set;
+            # it must propagate even when fail_fast is off, or the fail-closed
+            # contract silently degrades to drop-on-floor for oversized events.
+            if self.settings.fail_fast or isinstance(error, TelemetryError):
                 raise
             self.stats.incr("worker_errors")
             _diag(f"event finalization failed for {builder.event!r}: {error}")
@@ -378,24 +381,30 @@ class Runtime:
         held: list[Any] = []
         evicted: CanonicalEvent | None = None
         oldest_critical: CanonicalEvent | None = None
-        try:
-            while True:
+        # Drain the whole queue so survivors can be re-queued in their
+        # original order; stopping at the first eviction would move held items
+        # behind everything never dequeued.
+        while True:
+            try:
                 item = self._queue.get_nowait()
-                if isinstance(item, CanonicalEvent):
-                    if item.delivery == Delivery.CRITICAL:
-                        if oldest_critical is None:
-                            oldest_critical = item
-                        held.append(item)
-                        continue
+            except queue.Empty:
+                break
+            if isinstance(item, CanonicalEvent):
+                if item.delivery == Delivery.CRITICAL:
+                    if oldest_critical is None:
+                        oldest_critical = item
+                elif evicted is None:
                     evicted = item
-                    break
-                held.append(item)
-        except queue.Empty:
-            pass
+                    continue
+            held.append(item)
         if evicted is None and oldest_critical is not None:
             # Queue holds only criticals/sentinels: the oldest critical makes
-            # room and is spooled by the caller.
-            held.remove(oldest_critical)
+            # room and is spooled by the caller. Compare by identity — two
+            # canonical events may be equal by value.
+            for i, item in enumerate(held):
+                if item is oldest_critical:
+                    del held[i]
+                    break
             evicted = oldest_critical
         for item in held:
             try:

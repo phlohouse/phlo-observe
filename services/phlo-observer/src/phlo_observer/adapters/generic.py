@@ -9,6 +9,7 @@ source system is silently discarded while still producing a queryable event.
 from __future__ import annotations
 
 from observe_core.serialization import normalize_value
+from pydantic import ValidationError
 
 from phlo_observer.adapters.base import (
     AdapterError,
@@ -65,23 +66,27 @@ class GenericAdapter:
             if isinstance(body, dict) and body.get(key) is not None
         }
         correlation.update({k: v for k, v in payload.metadata.items() if v is not None})
-        return NormalizedBatch(
-            events=[
-                envelope_for(
-                    event="external.source_event",
-                    category="other",
-                    outcome="unknown",
-                    correlation=correlation,
-                    attributes={
-                        "producer": payload.producer,
-                        "source_kind": payload.source_kind,
-                        "payload": normalize_value(body),
-                    },
-                    source={
-                        "producer": producer,
-                        "kind": payload.source_kind,
-                        "adapter": f"{self.name}.{self.version}",
-                    },
-                )
-            ]
-        )
+        try:
+            event = envelope_for(
+                event="external.source_event",
+                category="other",
+                outcome="unknown",
+                correlation=correlation,
+                attributes={
+                    "producer": payload.producer,
+                    "source_kind": payload.source_kind,
+                    "payload": normalize_value(body),
+                },
+                source={
+                    "producer": producer,
+                    "kind": payload.source_kind,
+                    "adapter": f"{self.name}.{self.version}",
+                },
+            )
+        except (ValidationError, ValueError) as exc:
+            return NormalizedBatch(
+                errors=[{"index": 0, "code": "SCHEMA_INVALID", "message": str(exc)}]
+            )
+        batch = NormalizedBatch()
+        batch.add_event(event, index=0)
+        return batch

@@ -7,9 +7,8 @@ only). Mirrors the SDK-side normalization so client and server agree.
 
 from __future__ import annotations
 
-from typing import Any
-
 from phlo_observe.integrations.dbt import manifest_metadata, run_results_events
+from pydantic import ValidationError
 
 from phlo_observer.adapters.base import (
     AdapterError,
@@ -55,14 +54,14 @@ class DbtAdapter:
         except Exception as exc:
             raise AdapterError(f"invalid run_results document: {exc}") from exc
         extra_meta = manifest_metadata(manifest) if isinstance(manifest, dict) else {}
-        events: list[dict[str, Any]] = []
-        for item in payloads:
+        batch = NormalizedBatch()
+        for index, item in enumerate(payloads):
             attrs = dict(item.get("attributes") or {})
             for key in ("project_name", "adapter_type"):
                 if key not in attrs and extra_meta.get(key):
                     attrs[key] = extra_meta[key]
-            events.append(
-                envelope_for(
+            try:
+                event = envelope_for(
                     event=item["event"],
                     category=item.get("category", "other"),
                     outcome=item.get("outcome", "unknown"),
@@ -75,5 +74,9 @@ class DbtAdapter:
                         "adapter": f"{self.name}.{self.version}",
                     },
                 )
-            )
-        return NormalizedBatch(events=events)
+            except (ValidationError, ValueError, KeyError) as exc:
+                # One malformed result must not reject the batch (spec §35).
+                batch.errors.append({"index": index, "code": "SCHEMA_INVALID", "message": str(exc)})
+                continue
+            batch.add_event(event, index=index)
+        return batch

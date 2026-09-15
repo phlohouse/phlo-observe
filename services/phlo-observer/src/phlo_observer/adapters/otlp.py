@@ -1,15 +1,21 @@
 """OTLP/HTTP JSON adapter — normalizes ``ExportLogsServiceRequest`` payloads.
 
-Each ``logRecord`` becomes one canonical event:
+Two record shapes are handled:
 
-- ``timeUnixNano`` (falling back to ``observedTimeUnixNano``) -> observed_at;
-- ``severityNumber``/``severityText`` -> canonical severity;
-- ``traceId``/``spanId`` -> correlation.trace_id / correlation.span_id;
-- resource ``service.*`` attributes -> canonical service block;
-- an ``event.name``/``event`` log attribute matching the event-name pattern
-  becomes the canonical event name, otherwise ``otlp.log``;
-- remaining record attributes land in ``attributes``; resource attributes are
-  preserved under ``resource.*`` keys and the record body under ``body``.
+- **observe-core encoded records** (marked by an ``observe.event_id``
+  attribute) restore the canonical envelope from ``observe.*`` attributes —
+  correlation, event id/name, timing, severity, service, error, source and
+  attributes — so events exported by the observe-core OTLP drain (or this
+  observer's own OTLP forwarder) round-trip with run/trace correlation intact.
+- **plain OTel records** normalize generically: ``timeUnixNano`` (falling
+  back to ``observedTimeUnixNano``) -> observed_at;
+  ``severityNumber``/``severityText`` -> canonical severity;
+  ``traceId``/``spanId`` -> correlation.trace_id / correlation.span_id
+  (with ``observe.*`` attribute fallbacks); resource ``service.*`` attributes
+  -> canonical service block; an ``event.name``/``event`` log attribute
+  matching the event-name pattern becomes the canonical event name, otherwise
+  ``otlp.log``; remaining record attributes land in ``attributes``, resource
+  attributes under ``resource.*`` keys, and the record body under ``body``.
 
 This is the mapping documented for the observe-core OTLP drain (spec §13.4):
 events exported as OTel log records re-enter as canonical events here.
@@ -21,7 +27,16 @@ import datetime as dt
 import re
 from typing import Any
 
-from observe_core.timestamps import utcnow
+import orjson
+from observe_core.ids import new_event_id
+from observe_core.models import (
+    CORRELATION_KEYS,
+    ErrorInfo,
+    EventEnvelope,
+    ServiceInfo,
+    SourceInfo,
+)
+from observe_core.timestamps import parse_rfc3339, utcnow
 
 from phlo_observer.adapters.base import (
     AdapterError,
@@ -46,8 +61,13 @@ _SEVERITY_BY_TEXT = {
     "INFO": "info",
     "WARN": "warn",
     "ERROR": "error",
+    "CRITICAL": "critical",
     "FATAL": "critical",
 }
+
+_SERVICE_FIELDS = frozenset(ServiceInfo.model_fields)
+_SOURCE_FIELDS = frozenset(SourceInfo.model_fields)
+_ERROR_FIELDS = frozenset(ErrorInfo.model_fields)
 
 
 def _any_value(value: Any) -> Any:
@@ -103,7 +123,58 @@ def _severity(record: dict[str, Any]) -> str:
                 return name
         return "critical"
     text = str(record.get("severityText") or record.get("severity_text") or "").upper()
-    return _SEVERITY_BY_TEXT.get(text[:5].rstrip("0123456789"), "info")
+    return _SEVERITY_BY_TEXT.get(text, _SEVERITY_BY_TEXT.get(text[:5].rstrip("0123456789"), "info"))
+
+
+def _json_section(value: Any) -> Any:
+    """Decode a JSON-encoded ``observe.<section>`` attribute (string or dict)."""
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return orjson.loads(value)
+    except orjson.JSONDecodeError:
+        return None
+
+
+def _dt_attr(value: Any) -> Any:
+    """Parse an ``observe.*`` timestamp attribute (RFC3339 string) safely."""
+    if isinstance(value, str):
+        try:
+            return parse_rfc3339(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dt.datetime) else None
+
+
+def _num_attr(value: Any) -> float | None:
+    """Coerce an ``observe.*`` numeric attribute; OTLP int64s arrive as strings."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_name(candidate: Any) -> str | None:
+    """Return ``candidate`` when it is a valid canonical event name."""
+    if isinstance(candidate, str) and _EVENT_NAME.match(candidate):
+        return candidate
+    return None
+
+
+def _trace_correlation(record: dict[str, Any], record_attrs: dict[str, Any]) -> dict[str, Any]:
+    """Trace/span ids from OTel-native fields, then ``observe.*`` attributes."""
+    return {
+        "trace_id": record.get("traceId")
+        or record.get("trace_id")
+        or record_attrs.get("observe.correlation.trace_id")
+        or record_attrs.get("observe.trace_id"),
+        "span_id": record.get("spanId")
+        or record.get("span_id")
+        or record_attrs.get("observe.correlation.span_id")
+        or record_attrs.get("observe.span_id"),
+    }
 
 
 class OtlpAdapter:
@@ -133,16 +204,19 @@ class OtlpAdapter:
         if not isinstance(resource_logs, list):
             raise AdapterError("OTLP payload has no resourceLogs")
         events: list[dict[str, Any]] = []
+        indices: list[int] = []
+        errors: list[dict[str, Any]] = []
+        position = 0
         for resource_log in resource_logs:
             if not isinstance(resource_log, dict):
                 continue
             resource = resource_log.get("resource") or {}
             resource_attrs = _kv_list(resource.get("attributes"))
-            service_name = str(resource_attrs.get("service.name") or "otlp")
             service_attrs = {
-                "name": service_name,
+                "name": str(resource_attrs.get("service.name") or "otlp"),
                 "version": resource_attrs.get("service.version"),
                 "instance_id": resource_attrs.get("service.instance.id"),
+                "environment": resource_attrs.get("deployment.environment"),
             }
             scopes = resource_log.get("scopeLogs") or resource_log.get("scope_logs") or []
             for scope_log in scopes:
@@ -150,14 +224,28 @@ class OtlpAdapter:
                     continue
                 scope_name = ((scope_log.get("scope") or {}).get("name")) or None
                 records = scope_log.get("logRecords") or scope_log.get("log_records") or []
-                events.extend(
-                    self._record_event(record, resource_attrs, service_attrs, scope_name)
-                    for record in records
-                    if isinstance(record, dict)
-                )
-        if not events:
+                for record in records:
+                    index, position = position, position + 1
+                    if not isinstance(record, dict):
+                        continue
+                    try:
+                        events.append(
+                            self._record_event(record, resource_attrs, service_attrs, scope_name)
+                        )
+                        indices.append(index)
+                    except Exception as exc:
+                        # One bad record must not reject the batch; the
+                        # envelope model re-validates restored fields anyway.
+                        errors.append(
+                            {
+                                "index": index,
+                                "code": "SCHEMA_INVALID",
+                                "message": f"logRecord {index} cannot be normalized: {exc}",
+                            }
+                        )
+        if not events and not errors:
             raise AdapterError("OTLP payload contained no logRecords")
-        return NormalizedBatch(events=events)
+        return NormalizedBatch(events=events, errors=errors, indices=indices)
 
     def _record_event(
         self,
@@ -167,9 +255,13 @@ class OtlpAdapter:
         scope_name: str | None,
     ) -> dict[str, Any]:
         record_attrs = _kv_list(record.get("attributes"))
-        event_name = record_attrs.pop("event.name", None) or record_attrs.pop("event", None)
-        if not (isinstance(event_name, str) and _EVENT_NAME.match(event_name)):
-            event_name = "otlp.log"
+        if "observe.event_id" in record_attrs:
+            return self._canonical_event(
+                record, record_attrs, resource_attrs, service_attrs, scope_name
+            )
+        event_name = _event_name(record_attrs.pop("event.name", None)) or _event_name(
+            record_attrs.pop("event", None)
+        )
         attributes: dict[str, Any] = {
             f"resource.{k}": v for k, v in resource_attrs.items() if v is not None
         }
@@ -185,15 +277,12 @@ class OtlpAdapter:
                 record.get("observedTimeUnixNano") or record.get("observed_time_unix_nano")
             )
         envelope = envelope_for(
-            event=event_name,
+            event=event_name or "otlp.log",
             category="other",
             outcome="unknown",
             severity=_severity(record),
             observed_at=observed or utcnow(),
-            correlation={
-                "trace_id": record.get("traceId") or record.get("trace_id"),
-                "span_id": record.get("spanId") or record.get("span_id"),
-            },
+            correlation=_trace_correlation(record, record_attrs),
             attributes=attributes,
             source={
                 "producer": "otlp",
@@ -205,3 +294,127 @@ class OtlpAdapter:
         if not envelope["service"].get("name"):
             envelope["service"]["name"] = "otlp"
         return envelope
+
+    def _canonical_event(
+        self,
+        record: dict[str, Any],
+        attrs: dict[str, Any],
+        resource_attrs: dict[str, Any],
+        service_attrs: dict[str, Any],
+        scope_name: str | None,
+    ) -> dict[str, Any]:
+        """Rebuild an observe-core encoded envelope from ``observe.*`` attrs.
+
+        The encoded event id, correlation, timing and structured sections are
+        authoritative; OTel-native record fields fill any gaps. The envelope
+        model re-validates every restored value, so malformed metadata cannot
+        smuggle a non-canonical event through.
+        """
+        correlation: dict[str, Any] = {}
+        for key in CORRELATION_KEYS:
+            value = attrs.get(f"observe.correlation.{key}")
+            if value is not None:
+                correlation[key] = str(value)
+        for key, value in _trace_correlation(record, attrs).items():
+            correlation.setdefault(key, value)
+        extra = _json_section(attrs.get("observe.correlation.extra"))
+        if isinstance(extra, dict):
+            correlation["extra"] = extra
+
+        service = _json_section(attrs.get("observe.service"))
+        if isinstance(service, dict):
+            service = {
+                key: value
+                for key, value in service.items()
+                if key in _SERVICE_FIELDS and value is not None
+            }
+        else:
+            service = {k: v for k, v in service_attrs.items() if v is not None}
+        if not service.get("name"):
+            service["name"] = "otlp"
+
+        source = _json_section(attrs.get("observe.source"))
+        if isinstance(source, dict):
+            source = {
+                key: value
+                for key, value in source.items()
+                if key in _SOURCE_FIELDS and value is not None
+            }
+        else:
+            source = {"kind": "logs"}
+        source["adapter"] = f"{self.name}.{self.version}"
+        source.setdefault("producer", "otlp")
+
+        error = _json_section(attrs.get("observe.error"))
+        if isinstance(error, dict):
+            error = {
+                key: value
+                for key, value in error.items()
+                if key in _ERROR_FIELDS and value is not None
+            }
+            if not error.get("message"):
+                error = None
+        else:
+            error = None
+
+        attributes = _json_section(attrs.get("observe.attributes"))
+        attributes = dict(attributes) if isinstance(attributes, dict) else {}
+        # Anything not part of the observe.* encoding (collector-added
+        # metadata) is preserved alongside the restored attributes.
+        for key, value in attrs.items():
+            if not key.startswith("observe.") and key not in ("event.name", "event"):
+                attributes.setdefault(key, value)
+        for key, value in resource_attrs.items():
+            if value is not None and key not in (
+                "service.name",
+                "service.version",
+                "service.instance.id",
+                "deployment.environment",
+            ):
+                attributes.setdefault(f"resource.{key}", value)
+        if scope_name:
+            attributes["otel.scope"] = scope_name
+
+        body = _any_value(record.get("body"))
+        event_name = (
+            _event_name(attrs.get("observe.event"))
+            or _event_name(body)
+            or _event_name(attrs.get("event.name"))
+            or "otlp.log"
+        )
+        observed = (
+            _dt_attr(attrs.get("observe.observed_at"))
+            or _nanos_to_dt(record.get("timeUnixNano") or record.get("time_unix_nano"))
+            or _nanos_to_dt(
+                record.get("observedTimeUnixNano") or record.get("observed_time_unix_nano")
+            )
+            or utcnow()
+        )
+        severity_fields = (
+            record.get("severityNumber")
+            or record.get("severity_number")
+            or record.get("severityText")
+            or record.get("severity_text")
+        )
+        severity = (
+            _severity(record) if severity_fields else str(attrs.get("observe.severity") or "info")
+        )
+        envelope = EventEnvelope(
+            schema_version=str(attrs.get("observe.schema_version") or "1.0"),
+            event_id=str(attrs.get("observe.event_id") or new_event_id()),
+            event=event_name,
+            category=str(attrs.get("observe.category") or "other"),
+            outcome=str(attrs.get("observe.outcome") or "unknown"),
+            severity=severity,
+            delivery=str(attrs.get("observe.delivery") or "telemetry"),
+            started_at=_dt_attr(attrs.get("observe.started_at")),
+            ended_at=_dt_attr(attrs.get("observe.ended_at")),
+            duration_ms=_num_attr(attrs.get("observe.duration_ms")),
+            observed_at=observed,
+            service=service,
+            correlation=correlation,
+            attributes=attributes,
+            error=error,
+            source=source,
+        )
+        return envelope.to_canonical_dict()

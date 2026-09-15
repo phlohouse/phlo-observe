@@ -29,6 +29,7 @@ CASES = {
     "dbt_run_results.json": ("dbt", "dbt_run_results.golden.json"),
     "dbt_artifacts_bundle.json": ("dbt", "dbt_artifacts_bundle.golden.json"),
     "otlp_logs.json": ("otlp", "otlp_logs.golden.json"),
+    "otlp_observe_core.json": ("otlp", "otlp_observe_core.golden.json"),
     "generic_event.json": ("generic", "generic_event.golden.json"),
 }
 

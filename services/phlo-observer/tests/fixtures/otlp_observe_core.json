@@ -1,0 +1,179 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "etl"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "2.0"
+            }
+          }
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {
+            "name": "observe-core"
+          },
+          "logRecords": [
+            {
+              "timeUnixNano": "1735689601500000000",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": {
+                "stringValue": "pipeline.run"
+              },
+              "attributes": [
+                {
+                  "key": "observe.schema_version",
+                  "value": {
+                    "stringValue": "1.0"
+                  }
+                },
+                {
+                  "key": "observe.event_id",
+                  "value": {
+                    "stringValue": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"
+                  }
+                },
+                {
+                  "key": "observe.event",
+                  "value": {
+                    "stringValue": "pipeline.run"
+                  }
+                },
+                {
+                  "key": "observe.category",
+                  "value": {
+                    "stringValue": "pipeline"
+                  }
+                },
+                {
+                  "key": "observe.outcome",
+                  "value": {
+                    "stringValue": "failure"
+                  }
+                },
+                {
+                  "key": "observe.severity",
+                  "value": {
+                    "stringValue": "error"
+                  }
+                },
+                {
+                  "key": "observe.delivery",
+                  "value": {
+                    "stringValue": "critical"
+                  }
+                },
+                {
+                  "key": "observe.started_at",
+                  "value": {
+                    "stringValue": "2025-01-01T00:00:00Z"
+                  }
+                },
+                {
+                  "key": "observe.ended_at",
+                  "value": {
+                    "stringValue": "2025-01-01T00:00:01.5Z"
+                  }
+                },
+                {
+                  "key": "observe.duration_ms",
+                  "value": {
+                    "doubleValue": 1500.0
+                  }
+                },
+                {
+                  "key": "observe.observed_at",
+                  "value": {
+                    "stringValue": "2025-01-01T00:00:01.5Z"
+                  }
+                },
+                {
+                  "key": "observe.correlation.trace_id",
+                  "value": {
+                    "stringValue": "4bf92f3577b34da6a3ce929d0e0e4736"
+                  }
+                },
+                {
+                  "key": "observe.correlation.span_id",
+                  "value": {
+                    "stringValue": "00f067aa0ba902b7"
+                  }
+                },
+                {
+                  "key": "observe.correlation.run_id",
+                  "value": {
+                    "stringValue": "run-7"
+                  }
+                },
+                {
+                  "key": "observe.correlation.asset_key",
+                  "value": {
+                    "stringValue": "staging.orders"
+                  }
+                },
+                {
+                  "key": "observe.correlation.pipeline",
+                  "value": {
+                    "stringValue": "etl"
+                  }
+                },
+                {
+                  "key": "observe.correlation.extra",
+                  "value": {
+                    "stringValue": "{\"attempt\":2}"
+                  }
+                },
+                {
+                  "key": "observe.trace_id",
+                  "value": {
+                    "stringValue": "4bf92f3577b34da6a3ce929d0e0e4736"
+                  }
+                },
+                {
+                  "key": "observe.span_id",
+                  "value": {
+                    "stringValue": "00f067aa0ba902b7"
+                  }
+                },
+                {
+                  "key": "observe.service",
+                  "value": {
+                    "stringValue": "{\"name\":\"etl\",\"version\":\"2.0\",\"environment\":\"prod\"}"
+                  }
+                },
+                {
+                  "key": "observe.error",
+                  "value": {
+                    "stringValue": "{\"message\":\"load failed\",\"code\":\"LOAD_FAILED\",\"retryable\":true}"
+                  }
+                },
+                {
+                  "key": "observe.source",
+                  "value": {
+                    "stringValue": "{\"producer\":\"phlo-observe\",\"kind\":\"sdk\"}"
+                  }
+                },
+                {
+                  "key": "observe.attributes",
+                  "value": {
+                    "stringValue": "{\"rows_out\":42}"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from observe_core.otlp_mapping import event_to_otlp_attributes
 from observe_core.timestamps import parse_rfc3339
 
 from phlo_observer import __version__, metrics
@@ -27,20 +28,15 @@ logger = logging.getLogger("phlo_observer.forward")
 _TIMEOUT = httpx.Timeout(5.0)
 _EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
 
-# OTLP severity numbers (logs data model): DEBUG=5 INFO=9 WARN=13 ERROR=17.
+# OTLP severity numbers (logs data model): same mapping as the observe-core
+# OTLP drain so forwarded records round-trip identically.
 _SEVERITY_NUMBER = {
+    "trace": 1,
     "debug": 5,
     "info": 9,
     "warn": 13,
     "error": 17,
-    "critical": 21,
-}
-_SEVERITY_TEXT = {
-    "debug": "DEBUG",
-    "info": "INFO",
-    "warn": "WARN",
-    "error": "ERROR",
-    "critical": "FATAL",
+    "critical": 24,
 }
 
 
@@ -90,38 +86,24 @@ def _otlp_value(value: Any) -> dict[str, Any]:
     return {"stringValue": str(value)}
 
 
-def _flatten(prefix: str, value: Any, out: list[dict[str, Any]]) -> None:
-    """Append ``prefix.<nested>`` attributes; dicts flatten one level at a time."""
-    if value is None:
-        return
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            _flatten(f"{prefix}.{key}", nested, out)
-        return
-    out.append({"key": prefix, "value": _otlp_value(value)})
-
-
 def _log_record(event: dict[str, Any], received_ns: str) -> dict[str, Any]:
-    """Map one canonical event dict onto an OTLP log record."""
-    attrs: list[dict[str, Any]] = []
-    for key in ("event_id", "schema_version", "category", "outcome", "delivery"):
-        _flatten(f"observe.{key}", event.get(key), attrs)
-    _flatten("observe.duration_ms", event.get("duration_ms"), attrs)
-    for key in ("started_at", "ended_at"):
-        value = event.get(key)
-        if isinstance(value, dt.datetime):
-            value = value.isoformat()
-        _flatten(f"observe.{key}", value, attrs)
-    _flatten("correlation", event.get("correlation"), attrs)
-    _flatten("attributes", event.get("attributes"), attrs)
-    _flatten("error", event.get("error"), attrs)
-    _flatten("source", event.get("source"), attrs)
+    """Map one canonical event dict onto an OTLP log record.
+
+    Attributes use the shared ``observe.*`` encoding from
+    :func:`observe_core.otlp_mapping.event_to_otlp_attributes` — the same
+    scheme the observe-core OTLP drain emits — so forwarded events keep
+    correlation and structured sections if they are re-ingested.
+    """
+    attrs = [
+        {"key": key, "value": _otlp_value(value)}
+        for key, value in event_to_otlp_attributes(event).items()
+    ]
     severity = str(event.get("severity") or "info")
     return {
         "timeUnixNano": _unix_nano(event.get("observed_at")),
         "observedTimeUnixNano": received_ns,
         "severityNumber": _SEVERITY_NUMBER.get(severity, 9),
-        "severityText": _SEVERITY_TEXT.get(severity, "INFO"),
+        "severityText": severity.upper(),
         "body": {"stringValue": str(event.get("event") or "")},
         "attributes": attrs,
     }

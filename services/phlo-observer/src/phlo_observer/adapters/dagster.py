@@ -17,6 +17,7 @@ import datetime as dt
 from typing import Any
 
 from observe_core.timestamps import parse_rfc3339
+from pydantic import ValidationError
 
 from phlo_observer.adapters.base import (
     AdapterError,
@@ -124,80 +125,83 @@ class DagsterAdapter:
         except Exception as exc:
             raise AdapterError(f"payload is not valid JSON: {exc}") from exc
         records = body if isinstance(body, list) else [body]
-        events: list[dict[str, Any]] = []
-        for record in records:
+        batch = NormalizedBatch()
+        for index, record in enumerate(records):
             if not isinstance(record, dict):
                 continue
             event_type = _event_type(record)
             if event_type is None or event_type not in _ALLOWED_TYPES:
                 continue  # deliberately not mirrored
-            run_id = record.get("run_id") or record.get("dagster_run_id")
-            job = record.get("job_name") or record.get("pipeline_name")
-            source = {
-                "producer": "dagster",
-                "kind": event_type,
-                "adapter": f"{self.name}.{self.version}",
-            }
-            correlation = {
-                "run_id": run_id,
-                "job_id": job,
-                "asset_key": _asset_key(record),
-                "partition_key": record.get("partition") or record.get("partition_key"),
-                "pipeline": job,
-            }
-            if event_type in _MATERIALIZATION:
-                events.append(
-                    envelope_for(
-                        event="asset.materialize",
-                        category="data",
-                        outcome="success",
-                        observed_at=_observed_at(record),
-                        correlation=correlation,
-                        attributes={
-                            "asset_key": _asset_key(record),
-                            "dagster_event_type": event_type,
-                        },
-                        source=source,
-                    )
-                )
-            elif event_type in _CHECK:
-                passed = record.get("passed")
-                if passed is None:
-                    eval_data = record.get("event_specific_data") or {}
-                    if isinstance(eval_data, dict):
-                        passed = eval_data.get("passed")
-                check_name = record.get("check_name") or record.get("check_name_label")
-                events.append(
-                    envelope_for(
-                        event="quality.check",
-                        category="quality",
-                        outcome="success" if passed else "failure",
-                        severity="info" if passed else "error",
-                        observed_at=_observed_at(record),
-                        correlation=correlation,
-                        attributes={"check_name": check_name, "passed": bool(passed)},
-                        source=source,
-                    )
-                )
-            else:
-                mapping = _ALLOWED_RUN_STATUS.get(event_type) or _STEP_STATUS[event_type]
-                name, category, outcome, severity = mapping
-                events.append(
-                    envelope_for(
-                        event=name,
-                        category=category,
-                        outcome=outcome,
-                        severity=severity,
-                        observed_at=_observed_at(record),
-                        correlation=correlation,
-                        attributes={
-                            "dagster_event_type": event_type,
-                            "step_key": record.get("step_key"),
-                            "job_name": job,
-                        },
-                        source=source,
-                    )
-                )
-        if not events:
+            try:
+                event = self._record_event(record, event_type)
+            except (ValidationError, ValueError) as exc:
+                # One malformed record must not reject the batch (spec §35).
+                batch.errors.append({"index": index, "code": "SCHEMA_INVALID", "message": str(exc)})
+                continue
+            batch.add_event(event, index=index)
+        if not batch.events and not batch.errors:
             raise AdapterError("payload contained no normalizable Dagster event types")
-        return NormalizedBatch(events=events)
+        return batch
+
+    def _record_event(self, record: dict[str, Any], event_type: str) -> dict[str, Any]:
+        """Map one allowlisted Dagster record to a canonical event."""
+        run_id = record.get("run_id") or record.get("dagster_run_id")
+        job = record.get("job_name") or record.get("pipeline_name")
+        source = {
+            "producer": "dagster",
+            "kind": event_type,
+            "adapter": f"{self.name}.{self.version}",
+        }
+        correlation = {
+            "run_id": run_id,
+            "job_id": job,
+            "asset_key": _asset_key(record),
+            "partition_key": record.get("partition") or record.get("partition_key"),
+            "pipeline": job,
+        }
+        if event_type in _MATERIALIZATION:
+            return envelope_for(
+                event="asset.materialize",
+                category="data",
+                outcome="success",
+                observed_at=_observed_at(record),
+                correlation=correlation,
+                attributes={
+                    "asset_key": _asset_key(record),
+                    "dagster_event_type": event_type,
+                },
+                source=source,
+            )
+        if event_type in _CHECK:
+            passed = record.get("passed")
+            if passed is None:
+                eval_data = record.get("event_specific_data") or {}
+                if isinstance(eval_data, dict):
+                    passed = eval_data.get("passed")
+            check_name = record.get("check_name") or record.get("check_name_label")
+            return envelope_for(
+                event="quality.check",
+                category="quality",
+                outcome="success" if passed else "failure",
+                severity="info" if passed else "error",
+                observed_at=_observed_at(record),
+                correlation=correlation,
+                attributes={"check_name": check_name, "passed": bool(passed)},
+                source=source,
+            )
+        mapping = _ALLOWED_RUN_STATUS.get(event_type) or _STEP_STATUS[event_type]
+        name, category, outcome, severity = mapping
+        return envelope_for(
+            event=name,
+            category=category,
+            outcome=outcome,
+            severity=severity,
+            observed_at=_observed_at(record),
+            correlation=correlation,
+            attributes={
+                "dagster_event_type": event_type,
+                "step_key": record.get("step_key"),
+                "job_name": job,
+            },
+            source=source,
+        )

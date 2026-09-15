@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -41,12 +38,3 @@ async def check_database(factory: async_sessionmaker[AsyncSession]) -> bool:
         return True
     except Exception:
         return False
-
-
-@asynccontextmanager
-async def session_scope(
-    factory: async_sessionmaker[AsyncSession],
-) -> AsyncIterator[AsyncSession]:
-    """Async context manager yielding a session, committing on success."""
-    async with factory() as session, session.begin():
-        yield session

@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from urllib.parse import unquote
 
+import respx
 from observe_core import ObserveSettings, configure, event, flush, observe, shutdown
 from observe_core.drains.jsonl import JsonlDrain
 from observe_core.drains.memory import MemoryDrain
@@ -113,6 +114,70 @@ def test_secrets_never_reach_jsonl_file(tmp_path: Path):
     assert "secret-token-value" not in content
     assert REDACTED in content
     assert isinstance(rt.drains[0], JsonlDrain)
+
+
+@respx.mock
+def test_secrets_never_reach_http_server():
+    """Spec §16: the HTTP request body carries only post-redaction payloads."""
+    url = "https://observer.test/v1/events:batch"
+    route = respx.post(url).respond(202)
+    configure(
+        ObserveSettings(
+            service_name="test",
+            drains=[
+                {
+                    "type": "http",
+                    "endpoint": url,
+                    "gzip_threshold_bytes": 10**9,  # keep body readable
+                }
+            ],
+            spool_enabled=False,
+        )
+    )
+    try:
+        event("application.log", attributes={"api_key": "secret-http-value", "ok": 1})
+        flush(2.0)
+    finally:
+        shutdown(2.0)
+    assert route.called
+    body = route.calls.last.request.content
+    assert b"secret-http-value" not in body
+    assert REDACTED.encode() in body
+
+
+@respx.mock
+def test_secrets_never_reach_spool_file(tmp_path: Path):
+    """Spec §16: spool segments hold post-redaction canonical bytes."""
+    respx.post("https://observer.test/v1/events:batch").respond(500)
+    rt = configure(
+        ObserveSettings(
+            service_name="test",
+            drains=[
+                {
+                    "type": "http",
+                    "endpoint": "https://observer.test/v1/events:batch",
+                    "max_attempts": 1,
+                    "backoff_base_ms": 1,
+                }
+            ],
+            spool_enabled=True,
+            spool_dir=tmp_path / "spool",
+            flush_interval_ms=20,
+        )
+    )
+    try:
+        event(
+            "wap.promote",
+            delivery="critical",
+            attributes={"token": "secret-spool-value"},
+        )
+        flush(3.0)
+        assert rt.spool is not None
+        bodies = b"\n".join(seg.read_bytes() for seg in rt.spool._segments())
+    finally:
+        shutdown(2.0)
+    assert b"secret-spool-value" not in bodies
+    assert REDACTED.encode() in bodies
 
 
 def test_sanitize_url():

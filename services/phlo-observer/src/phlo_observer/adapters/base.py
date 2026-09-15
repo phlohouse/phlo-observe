@@ -58,6 +58,20 @@ class NormalizedBatch:
     """Canonical event dicts (post-model validation happens at persist)."""
     errors: list[dict[str, Any]] = field(default_factory=list)
     """Per-item failures: ``{"index", "code", "message"}`` dicts."""
+    indices: list[int] | None = None
+    """Source payload index per accepted event, parallel to ``events``.
+
+    Adapters that drop invalid items set this so persist-stage errors report
+    the original payload position rather than the compacted list position.
+    """
+
+    def add_event(self, event: dict[str, Any], index: int | None = None) -> None:
+        """Append an accepted event, tracking its source index when given."""
+        self.events.append(event)
+        if index is not None:
+            if self.indices is None:
+                self.indices = []
+            self.indices.append(index)
 
 
 class SourceAdapter(Protocol):

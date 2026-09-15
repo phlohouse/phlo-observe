@@ -14,7 +14,7 @@ from typing import Any
 
 from observe_core.models import EventEnvelope
 from observe_core.timestamps import parse_rfc3339, utcnow
-from sqlalchemy import asc, func, select
+from sqlalchemy import asc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -156,6 +156,7 @@ async def persist_events(
     event_dicts: list[dict[str, Any]],
     *,
     raw_event_id: uuid.UUID | None = None,
+    source_indices: list[int] | None = None,
 ) -> IngestResult:
     """Insert canonical events idempotently and update run projections.
 
@@ -163,14 +164,24 @@ async def persist_events(
     Duplicate ``event_id`` with different content: reported as a conflict;
     the original row is never overwritten.
 
+    ``source_indices`` maps each event back to its index in the source
+    payload (adapters drop invalid items, compacting the list), so reported
+    error indices refer to the caller's payload positions.
+
     The common case is a bulk insert inside a single savepoint (one
     ``INSERT`` round-trip via executemany). Any batch-level failure falls
     back to per-item savepoints so one bad row rejects only itself.
     """
     result = IngestResult()
     received_at = utcnow()
+    if source_indices is not None and len(source_indices) != len(event_dicts):
+        # An adapter bug must not break ingest; fall back to list positions.
+        logger.warning("source_indices length mismatch; using event list positions")
+        source_indices = None
     staged: list[tuple[int, Event, dict[str, Any]]] = []
     for index, data in enumerate(event_dicts):
+        if source_indices is not None:
+            index = source_indices[index]
         try:
             row = _event_row(data, received_at, raw_event_id)
             # ORM columns need real datetimes; canonical dicts carry ISO strings.
@@ -419,6 +430,6 @@ async def query_runs(
     return rows, next_cursor
 
 
-async def count_events(session: AsyncSession) -> int:
-    """Total normalized events stored."""
-    return int((await session.execute(select(func.count(Event.event_id)))).scalar_one())
+async def probe_events_table(session: AsyncSession) -> None:
+    """Cheap schema-compat probe: raises if the ``events`` table is missing."""
+    await session.execute(select(Event.event_id).limit(1))

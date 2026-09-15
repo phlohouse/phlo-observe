@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Iterator
 
 import pytest
 from observe_core import ObservedError, event, flush, observe
@@ -161,6 +162,70 @@ async def test_decorator_async(captured: tuple[Runtime, MemoryDrain]):
     assert await extract() == 42
     (ev,) = _data(drain)
     assert ev["outcome"] == "success"
+
+
+def test_decorator_sync_generator(captured: tuple[Runtime, MemoryDrain]):
+    """A decorated generator's operation spans iteration, not creation."""
+    _, drain = captured
+
+    @observe("transform.execute")
+    def rows() -> Iterator[int]:
+        yield 1
+        yield 2
+
+    gen = rows()
+    assert drain.events == []  # nothing emitted before the body runs
+    assert list(gen) == [1, 2]
+    (ev,) = _data(drain)
+    assert ev["event"] == "transform.execute"
+    assert ev["outcome"] == "success"
+    assert ev["duration_ms"] is not None
+
+
+def test_decorator_generator_failure_marked(captured: tuple[Runtime, MemoryDrain]):
+    """A mid-iteration exception must record a failed operation."""
+    _, drain = captured
+
+    @observe("transform.execute")
+    def rows() -> Iterator[int]:
+        yield 1
+        raise ValueError("mid-iteration")
+
+    with pytest.raises(ValueError, match="mid-iteration"):
+        list(rows())
+    (ev,) = _data(drain)
+    assert ev["outcome"] == "failure"
+    assert ev["error"]["exception_type"] == "ValueError"
+    assert ev["error"]["message"] == "mid-iteration"
+
+
+async def test_decorator_async_generator(captured: tuple[Runtime, MemoryDrain]):
+    _, drain = captured
+
+    @observe("ingestion.extract")
+    async def rows() -> AsyncIterator[int]:
+        yield 1
+        yield 2
+
+    assert [x async for x in rows()] == [1, 2]
+    (ev,) = _data(drain)
+    assert ev["outcome"] == "success"
+
+
+async def test_decorator_async_generator_failure(captured: tuple[Runtime, MemoryDrain]):
+    _, drain = captured
+
+    @observe("ingestion.extract")
+    async def rows() -> AsyncIterator[int]:
+        yield 1
+        raise KeyError("k")
+
+    with pytest.raises(KeyError):
+        async for _ in rows():
+            pass
+    (ev,) = _data(drain)
+    assert ev["outcome"] == "failure"
+    assert ev["error"]["exception_type"] == "KeyError"
 
 
 def test_instantaneous_event(captured: tuple[Runtime, MemoryDrain]):

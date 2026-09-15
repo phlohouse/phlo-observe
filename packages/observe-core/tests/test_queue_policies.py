@@ -6,7 +6,8 @@ import threading
 import time
 from collections.abc import Sequence
 
-from observe_core import event, flush, observe, shutdown
+import pytest
+from observe_core import TelemetryError, event, flush, observe, shutdown
 from observe_core.drains.base import CanonicalEvent
 from observe_core.drains.memory import MemoryDrain
 from observe_core.runtime import Runtime
@@ -234,6 +235,45 @@ def test_still_oversized_dropped(make_runtime):
     flush(2.0)
     assert drain.events == []
     assert rt.stats.snapshot()["dropped_oversized"] == 1
+
+
+def test_still_oversized_raises_when_telemetry_required(make_runtime):
+    """Regression: telemetry_required must fail closed on oversized events.
+
+    The raise inside ``_finalize`` was previously swallowed by ``emit``'s
+    catch-all (which only re-raised under ``fail_fast``), so an oversized
+    event silently vanished even with telemetry_required on.
+    """
+    rt = make_runtime(telemetry_required=True, fail_fast=False, max_event_bytes=600)
+    with pytest.raises(TelemetryError, match="exceeds size limit"):
+        event("application.log", attributes={"blob": "x" * 100_000})
+    assert rt.stats.snapshot()["dropped_oversized"] == 1
+
+
+def test_drop_oldest_preserves_queue_order(make_runtime):
+    """Regression: eviction must not reorder survivors.
+
+    Previously held items were re-queued at the tail, moving criticals
+    dequeued during the scan behind events that were never dequeued.
+    """
+    gate = threading.Event()
+    rt = _stall_runtime(make_runtime, gate, drop_policy="drop_oldest", queue_capacity=4)
+    try:
+        event("wap.promote", delivery="critical", attributes={"tag": "c0"})
+        for i in range(3):
+            event("application.log", attributes={"tag": f"t{i}"})
+        # Queue full at [c0, t0, t1, t2]; emitting t3 evicts t0, the oldest
+        # non-critical. c0 must stay ahead of t1/t2, not slide to the tail.
+        event("application.log", attributes={"tag": "t3"})
+        tags = [
+            item.data["attributes"]["tag"]
+            for item in rt._queue.queue
+            if isinstance(item, CanonicalEvent)
+        ]
+        assert tags == ["c0", "t1", "t2", "t3"]
+    finally:
+        gate.set()
+        shutdown(2.0)
 
 
 def test_stats_surface_counters(captured):

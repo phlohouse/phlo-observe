@@ -39,7 +39,7 @@ class CanonicalAdapter:
         batch = NormalizedBatch()
         for index, item in enumerate(items):
             try:
-                batch.events.append(EventEnvelope.model_validate(item).to_canonical_dict())
+                event = EventEnvelope.model_validate(item).to_canonical_dict()
             except ValidationError as exc:
                 first = exc.errors()[0]
                 batch.errors.append(
@@ -49,4 +49,6 @@ class CanonicalAdapter:
                         "message": f"{'.'.join(str(p) for p in first['loc'])}: {first['msg']}",
                     }
                 )
+                continue
+            batch.add_event(event, index=index)
         return batch

@@ -179,7 +179,32 @@ class observe:
     def __call__(self, fn: Callable[_P, _R]) -> Callable[_P, _R]: ...
 
     def __call__(self, fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Decorate a sync or async function, preserving its metadata."""
+        """Decorate a sync or async function, preserving its metadata.
+
+        Generators (sync and async) are wrapped so the operation spans the
+        whole iteration rather than the call that creates the generator —
+        otherwise a decorated generator would emit an instant "success" before
+        its body ever ran, and mid-iteration failures would go unrecorded.
+        """
+        if inspect.isasyncgenfunction(fn):
+
+            @functools.wraps(fn)
+            async def async_gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                async with self._fresh():
+                    async for item in fn(*args, **kwargs):
+                        yield item
+
+            return async_gen_wrapper
+
+        if inspect.isgeneratorfunction(fn):
+
+            @functools.wraps(fn)
+            def gen_wrapper(*args: Any, **kwargs: Any) -> Any:
+                with self._fresh():
+                    yield from fn(*args, **kwargs)
+
+            return gen_wrapper
+
         if inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)

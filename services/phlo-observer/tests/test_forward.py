@@ -37,11 +37,13 @@ def test_otlp_payload_shape(make_event: Any) -> None:
     assert record["severityText"] == "ERROR"
     assert record["body"] == {"stringValue": "pipeline.run"}
     attrs = {a["key"]: a["value"] for a in record["attributes"]}
-    assert attrs["correlation.run_id"] == {"stringValue": "r-1"}
-    assert attrs["correlation.extra.custom_key"] == {"stringValue": "v"}
-    # proto3 JSON: int64 values are serialized as strings
-    assert attrs["attributes.rows_out"] == {"intValue": "12"}
+    # Forwarded records use the observe.* encoding shared with the OTLP drain,
+    # so a re-ingesting observer restores correlation and structured sections.
+    assert attrs["observe.correlation.run_id"] == {"stringValue": "r-1"}
+    assert json.loads(attrs["observe.correlation.extra"]["stringValue"]) == {"custom_key": "v"}
+    assert json.loads(attrs["observe.attributes"]["stringValue"]) == {"rows_out": 12}
     assert attrs["observe.outcome"] == {"stringValue": "success"}
+    assert attrs["observe.event_id"] == {"stringValue": event["event_id"]}
 
 
 def test_otlp_payload_groups_by_service(make_event: Any) -> None:

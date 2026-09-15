@@ -2,9 +2,10 @@
 
 Each canonical event becomes an OTel log record: the event name is the body,
 severity maps onto OTel severity numbers, and the remaining envelope fields are
-record attributes. Correlation identifiers are preserved verbatim under
-``observe.correlation.*`` (plus ``observe.trace_id``/``observe.span_id``
-shortcuts) so events can be joined to real traces downstream.
+record attributes encoded by :mod:`observe_core.otlp_mapping`. Correlation
+identifiers are preserved verbatim under ``observe.correlation.*`` (plus
+``observe.trace_id``/``observe.span_id`` shortcuts) so events can be joined to
+real traces downstream.
 
 Requires the ``observe-core[otlp]`` extra.
 """
@@ -16,22 +17,15 @@ from typing import Any
 
 from observe_core.drains.base import CanonicalEvent, DrainFailure, PermanentDrainFailure
 from observe_core.models import Severity
-from observe_core.serialization import dumps, loads
+from observe_core.otlp_mapping import event_to_otlp_attributes
+from observe_core.serialization import loads
 
 try:  # optional extra: observe-core[otlp]
-    from opentelemetry._logs.severity import (  # ty: ignore[unresolved-import]
-        SeverityNumber,
-    )
-    from opentelemetry.exporter.otlp.proto.http._log_exporter import (  # ty: ignore[unresolved-import]
-        OTLPLogExporter,
-    )
-    from opentelemetry.sdk._logs import (  # ty: ignore[unresolved-import]
-        LoggerProvider,
-        LogRecord,
-    )
-    from opentelemetry.sdk._logs.export import (  # ty: ignore[unresolved-import]
-        BatchLogRecordProcessor,
-    )
+    from opentelemetry._logs import LogRecord
+    from opentelemetry._logs.severity import SeverityNumber
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 
     _HAS_OTEL = True
 except ImportError:  # pragma: no cover - depends on installed extras
@@ -45,18 +39,6 @@ _OTEL_SEVERITY = {
     Severity.ERROR: 17,
     Severity.CRITICAL: 24,
 }
-
-_FLAT_FIELDS = (
-    "schema_version",
-    "event_id",
-    "category",
-    "outcome",
-    "delivery",
-    "started_at",
-    "ended_at",
-    "duration_ms",
-    "observed_at",
-)
 
 
 class OtlpDrain:
@@ -98,31 +80,12 @@ class OtlpDrain:
             self._logger.emit(self._to_log_record(data))
 
     def _to_log_record(self, data: dict[str, Any]) -> Any:
-        attributes: dict[str, Any] = {}
-        for key in _FLAT_FIELDS:
-            value = data.get(key)
-            if value is not None:
-                attributes[f"observe.{key}"] = value
-        correlation = data.get("correlation") or {}
-        for key, value in correlation.items():
-            if value is None or key == "extra":
-                continue
-            attributes[f"observe.correlation.{key}"] = value
-        if correlation.get("trace_id"):
-            attributes["observe.trace_id"] = correlation["trace_id"]
-        if correlation.get("span_id"):
-            attributes["observe.span_id"] = correlation["span_id"]
-        for section in ("service", "error", "source", "attributes"):
-            value = data.get(section)
-            if value:
-                attributes[f"observe.{section}"] = dumps(value).decode("utf-8")
-
         severity = Severity(data.get("severity", "info"))
         return self._log_record_cls(
             severity_text=severity.value.upper(),
             severity_number=self._severity_number(_OTEL_SEVERITY[severity]),
             body=data.get("event"),
-            attributes=attributes,
+            attributes=event_to_otlp_attributes(data),
         )
 
     def flush(self) -> None:
