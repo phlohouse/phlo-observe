@@ -12,7 +12,7 @@ import datetime as dt
 import uuid
 from typing import Any
 
-from observe_core.timestamps import utcnow
+from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,37 @@ GROUPING_WINDOW = dt.timedelta(minutes=30)
 """Insights on the same entity inside this window join the same incident."""
 
 _SEVERITY_RANK = {"info": 30, "warn": 40, "warning": 40, "error": 50, "critical": 60}
+
+
+def _signal_time(insight: Insight) -> dt.datetime:
+    """Event-time anchor: the producing event's observed_at.
+
+    Grouping windows on event time (not the wall clock) so a projection
+    rebuild replaying old history groups identically to live ingest.
+    """
+    raw = (insight.attributes or {}).get("observed_at")
+    if raw:
+        try:
+            parsed = parse_rfc3339(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.UTC)
+            return parsed
+        except (ValueError, TypeError):
+            pass
+    return insight.created_at or utcnow()
+
+
+def _last_signal(incident: Incident) -> dt.datetime:
+    raw = (incident.attributes or {}).get("last_signal_at")
+    if raw:
+        try:
+            parsed = parse_rfc3339(raw)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=dt.UTC)
+            return parsed
+        except (ValueError, TypeError):
+            pass
+    return incident.updated_at or utcnow()
 
 
 async def group_insight(session: AsyncSession, insight: Insight) -> Incident | None:
@@ -36,20 +67,20 @@ async def group_insight(session: AsyncSession, insight: Insight) -> Incident | N
     if insight.severity not in ("error", "critical"):
         return None
     now = utcnow()
+    signal = _signal_time(insight)
     candidates = (
         (await session.execute(select(Incident).where(Incident.state == "open"))).scalars().all()
     )
-    window_start = now - GROUPING_WINDOW
     for incident in candidates:
-        if incident.updated_at and incident.updated_at < window_start:
+        if signal - _last_signal(incident) > GROUPING_WINDOW:
             continue
         if insight.entity_id and insight.entity_id in (incident.entities or []):
-            _attach(incident, insight, now)
+            _attach(incident, insight, now, signal)
             return incident
         # Same-run grouping: evidence event ids of insight vs incident's
         # recorded run entities.
         if _shares_run(insight, incident):
-            _attach(incident, insight, now)
+            _attach(incident, insight, now, signal)
             return incident
     # No candidate matched: auto-create only for critical insights (§17.1).
     if insight.severity != "critical":
@@ -64,7 +95,7 @@ async def group_insight(session: AsyncSession, insight: Insight) -> Incident | N
         insight_ids=[str(insight.insight_id)],
         timeline={"opened_at": now.isoformat()},
         impact={},
-        attributes={"created_by": "rule"},
+        attributes={"created_by": "rule", "last_signal_at": signal.isoformat()},
         updated_at=now,
     )
     session.add(incident)
@@ -78,7 +109,7 @@ def _shares_run(insight: Insight, incident: Incident) -> bool:
     )
 
 
-def _attach(incident: Incident, insight: Insight, now: Any) -> None:
+def _attach(incident: Incident, insight: Insight, now: Any, signal: dt.datetime) -> None:
     ids = list(incident.insight_ids or [])
     sid = str(insight.insight_id)
     if sid not in ids:
@@ -90,4 +121,8 @@ def _attach(incident: Incident, insight: Insight, now: Any) -> None:
         incident.entities = entities
     if _SEVERITY_RANK.get(insight.severity, 0) > _SEVERITY_RANK.get(incident.severity, 0):
         incident.severity = insight.severity
+    incident.attributes = {
+        **(incident.attributes or {}),
+        "last_signal_at": signal.isoformat(),
+    }
     incident.updated_at = now

@@ -342,7 +342,12 @@ def edges_of(event: dict[str, Any]) -> list[Edge]:
 
 def merge_edge_sources(existing: list[str], event_id: str) -> list[str]:
     """Bounded provenance for an edge: keep the earliest distinct sources."""
-    if event_id in existing or len(existing) >= _MAX_EDGE_SOURCES:
+    return merge_sources(existing, event_id, _MAX_EDGE_SOURCES)
+
+
+def merge_sources(existing: list[str], event_id: str, cap: int) -> list[str]:
+    """Append ``event_id`` unless present or ``cap`` reached."""
+    if event_id in existing or len(existing) >= cap:
         return existing
     return [*existing, event_id]
 

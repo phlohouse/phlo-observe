@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent
 SCHEMA_DIR = REPO_ROOT / "schemas"
+
+# tests/workloads.py is shared scenario tooling for every suite.
+_TESTS_DIR = str(REPO_ROOT / "tests")
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
 
 @pytest.fixture

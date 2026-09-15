@@ -40,6 +40,10 @@ _MIN_BASELINE_SAMPLES = 5
 _CONSECUTIVE_QUALITY_FAILURES = 3
 
 
+def _fmt_dt(value: Any) -> str | None:
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 @dataclass
 class Finding:
     """A rule verdict before persistence."""
@@ -66,8 +70,18 @@ def _metrics_for(event: dict[str, Any]) -> list[tuple[str, str, float]]:
     return bl.observations_of(event)
 
 
-async def evaluate(session: AsyncSession, event: dict[str, Any]) -> list[Finding]:
-    """Run every rule against one canonical event; return new findings."""
+async def evaluate(
+    session: AsyncSession,
+    event: dict[str, Any],
+    *,
+    asset_states: dict[str, dict[str, Any]] | None = None,
+) -> list[Finding]:
+    """Run every rule against one canonical event; return new findings.
+
+    ``asset_states`` optionally supplies in-memory asset reducer state
+    (projection rebuild) so freshness checks read the fold instead of rows
+    that have not been flushed yet.
+    """
     findings: list[Finding] = []
     name = str(event.get("event") or "")
     outcome = event.get("outcome")
@@ -161,10 +175,13 @@ async def evaluate(session: AsyncSession, event: dict[str, Any]) -> list[Finding
     asset_eid = entities.get("asset")
     sla = (event.get("attributes") or {}).get("freshness_sla_seconds")
     if asset_eid and sla:
-        from phlo_observer.models import Asset  # noqa: PLC0415
+        if asset_states is not None:
+            last = (asset_states.get(asset_eid) or {}).get("last_materialized_at")
+        else:
+            from phlo_observer.models import Asset  # noqa: PLC0415
 
-        asset = await session.get(Asset, asset_eid)
-        last = getattr(asset, "last_materialized_at", None) if asset else None
+            asset = await session.get(Asset, asset_eid)
+            last = getattr(asset, "last_materialized_at", None) if asset else None
         observed = event.get("observed_at")
         if last is not None and observed is not None:
             gap = (
@@ -236,7 +253,14 @@ async def record_findings(
             created_at=now,
             updated_at=now,
             dedupe_key=key,
-            attributes={"kind": finding.kind, "summary": finding.summary},
+            attributes={
+                "kind": finding.kind,
+                "summary": finding.summary,
+                # Event-time anchor for incident grouping: replay and
+                # incremental ingest must group identically, so the window
+                # keys off the producing event, not the wall clock.
+                "observed_at": _fmt_dt(event.get("observed_at")),
+            },
         )
         session.add(row)
         touched.append(row)

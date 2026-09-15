@@ -11,13 +11,23 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from phlo_observer import baselines, incidents, insights
 from phlo_observer import state_engine as se
-from phlo_observer.models import Asset, Entity, Event, Relationship, Run
+from phlo_observer.models import (
+    Asset,
+    Baseline,
+    Entity,
+    Event,
+    Incident,
+    Insight,
+    Relationship,
+    Run,
+)
 
 
 def _event_view(row: Event) -> dict[str, Any]:
@@ -203,7 +213,7 @@ async def _flush_entities(
         refs = (row.provenance or {}).get("derived_from") or []
         merged_refs = list(refs)
         for eid_ref in state.get("derived_from") or []:
-            merged_refs = se.merge_edge_sources(merged_refs, eid_ref)
+            merged_refs = se.merge_sources(merged_refs, eid_ref, se._MAX_DERIVED_FROM)
         if merged_refs != refs:
             row.provenance = {
                 **(row.provenance or {}),
@@ -389,13 +399,24 @@ async def rebuild_projections(
     assets it touched are re-derived and merged, leaving unrelated
     projections untouched.
     """
-    counts = {"events": 0, "runs": 0, "entities": 0, "edges": 0, "assets": 0}
+    counts = {
+        "events": 0,
+        "runs": 0,
+        "entities": 0,
+        "edges": 0,
+        "assets": 0,
+        "baselines": 0,
+        "insights": 0,
+        "incidents": 0,
+    }
     stmt = select(Event).order_by(Event.observed_at.asc(), Event.event_id.asc())
     if run_id:
         stmt = stmt.where(Event.run_id == run_id)
     else:
         # Full rebuild: clear derived tables first so stale rows disappear.
-        for table in (Relationship, Asset, Entity, Run):
+        # Insights, incidents and baselines are also derived state: replaying
+        # the canonical history in observed order reproduces them exactly.
+        for table in (Relationship, Asset, Entity, Run, Baseline, Insight, Incident):
             await session.execute(delete(table))
 
     run_states: dict[str, dict[str, Any]] = {}
@@ -425,6 +446,15 @@ async def rebuild_projections(
                     target["first_seen_at"] = observed
                 if target["last_seen_at"] is None or observed > target["last_seen_at"]:
                     target["last_seen_at"] = observed
+        # Insight pass runs before this event's own asset/baseline fold —
+        # the same ordering the incremental path uses, so both converge.
+        if not run_id:
+            findings = await insights.evaluate(session, event, asset_states=asset_states)
+            if findings:
+                for insight in await insights.record_findings(session, event, findings):
+                    await incidents.group_insight(session, insight)
+            await insights.resolve_for_event(session, event)
+            counts["baselines"] += await baselines.update_baselines(session, event)
         if batch.asset_entity_id:
             corr = event.get("correlation") or {}
             astate = asset_states.setdefault(
@@ -547,4 +577,7 @@ async def rebuild_projections(
             )
         )
         counts["runs"] += 1
+    if not run_id:
+        counts["insights"] = await session.scalar(select(func.count()).select_from(Insight)) or 0
+        counts["incidents"] = await session.scalar(select(func.count()).select_from(Incident)) or 0
     return counts
