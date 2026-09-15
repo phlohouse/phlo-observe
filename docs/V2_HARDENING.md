@@ -127,6 +127,51 @@ Plus one query-side correctness fix found by the agent-readiness tests:
 | SSE was instance-local: load-balanced live tails missed other replicas' events | medium | `notify.py`: one `pg_notify` per ingest batch (in-transaction, fires only on commit); `NotifyBridge` republishes foreign messages into each local `StreamHub`; origin tag prevents echo |
 | Retention ran on every replica | low | `pg_try_advisory_xact_lock` serializes; losers report `skipped` |
 
+## 6a. Second-pass review: findings and fixes
+
+A follow-up review of the shipped V2 surface found correctness, data-loss
+and security gaps the first-pass suite did not cover. Every item below
+was reproduced before fixing and now has a regression test.
+
+### SDK (`observe-core`)
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `TailSampler` emitted the bound-crossing event twice (buffered, then again directly) | data correctness | Bound hit emits the buffered chunk once and drops the event; buffering resumes for the next chunk | `test_tail_bound_event_is_not_duplicated` |
+| `Runtime.flush()`/`shutdown()` never drained the metric aggregator — pending summaries died silently; `_Bucket.values` grew unbounded | data loss / memory | `flush()`/`shutdown()` call `emit_metric_summaries()`; samples use a bounded reservoir; `metric()` honors `flush_after_seconds` and falls back to immediate emission when the series cap rejects | `test_runtime_flush_drains_metric_summaries`, `test_aggregator_reservoir_is_bounded`, `test_metric_cadence_auto_flushes` |
+| `WorkerBackend.emit` reported `spooled=True` even when `spool_event` failed | correctness | The spool result propagates; failed critical spooling reports dropped | `test_critical_spool_failure_reports_dropped` |
+| Queue eviction scanned the whole queue and could evict flush/stop sentinels | robustness | Eviction scan bounded at 256 entries; control sentinels are never evicted | `test_eviction_scan_is_bounded`, `test_eviction_never_takes_sentinels` |
+| `event_to_otlp_attributes` dropped `entities`/`tags`/`contract` — OTLP round-trips lost all V2 sections | data loss | Sections encode as `observe.entities`/`observe.tags`/`observe.contract` JSON attributes and decode symmetrically | `test_otlp_mapping_encodes_v2_sections`, `test_v2_sections_roundtrip_through_otlp` |
+| `metric()` ignored ambient/operation correlation, entities and tags — summaries could not reach per-entity baselines | correctness | Series key includes correlation/entities/tags; summaries carry them through | `test_metric_summary_carries_correlation`, `test_aggregator_series_context_round_trips` |
+| No ambient/explicit producer plumbing — server-derived ids used `service.name`, so SDK `run://dagster/<id>` and derived `run://<service>/<id>` split one run into two entities | correctness | `observe()`/`event()`/`metric()` take `producer=`; `bind_context(producer=...)` binds it ambiently; `_finalize` merges it into `source.producer` | `test_ambient_producer_namespaces_derived_ids`, `test_explicit_producer_wins_over_ambient` |
+
+### Observer
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `run_failures` ANDed a JSON-null check onto the outcome branch, dropping `outcome=failure` events with no error payload | correctness | `outcome == 'failure' OR error is a real object` — error-less failures are returned; JSON-null errors on successes stay excluded | `test_v2_failures_includes_errorless_failures`, `test_v2_failures_excludes_json_null_error` |
+| `run_impact`/`get_run_v2`/`query_events` interpolated caller input into `LIKE` patterns unescaped | security / correctness | `_like_escape` escapes `\`, `%`, `_`; escaped `escape="\\"` on every caller-driven LIKE | `test_v2_impact_like_metachars_escaped`, `test_q_like_metachars_match_literally` |
+| `run_changes` scanned a 30-day window into memory with no LIMIT | resource bound | Change-event filter moved into SQL; `_MAX_CHANGES` cap with a `truncated` flag | `test_v2_changes_reports_truncation_flag` |
+| Ambiguous trace→run binding resolved nondeterministically (DISTINCT, no ORDER BY) | correctness | Ordered by `(trace_id, run_id)`; smallest run_id wins deterministically across replicas | `test_ambiguous_trace_first_owner_wins`, `test_ambiguous_trace_stable_across_batches` |
+| `rebuild_projections(batch_size)` was a dead parameter — one unbounded SELECT over all events | resource bound | Real keyset pagination on `(observed_at, event_id)` matching incremental fold order | `test_equivalence` suite |
+| Scoped `--run` rebuild deleted and rewrote shared `Asset` rows from only the selected run's events, regressing `last_materialized_at` | data loss | Touched assets are re-derived from all events referencing them; edges merge `source_event_ids`/max confidence instead of deleting other runs' contributions | `test_scoped_rebuild_preserves_shared_asset`, `test_scoped_rebuild_merges_shared_edges` |
+| `envelope_for` dropped `entities`/`tags`/`contract` — pushed source telemetry could not express V2 sections | data loss | All three pass through envelope construction; dbt adapter wires them | golden `dbt_run_results`/`dbt_artifacts_bundle` |
+| `BatchState.load` selected every open insight and open incident per batch | resource bound | Scoped to entities the batch touches (`entity_id IN batch`, `jsonb_exists_any` on incident entities) | `test_batch_state_load_scopes_to_batch_entities`, `test_batch_state_load_includes_touched_open_rows` |
+| Quality-failure rule missed `quality.validate` and `dbt.test.execute`; `dbt.invocation` never terminated runs | correctness | `_QUALITY_EVENTS` covers all three; `dbt.invocation` joins `_TERMINAL_RUN_EVENTS` | `test_dbt_test_failure_opens_quality_insight`, `test_quality_validate_failure_opens_insight`, `test_dbt_invocation_is_terminal` |
+| Baselines used only `source.producer` for entity ids — diverged from `event_entities`' adapter/service-name fallbacks; `metric.summary` never fed baselines | correctness | Shared `event_producer` fallback chain; `observations_of` folds `metric.summary` `mean` | `test_metric_summary_feeds_baseline` |
+| Retention deleted canonical events on producer-supplied `observed_at` — skewed producers could expire events early or pin them forever | correctness | Retention keys on `received_at` (server clock); `ix_events_received_at` index + migration 0005 | `test_retention_uses_received_at_not_observed_at` |
+| `v2_event_provenance` always returned `"edge": []` | correctness | Relationship scan by `source_event_ids` containment reports contributing edges | `test_provenance_reports_edges` |
+| Insight/incident transitions accepted any→any; reopening left stale `resolved_at` | correctness | Enumerated state machines (`expired` terminal, same-state idempotent, illegal → 409); leaving `resolved` clears `resolved_at` | `test_insight_illegal_transition_conflicts`, `test_incident_reopen_clears_resolved_at` |
+| `admin_token_set` fell back to read tokens — a read credential silently had admin powers | security | No fallback: admin requires `ADMIN_TOKENS` once any token exists; `AUTH_OPTIONAL_DEV=false` requires all three scopes | `test_admin_requires_admin_token_not_read`, `test_strict_mode_requires_admin_tokens` |
+| `archive` used OFFSET pagination over a live table; `reprocess` read unbounded and oversold its scope (it does not rebuild runs/insights/baselines) | correctness | Both keyset-paginate on `(received_at, event_id)`; docstrings state the real scope | `test_archive_restore_roundtrip`, `test_reprocess_window_runs` |
+
+### phlo-observe-sdk / dbt normalization
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `emit_run_results` set `invocation_id` but no `run_id` — pushed dbt telemetry produced no run row | data correctness | Invocation carries `run_id` + `run://dbt/<invocation_id>` entity, worst-result outcome, `elapsed_time` → `duration_ms`; per-result `execution_time` → `duration_ms`; tests link to models via `depends_on.nodes`; failing tests get error severity | `test_dbt_run_results_events`, `test_dbt_invocation_success_when_all_pass` |
+| Integrations never stamped producer — derived run/branch entity ids fell back to `service.name` namespaces | correctness | dagster/dlt/trino/wap/iceberg/nessie scopes and emit calls pass `producer=`; generic helpers accept `run_id`/`asset_key`/`producer` | `test_integrations` producer assertions |
+
 ## 7. Insight quality
 
 On controlled histories (`test_insight_quality.py`, 10 tests): each rule
@@ -140,8 +185,9 @@ seeded healthy segments.
 ## 8. Remaining limitations
 
 - **`q` free-text search** covers event name and table/asset columns but
-  not `run_id` (use the structured `run_id` filter). Adequate per spec
-  §23 until volume thresholds in §24.4 force tsvector.
+  not `run_id` (use the structured `run_id` filter). Metacharacters
+  (`%`, `_`, `\`) match literally. Adequate per spec §23 until volume
+  thresholds in §24.4 force tsvector.
 - **LISTEN/NOTIFY is at-most-once**: a replica disconnected during a
   commit misses that notification. SSE is explicitly a hint channel —
   clients must re-fetch on reconnect (documented contract).
@@ -153,15 +199,26 @@ seeded healthy segments.
   full history remains in canonical events and paged queries.
 - **Rebuild is offline for insights/incidents** — a full rebuild deletes
   and replays insight/incident state; brief unavailability of open
-  findings during a rebuild is acceptable per the rebuild-runbook.
+  findings during a rebuild is acceptable per the rebuild-runbook. The
+  scoped `--run` rebuild is online-safe: it merges entity/edge
+  contributions and re-derives touched assets from their full history.
+- **`reprocess` does not rebuild runs/insights/baselines** — it re-folds
+  a `received_at` window into entity/asset/edge state only; use
+  `rebuild-projections` for derived-state changes.
 - Single Postgres remains the system of record; no sharding story yet.
 
 ## 9. Operational recommendations
 
 - Run >= 2 replicas behind a balancer — HA ingest, dedup and cross-instance
   SSE are proven. `stream_notify` defaults on; leave it on.
+- Configure all three token scopes (`INGEST_TOKENS`, `READ_TOKENS`,
+  `ADMIN_TOKENS`) outside dev: admin endpoints fail closed once any
+  token exists, and `AUTH_OPTIONAL_DEV=false` refuses to boot without
+  all three.
 - Keep `raw_event_ttl_hours` and retention windows configured; retention
-  is lock-serialized and safe to leave scheduled on all instances.
+  is lock-serialized and safe to leave scheduled on all instances. Event
+  expiry follows `received_at`, so producer clock skew cannot pin or
+  prematurely drop rows.
 - Alert on `phlo_observer_ingest_errors_total` and quarantine depth, not
   on individual 422s (per-event errors are normal producer noise).
 - Treat SSE consumers as hint-driven: reconnect + refetch, never depend

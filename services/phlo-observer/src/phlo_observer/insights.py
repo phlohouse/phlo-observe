@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import baselines as bl
@@ -39,6 +39,17 @@ _VOLUME_FACTOR = 3.0
 _MIN_BASELINE_SAMPLES = 5
 """Fewer samples than this cannot support a statistically sane verdict."""
 _CONSECUTIVE_QUALITY_FAILURES = 3
+
+_QUALITY_EVENTS = frozenset({"quality.check", "quality.validate", "dbt.test.execute"})
+"""Event names the quality-failure rule evaluates (spec §15.1)."""
+
+
+def _signal_entity(entities: dict[str, str]) -> str | None:
+    """Entity a quality signal attaches to — the checked object first."""
+    for role in ("asset", "model", "table", "run"):
+        if entities.get(role):
+            return entities[role]
+    return None
 
 
 def _fmt_dt(value: Any) -> str | None:
@@ -86,12 +97,23 @@ class BatchState:
 
     @classmethod
     async def load(cls, session: AsyncSession, events: list[dict[str, Any]]) -> BatchState:
-        """Bulk-load every row the batch's insight pass can touch."""
-        keys = {
-            (entity_id, metric)
-            for event in events
-            for entity_id, metric, _ in bl.observations_of(event)
-        }
+        """Bulk-load every row the batch's insight pass can touch.
+
+        Open insights and incidents are scoped to the entities this batch
+        can signal: dedupe and resolution both key on the insight's entity,
+        and incident grouping only matches insights whose entity is already
+        in the incident's entity list. Unscoped loads would read every open
+        row in the deployment for every ingest batch.
+        """
+        keys: set[tuple[str, str]] = set()
+        entity_ids: set[str] = set()
+        for event in events:
+            entity_ids.update(se.event_entities(event).values())
+            for ent, metric, _ in bl.observations_of(event):
+                keys.add((ent, metric))
+                # Metric entities (e.g. ``job://`` duration baselines) can be
+                # insight targets too — include them in the load scope.
+                entity_ids.add(ent)
         baseline_rows: dict[tuple[str, str], Baseline] = {}
         if keys:
             baseline_rows = {
@@ -104,16 +126,22 @@ class BatchState:
                     )
                 ).scalars()
             }
-        open_insights = list(
-            (await session.execute(select(Insight).where(Insight.state == "open"))).scalars()
-        )
-        open_incidents = list(
-            (
-                await session.execute(
-                    select(incidents.Incident).where(incidents.Incident.state == "open")
+        insight_stmt = select(Insight).where(Insight.state == "open")
+        incident_stmt = select(incidents.Incident).where(incidents.Incident.state == "open")
+        if entity_ids:
+            insight_stmt = insight_stmt.where(
+                or_(Insight.entity_id.in_(entity_ids), Insight.entity_id.is_(None))
+            )
+            dialect = getattr(getattr(session, "bind", None), "dialect", None)
+            if dialect is not None and dialect.name == "postgresql":
+                # jsonb ?| — incidents whose entity array overlaps the batch.
+                incident_stmt = incident_stmt.where(
+                    func.jsonb_exists_any(incidents.Incident.entities, sorted(entity_ids))
                 )
-            ).scalars()
-        )
+            # Non-Postgres dialects (dev/test SQLite) keep the full open
+            # scan: correct, just not bounded — datasets there stay small.
+        open_insights = list((await session.execute(insight_stmt)).scalars())
+        open_incidents = list((await session.execute(incident_stmt)).scalars())
         return cls(
             baselines=baseline_rows,
             open_by_dedupe={i.dedupe_key: i for i in open_insights if i.dedupe_key},
@@ -228,7 +256,7 @@ async def evaluate(
     name = str(event.get("event") or "")
     outcome = event.get("outcome")
     entities = se.event_entities(event)
-    entity_id = entities.get("asset") or entities.get("run")
+    entity_id = _signal_entity(entities)
     eid = str(event.get("event_id") or "")
 
     # Rule: run-failure — a terminal run failure is always an insight.
@@ -250,8 +278,10 @@ async def evaluate(
             )
         )
 
-    # Rule: quality-failure — failed quality.check on an asset.
-    if name == "quality.check" and outcome == "failure" and entity_id:
+    # Rule: quality-failure — a failed quality signal on a data entity.
+    # Covers quality.check/quality.validate and dbt test results; the finding
+    # attaches to the checked asset/model/table, not the run.
+    if name in _QUALITY_EVENTS and outcome == "failure" and entity_id:
         findings.append(
             Finding(
                 rule_id="quality-failure",
@@ -436,8 +466,8 @@ async def resolve_for_event(
 ) -> int:
     """Auto-resolve open insights when a later success arrives (§15.3).
 
-    A successful ``quality.check`` resolves open quality-failure insights on
-    the same asset; a successful terminal run resolves open run-failure
+    A successful quality signal resolves open quality-failure insights on
+    the same entity; a successful terminal run resolves open run-failure
     insights on the same run. ``open_insights`` optionally supplies the
     batch's preloaded open rows instead of a per-event query.
     """
@@ -446,8 +476,10 @@ async def resolve_for_event(
         return 0
     entities = se.event_entities(event)
     targets: list[tuple[str, str]] = []
-    if name == "quality.check" and entities.get("asset"):
-        targets.append(("quality-failure", entities["asset"]))
+    if name in _QUALITY_EVENTS:
+        signal_entity = _signal_entity(entities)
+        if signal_entity:
+            targets.append(("quality-failure", signal_entity))
     if name in se._TERMINAL_RUN_EVENTS and entities.get("run"):
         targets.append(("run-failure", entities["run"]))
     resolved = 0

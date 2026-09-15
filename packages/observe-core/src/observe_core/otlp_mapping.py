@@ -11,7 +11,8 @@ same way. Attribute names use the ``observe.`` prefix:
 - ``observe.correlation.<key>`` — every canonical correlation key;
 - ``observe.correlation.extra`` — JSON object of non-canonical correlation;
 - ``observe.service`` / ``observe.error`` / ``observe.source`` /
-  ``observe.attributes`` — JSON-encoded envelope sections.
+  ``observe.attributes`` / ``observe.entities`` / ``observe.tags`` /
+  ``observe.contract`` — JSON-encoded envelope sections.
 
 The OTel-native record fields ``traceId``/``spanId`` are separate transport
 metadata; these attributes are the canonical-envelope encoding.
@@ -42,7 +43,7 @@ _FLAT_FIELDS = (
 )
 """Envelope fields carried verbatim as ``observe.<name>`` attributes."""
 
-_JSON_SECTIONS = ("service", "error", "source", "attributes")
+_JSON_SECTIONS = ("service", "error", "source", "attributes", "entities", "tags", "contract")
 """Envelope sections carried as JSON strings under ``observe.<name>``."""
 
 

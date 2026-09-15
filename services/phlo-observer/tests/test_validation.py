@@ -347,6 +347,7 @@ def test_require_tokens_passes_with_both(database_url: str) -> None:
         database_url=database_url,
         ingest_tokens="t1",
         read_tokens="t2",
+        admin_tokens="t3",
         auth_optional_dev=False,
     ).require_tokens()
 

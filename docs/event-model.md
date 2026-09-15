@@ -19,15 +19,23 @@ Every event is a canonical envelope (`schemas/event-envelope-v1.schema.json`):
   "correlation": {"run_id": "...", "trace_id": "...", "asset_key": "..."},
   "attributes": {},
   "error": {"message": "...", "exception_type": "...", "code": "..."},
-  "source": {"producer": "...", "adapter": "..."}
+  "source": {"producer": "...", "adapter": "..."},
+  "entities": {"run": "run://dagster/01J...", "asset": "asset://a/b"},
+  "tags": {"partition": "2026-01-01"},
+  "contract": {"name": "orders-contract", "version": 2}
 }
 ```
+
+`entities`, `tags` and `contract` are the V2 sections (schema 2.0);
+they survive SDK emission, adapters, OTLP round-trips and persistence.
 
 ## Field semantics
 
 - `event_id` — UUIDv7, generated client-side, monotonic per process.
 - `observed_at` — when the event happened at the producer.
-- `received_at` — when the observer stored it (server-side only).
+- `received_at` — when the observer stored it (server-side only). This is
+  the retention clock: producer clock skew cannot expire an event early
+  or keep it past its window.
 - `started_at`/`ended_at`/`duration_ms` — set for operations; null for
   instantaneous events.
 - `outcome` — `success | failure | partial | cancelled | timeout | unknown`.

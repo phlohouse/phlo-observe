@@ -261,6 +261,12 @@ class WorkerBackend:
 
     # -- admission -------------------------------------------------------------
 
+    def _spool_critical(self, event: CanonicalEvent) -> EmitResult:
+        """Spool a critical event; the result reflects what actually happened."""
+        if self.delivery.spool_event(event):
+            return EmitResult(accepted=True, spooled=True)
+        return EmitResult(accepted=False, dropped=True, reason="queue_full_spool_unavailable")
+
     def emit(self, event: CanonicalEvent) -> EmitResult:
         """Enqueue a canonical event, applying the configured drop policy."""
         try:
@@ -270,8 +276,7 @@ class WorkerBackend:
         except queue.Full:
             pass
         if event.delivery == Delivery.CRITICAL:
-            self.delivery.spool_event(event)
-            return EmitResult(accepted=True, spooled=True)
+            return self._spool_critical(event)
         if self.settings.drop_policy == "drop_oldest":
             evicted = self._evict_oldest_event()
             if evicted is not None:
@@ -291,8 +296,7 @@ class WorkerBackend:
                 return EmitResult(accepted=True, enqueued=True)
             except queue.Full:
                 if event.delivery == Delivery.CRITICAL:
-                    self.delivery.spool_event(event)
-                    return EmitResult(accepted=True, spooled=True)
+                    return self._spool_critical(event)
                 self._drop_noncritical(event.delivery)
                 return EmitResult(accepted=False, dropped=True, reason="queue_full")
         self._drop_noncritical(event.delivery)
@@ -306,22 +310,28 @@ class WorkerBackend:
         if self.settings.telemetry_required:
             raise TelemetryError("observe queue is full")
 
+    _EVICT_SCAN_LIMIT = 256
+    """Max queue items inspected per eviction.
+
+    Unbounded head-to-tail scans make every emit O(capacity) once the queue
+    saturates — the drop policy then amplifies the pressure it exists to
+    absorb. The window preserves the preference order (non-critical before
+    critical) over the oldest part of the queue where eviction matters most.
+    """
+
     def _evict_oldest_event(self) -> CanonicalEvent | None:
         """Remove one queued event to make room, preferring non-critical ones.
 
         Control sentinels (``_FlushRequest``/``_STOP``) are never evicted:
         dropping one would hang ``flush()``/``close()``. Critical events
-        are evicted only when the queue holds nothing else; the caller spools
-        them rather than counting a drop. Items pulled during the scan are
-        re-queued in their original order.
+        are evicted only when the scanned window holds nothing else; the
+        caller spools them rather than counting a drop. Items pulled during
+        the scan are re-queued in their original order.
         """
         held: list[Any] = []
         evicted: CanonicalEvent | None = None
         oldest_critical: CanonicalEvent | None = None
-        # Drain the whole queue so survivors can be re-queued in their
-        # original order; stopping at the first eviction would move held items
-        # behind everything never dequeued.
-        while True:
+        for _ in range(self._EVICT_SCAN_LIMIT):
             try:
                 item = self._queue.get_nowait()
             except queue.Empty:

@@ -99,6 +99,7 @@ class Event(Base):
 
     __table_args__ = (
         Index("ix_events_observed_at", "observed_at"),
+        Index("ix_events_received_at", "received_at"),
         Index("ix_events_run_observed", "run_id", "observed_at"),
         Index("ix_events_asset_observed", "asset_key", "observed_at"),
         Index("ix_events_event_observed", "event", "observed_at"),

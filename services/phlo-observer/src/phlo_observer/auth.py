@@ -35,6 +35,11 @@ def _token_ok(token: str | None, allowed: frozenset[str]) -> bool:
     return any(secrets.compare_digest(token, allowed_token) for allowed_token in allowed)
 
 
+def _any_tokens_configured(settings: ObserverSettings) -> bool:
+    """True once any credential exists — dev mode is *all* surfaces unset."""
+    return bool(settings.ingest_token_set or settings.read_token_set or settings.admin_token_set)
+
+
 async def require_ingest_token(
     request: Request, settings: ObserverSettings = Depends(get_settings)
 ) -> None:
@@ -56,8 +61,18 @@ async def require_admin_token(
 ) -> None:
     """Dependency gating admin endpoints (quarantine replay, archive).
 
-    Scoped authorization (spec §34): admin falls back to the read token set
-    when no admin tokens are configured, keeping small deployments simple.
+    Scoped authorization (spec §34): admin credentials are never inherited
+    from read tokens. Dev mode (no tokens configured on any surface) stays
+    open; the moment any token exists, an unset admin list fails closed —
+    administration is denied to everyone, never silently extended to readers.
     """
-    if not _token_ok(_extract_token(request), settings.admin_token_set):
+    if not _any_tokens_configured(settings):
+        return  # dev mode: nothing configured at all
+    token = _extract_token(request)
+    allowed = settings.admin_token_set
+    if (
+        token is None
+        or not allowed
+        or not any(secrets.compare_digest(token, candidate) for candidate in allowed)
+    ):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or missing admin token")

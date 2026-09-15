@@ -19,7 +19,13 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 
 from observe_core import context as _ctx
 from observe_core.builder import EventBuilder
-from observe_core.models import DURATION_TOLERANCE_MS, Category, Delivery, Severity
+from observe_core.models import (
+    DURATION_TOLERANCE_MS,
+    Category,
+    Delivery,
+    Severity,
+    SourceInfo,
+)
 from observe_core.runtime import get_runtime
 from observe_core.timestamps import monotonic_ms, utcnow
 
@@ -63,6 +69,8 @@ class observe:
         correlation: dict[str, Any] | None = None,
         entities: dict[str, object] | None = None,
         tags: dict[str, object] | None = None,
+        producer: str | None = None,
+        source: SourceInfo | None = None,
         capture_stacktrace: bool | None = None,
     ) -> None:
         self.name = name
@@ -73,6 +81,13 @@ class observe:
         self.correlation = correlation
         self.entities = entities
         self.tags = tags
+        if producer is not None:
+            source = (
+                source.model_copy(update={"producer": producer})
+                if source is not None
+                else SourceInfo(producer=producer)
+            )
+        self.source = source
         self.capture_stacktrace = capture_stacktrace
         self._builder: EventBuilder | None = None
         self._token: contextvars.Token[dict[str, Any] | None] | None = None
@@ -96,6 +111,8 @@ class observe:
             builder.set_entity(role, identifier)
         for key, value in (self.tags or {}).items():
             builder.set_tag(key, value)
+        if self.source is not None:
+            builder.set_source(self.source)
 
         parent = _ctx._operation_context()
         merged: dict[str, Any] = {**_ctx.ambient_correlation()}
@@ -240,5 +257,6 @@ class observe:
             correlation=self.correlation,
             entities=self.entities,
             tags=self.tags,
+            source=self.source,
             capture_stacktrace=self.capture_stacktrace,
         )

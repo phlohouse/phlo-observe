@@ -70,6 +70,7 @@ def iceberg_commit(
             "snapshot_id": snapshot,
         },
         entities=entities,
+        producer="iceberg",
     )
 
 
@@ -82,4 +83,5 @@ def nessie_branch_create(*, branch: str, base_branch: str | None = None, **kw: A
         attributes={k: v for k, v in attrs.items() if v is not None},
         correlation={"branch": branch},
         entities={"branch": branch_id("nessie", branch)},
+        producer="nessie",
     )

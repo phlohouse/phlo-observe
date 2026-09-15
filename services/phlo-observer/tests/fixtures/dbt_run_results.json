@@ -19,6 +19,7 @@
       "status": "pass",
       "execution_time": 0.31,
       "failures": 0,
+      "depends_on": {"nodes": ["model.mart.fct_orders"]},
       "timing": []
     },
     {

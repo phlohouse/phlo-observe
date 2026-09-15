@@ -172,6 +172,10 @@ async def _link_traces(session: AsyncSession, correlated: list[Event]) -> None:
             select(Event.trace_id, Event.run_id)
             .where(Event.trace_id.in_(missing), Event.run_id.is_not(None))
             .distinct()
+            # Ambiguous traces (shared across runs) resolve to the smallest
+            # run_id: deterministic across replicas rather than whatever the
+            # DISTINCT scan happens to return first.
+            .order_by(Event.trace_id, Event.run_id)
         )
         for trace_id, run_id in rows:
             known.setdefault(trace_id, run_id)
@@ -500,6 +504,11 @@ def _fmt(value: Any) -> Any:
     return value
 
 
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so caller input matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 # -- queries ----------------------------------------------------------------
 
 
@@ -568,14 +577,14 @@ async def query_events(
         # adequate until the §24.4 volume thresholds force a re-evaluation.
         from sqlalchemy import String, cast, or_  # noqa: PLC0415
 
-        term = f"%{filters['q']}%"
+        term = f"%{_like_escape(str(filters['q']))}%"
         stmt = stmt.where(
             or_(
-                Event.event.ilike(term),
-                Event.table_name.ilike(term),
-                Event.asset_key.ilike(term),
-                Event.service_name.ilike(term),
-                cast(Event.error["message"], String).ilike(term),
+                Event.event.ilike(term, escape="\\"),
+                Event.table_name.ilike(term, escape="\\"),
+                Event.asset_key.ilike(term, escape="\\"),
+                Event.service_name.ilike(term, escape="\\"),
+                cast(Event.error["message"], String).ilike(term, escape="\\"),
             )
         )
     if cursor:

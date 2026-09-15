@@ -48,8 +48,10 @@ class ObserverSettings(BaseSettings):
     read_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Tokens allowed to query (comma-separated). Empty = dev mode."""
     admin_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    """Tokens allowed to administer (quarantine replay, archive). Falls back
-    to read tokens when unset so small deployments stay simple."""
+    """Tokens allowed to administer (quarantine replay, archive, insight
+    transitions). Never inherited from other token sets: once any token is
+    configured, an unset admin list closes the admin surface to everyone
+    rather than silently extending it to every reader."""
 
     alert_webhook_urls: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """POST insight/incident notifications to these URLs (comma-separated).
@@ -144,15 +146,16 @@ class ObserverSettings(BaseSettings):
 
     @property
     def admin_token_set(self) -> frozenset[str]:
-        """Admin tokens; falls back to read tokens when unset."""
-        return frozenset(self.admin_tokens) or frozenset(self.read_tokens)
+        """Admin tokens only — no fallback to read or ingest credentials."""
+        return frozenset(self.admin_tokens)
 
     def require_tokens(self) -> None:
         """Fail fast when auth is disabled outside a dev deployment.
 
-        With ``auth_optional_dev=false`` both surfaces must be locked down:
-        missing ingest tokens leave writes open and missing read tokens leave
-        queries open — a partially configured token set is not "hardened".
+        With ``auth_optional_dev=false`` every surface must be locked down:
+        missing ingest tokens leave writes open, missing read tokens leave
+        queries open, and missing admin tokens leave administration closed —
+        a partially configured token set is not "hardened".
         """
         if self.auth_optional_dev:
             return
@@ -161,6 +164,8 @@ class ObserverSettings(BaseSettings):
             missing.append("ingest tokens (PHLO_OBSERVER_INGEST_TOKENS)")
         if not self.read_tokens:
             missing.append("read tokens (PHLO_OBSERVER_READ_TOKENS)")
+        if not self.admin_tokens:
+            missing.append("admin tokens (PHLO_OBSERVER_ADMIN_TOKENS)")
         if missing:
             raise ValueError(
                 f"PHLO_OBSERVER_AUTH_OPTIONAL_DEV=false but {' and '.join(missing)} "

@@ -32,7 +32,9 @@ _MAX_SUMMARY_ASSETS = 1000
 _MAX_EDGE_SOURCES = 32
 
 # Run terminal signal: outcome=unknown means "the run started".
-_TERMINAL_RUN_EVENTS = {"pipeline.run", "dlt.pipeline.run"}
+# ``dbt.invocation`` is terminal too: the run_results document is written at
+# the end of the invocation and carries the invocation's own outcome/duration.
+_TERMINAL_RUN_EVENTS = {"pipeline.run", "dlt.pipeline.run", "dbt.invocation"}
 
 _STATUS_PRECEDENCE = {
     "unknown": 0,

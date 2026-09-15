@@ -57,6 +57,7 @@ from phlo_observer.models import (
     Incident,
     IngestFailure,
     Insight,
+    Relationship,
     Run,
     SchemaRecord,
 )
@@ -770,8 +771,22 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(404, "incident not found")
             return result
 
-    _INSIGHT_STATES = {"open", "acknowledged", "resolved", "suppressed", "expired"}
-    _INCIDENT_STATES = {"open", "acknowledged", "resolved", "suppressed"}
+    # Lifecycle state machines (spec §15.3): only the listed transitions are
+    # legal — ``expired`` is terminal, and leaving ``resolved`` clears
+    # ``resolved_at`` so a reopened incident doesn't carry a stale stamp.
+    _INSIGHT_TRANSITIONS = {
+        "open": {"acknowledged", "resolved", "suppressed", "expired"},
+        "acknowledged": {"open", "resolved", "suppressed", "expired"},
+        "suppressed": {"open", "resolved"},
+        "resolved": {"open"},
+        "expired": set(),
+    }
+    _INCIDENT_TRANSITIONS = {
+        "open": {"acknowledged", "resolved", "suppressed"},
+        "acknowledged": {"open", "resolved", "suppressed"},
+        "suppressed": {"open", "resolved"},
+        "resolved": {"open"},
+    }
 
     @app.post(
         "/v2/insights/{insight_id}/transition",
@@ -781,8 +796,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         """Move an insight through its lifecycle (spec §15.3)."""
         body = await request.json()
         target = body.get("state")
-        if target not in _INSIGHT_STATES:
-            raise _http_error(400, f"state must be one of {sorted(_INSIGHT_STATES)}")
+        if target not in _INSIGHT_TRANSITIONS:
+            raise _http_error(400, f"state must be one of {sorted(_INSIGHT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
             try:
                 iid = uuid.UUID(insight_id)
@@ -791,6 +806,12 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             row = await session.get(Insight, iid)
             if row is None:
                 raise _http_error(404, "insight not found")
+            if target == row.state:
+                return {"insight_id": insight_id, "state": target}
+            if target not in _INSIGHT_TRANSITIONS.get(row.state, set()):
+                raise _http_error(
+                    409, f"cannot transition insight from {row.state!r} to {target!r}"
+                )
             row.state = target
             row.updated_at = utcnow()
             if target == "resolved":
@@ -805,8 +826,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         """Move an incident through its lifecycle."""
         body = await request.json()
         target = body.get("state")
-        if target not in _INCIDENT_STATES:
-            raise _http_error(400, f"state must be one of {sorted(_INCIDENT_STATES)}")
+        if target not in _INCIDENT_TRANSITIONS:
+            raise _http_error(400, f"state must be one of {sorted(_INCIDENT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
             try:
                 iid = uuid.UUID(incident_id)
@@ -815,10 +836,15 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             row = await session.get(Incident, iid)
             if row is None:
                 raise _http_error(404, "incident not found")
+            if target == row.state:
+                return {"incident_id": incident_id, "state": target}
+            if target not in _INCIDENT_TRANSITIONS.get(row.state, set()):
+                raise _http_error(
+                    409, f"cannot transition incident from {row.state!r} to {target!r}"
+                )
             row.state = target
             row.updated_at = utcnow()
-            if target == "resolved":
-                row.resolved_at = utcnow()
+            row.resolved_at = utcnow() if target == "resolved" else None
             return {"incident_id": incident_id, "state": target}
 
     @app.get("/v2/entities", dependencies=[Depends(require_read_token)])
@@ -868,6 +894,16 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 )
             ).scalars()
             contributing["entity"] = list(entities)
+            edges = (
+                await session.execute(
+                    select(Relationship).where(
+                        Relationship.source_event_ids.cast(JSONB).contains([eid])
+                    )
+                )
+            ).scalars()
+            contributing["edge"] = [
+                f"{e.from_entity} -[{e.relationship_type}]-> {e.to_entity}" for e in edges
+            ]
             return {"event_id": eid, "projections": contributing}
 
     @app.post("/v2/query/compare-runs", dependencies=[Depends(require_read_token)])

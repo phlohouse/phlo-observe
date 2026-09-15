@@ -32,8 +32,3 @@ def correlation_method(event: dict[str, Any]) -> str | None:
         return "producer_invocation"
     metrics.CORRELATION.labels(method="uncorrelated").inc()
     return None
-
-
-def _resolve_run_id(event: dict[str, Any]) -> str | None:
-    corr = event.get("correlation") or {}
-    return corr.get("run_id") or None

@@ -128,6 +128,88 @@ async def test_quality_failure_then_resolve(client: AsyncClient, session_factory
     assert quality[0].state == "resolved"
 
 
+async def test_dbt_test_failure_opens_quality_insight(
+    client: AsyncClient, session_factory: Any
+) -> None:
+    """Regression: ``dbt.test.execute`` failures feed the quality-failure rule."""
+    model = f"model://dbt/stg_q_{_UID}"
+    fail = wl._event(
+        "dbt.test.execute",
+        wl.T0,
+        category="quality",
+        outcome="failure",
+        producer="dbt",
+        entities={"model": model, "run": "run://dbt/inv-q"},
+        error={"exception_type": "TestFailure", "message": "not_null failed"},
+    )
+    ok = wl._event(
+        "dbt.test.execute",
+        wl.T0 + dt.timedelta(hours=1),
+        category="quality",
+        outcome="success",
+        producer="dbt",
+        entities={"model": model, "run": "run://dbt/inv-q"},
+    )
+    await client.post("/v1/events", json=[fail, ok])
+    rows = await _db_insights(session_factory)
+    quality = [i for i in rows if i.rule_id == "quality-failure" and i.entity_id == model]
+    assert len(quality) == 1
+    assert quality[0].state == "resolved"
+
+
+async def test_quality_validate_failure_opens_insight(
+    client: AsyncClient, session_factory: Any
+) -> None:
+    """Regression: ``quality.validate`` failures also feed the rule."""
+    asset = f"asset://analytics.val_{_UID}"
+    fail = wl._event(
+        "quality.validate",
+        wl.T0,
+        category="quality",
+        outcome="failure",
+        entities={"asset": asset},
+    )
+    await client.post("/v1/events", json=[fail])
+    rows = await _db_insights(session_factory)
+    assert any(i.rule_id == "quality-failure" and i.entity_id == asset for i in rows)
+
+
+async def test_metric_summary_feeds_baseline(client: AsyncClient, session_factory: Any) -> None:
+    """Regression: aggregated ``metric.summary`` means reach the baseline."""
+    from phlo_observer.models import Baseline
+
+    asset = f"asset://analytics.ms_{_UID}"
+    for i, mean in enumerate([100.0, 120.0, 110.0]):
+        await client.post(
+            "/v1/events",
+            json=[
+                wl._event(
+                    "metric.summary",
+                    wl.T0 + dt.timedelta(hours=i),
+                    category="metric",
+                    entities={"asset": asset},
+                    attributes={
+                        "metric": "rows",
+                        "count": 10,
+                        "sum": mean * 10,
+                        "mean": mean,
+                        "min": mean - 5,
+                        "max": mean + 5,
+                    },
+                )
+            ],
+        )
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                select(Baseline).where(Baseline.entity_id == asset, Baseline.metric == "rows")
+            )
+        ).scalar_one_or_none()
+    assert row is not None, "metric.summary mean must feed the rows baseline"
+    assert row.count == 3
+    assert row.mean == pytest.approx(110.0)
+
+
 async def test_run_failure_opens_incident(client: AsyncClient, session_factory: Any) -> None:
     """A critical run-failure insight opens an incident holding the run."""
     events = wl.dagster_run(f"crit-{uuid.uuid4().hex[:8]}", wl.T0, outcome="failure", fail_step=0)

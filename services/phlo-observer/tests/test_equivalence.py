@@ -11,6 +11,7 @@ are normalized before comparison; semantic content must match exactly.
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 
 import pytest
@@ -238,3 +239,71 @@ class TestEquivalence:
         before, after = await _ingest_and_rebuild(client, session_factory, rng_events)
         diff = diff_snapshots(before, after)
         assert before == after, f"wide-topology divergence:\n{diff}"
+
+    async def test_scoped_rebuild_preserves_shared_asset(
+        self, client: AsyncClient, session_factory: Any
+    ) -> None:
+        """Regression: ``--run`` rebuild must not regress assets other runs touched.
+
+        Run A materializes a shared asset early; run B materializes it later.
+        Rebuilding run A alone previously deleted the asset row and rewrote it
+        from A's events only — wiping B's contribution. The asset must be
+        re-derived from its full event history.
+        """
+        shared = "analytics.shared"
+        events = wl.dagster_run("run-early", wl.T0, assets=[shared], steps=1, duration_ms=60_000)
+        events += wl.dagster_run(
+            "run-late",
+            wl.T0 + dt.timedelta(hours=6),
+            assets=[shared],
+            steps=1,
+            duration_ms=60_000,
+        )
+        counts = await wl.post_all(client, events)
+        assert counts["rejected"] == 0
+
+        async with session_factory() as session, session.begin():
+            await rebuild_projections(session, run_id="run-early")
+
+        async with session_factory() as session:
+            asset = await session.get(Asset, f"asset://{shared}")
+            assert asset is not None
+            late_events = [e for e in events if e["correlation"].get("asset_key") == shared]
+            late_materialize = max(
+                dt.datetime.fromisoformat(e["observed_at"].replace("Z", "+00:00"))
+                for e in late_events
+                if e["event"] == "asset.materialize" and e["outcome"] == "success"
+            )
+            assert asset.last_materialized_at == late_materialize
+            # The other run's row is untouched.
+            other = await session.get(Run, "run-late")
+            assert other is not None
+            assert other.status == "success"
+
+    async def test_scoped_rebuild_merges_shared_edges(
+        self, client: AsyncClient, session_factory: Any
+    ) -> None:
+        """Two runs producing the same edge keep both source event ids."""
+        shared = "analytics.edge_shared"
+        events = wl.dagster_run("run-e1", wl.T0, assets=[shared], steps=1)
+        events += wl.dagster_run("run-e2", wl.T0 + dt.timedelta(hours=1), assets=[shared], steps=1)
+        counts = await wl.post_all(client, events)
+        assert counts["rejected"] == 0
+
+        async with session_factory() as session:
+            before = {
+                (r.from_entity, r.to_entity, r.relationship_type): sorted(r.source_event_ids or [])
+                for r in (await session.execute(select(Relationship))).scalars()
+            }
+        async with session_factory() as session, session.begin():
+            await rebuild_projections(session, run_id="run-e1")
+        async with session_factory() as session:
+            after = {
+                (r.from_entity, r.to_entity, r.relationship_type): sorted(r.source_event_ids or [])
+                for r in (await session.execute(select(Relationship))).scalars()
+            }
+        # No edge lost its provenance: every key survives with at least the
+        # source ids it had before the scoped rebuild.
+        for key, sources in before.items():
+            assert key in after, f"edge {key} lost by scoped rebuild"
+            assert set(sources) <= set(after[key]), f"edge {key} lost sources"

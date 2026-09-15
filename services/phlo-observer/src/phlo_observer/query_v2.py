@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import String, asc, cast, func, or_, select
+from sqlalchemy import ColumnElement, String, asc, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer.models import (
@@ -113,6 +113,21 @@ def _incident_json(row: Incident) -> dict[str, Any]:
 
 
 _MAX_RUN_EVENTS = 10_000
+_MAX_RUN_EDGES = 5_000
+"""Bound on relationship scans answering run-scoped questions."""
+
+_MAX_CHANGES = 1_000
+"""Bound on change events returned per run window."""
+
+
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so caller input matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _run_entity_pattern(run_id: str) -> str:
+    """LIKE pattern matching ``run://<producer>/<run_id>`` for one run."""
+    return f"run://%/{_like_escape(run_id)}"
 
 
 async def run_events(
@@ -135,18 +150,26 @@ async def get_run_v2(session: AsyncSession, run_id: str) -> dict[str, Any] | Non
     run = await session.get(Run, run_id)
     if run is None:
         return None
-    entity_rows = (
-        await session.execute(
-            select(Relationship).where(
-                Relationship.from_entity.like("run://%"),
-                Relationship.to_entity.like("%/%"),
+    pattern = _run_entity_pattern(run_id)
+    entity_rows = list(
+        (
+            await session.execute(
+                select(Relationship)
+                .where(Relationship.from_entity.like(pattern, escape="\\"))
+                .limit(_MAX_RUN_EDGES)
             )
-        )
-    ).scalars()
-    # Edges anchored on any run entity for this run_id.
-    run_entities = {e.to_entity for e in entity_rows if e.from_entity.endswith(f"/{run_id}")} | {
-        e.from_entity for e in entity_rows if e.to_entity.endswith(f"/{run_id}")
-    }
+        ).scalars()
+    )
+    incoming = list(
+        (
+            await session.execute(
+                select(Relationship)
+                .where(Relationship.to_entity.like(pattern, escape="\\"))
+                .limit(_MAX_RUN_EDGES)
+            )
+        ).scalars()
+    )
+    run_entities = {e.to_entity for e in entity_rows} | {e.from_entity for e in incoming}
     return {**_run_json(run), "entities": sorted(run_entities)}
 
 
@@ -163,10 +186,10 @@ async def run_failures(session: AsyncSession, run_id: str) -> dict[str, Any] | N
                     Event.run_id == run_id,
                     or_(
                         Event.outcome == "failure",
-                        # JSON null is stored, not SQL NULL — check both.
-                        Event.error.is_not(None),
+                        # JSON null is stored, not SQL NULL — the coalesce
+                        # excludes both SQL NULL and a jsonb 'null' payload.
+                        func.coalesce(cast(Event.error, String), "null") != "null",
                     ),
-                    func.coalesce(cast(Event.error, String), "null") != "null",
                 )
                 .order_by(asc(Event.observed_at), asc(Event.event_id))
                 .limit(_MAX_RUN_EVENTS)
@@ -185,6 +208,17 @@ def _is_change_event(row: Event) -> bool:
     return row.category in _CHANGE_CATEGORIES or verb in _CHANGE_VERBS
 
 
+def _change_event_filter() -> ColumnElement[bool]:
+    """SQL equivalent of ``_is_change_event`` so the filter runs in the DB."""
+    return or_(
+        Event.category.in_(_CHANGE_CATEGORIES),
+        Event.event.in_(_CHANGE_VERBS),
+        # Verbs are fixed literal vocabulary — no user input reaches these
+        # patterns, so no escaping is needed.
+        *(Event.event.like(f"%.{verb}") for verb in _CHANGE_VERBS),
+    )
+
+
 async def run_changes(
     session: AsyncSession, run_id: str, *, window: dt.timedelta | None = None
 ) -> dict[str, Any] | None:
@@ -197,19 +231,28 @@ async def run_changes(
     if start is None:
         return {"run_id": run_id, "changes": [], "evidence": []}
     since = start - window
-    rows = (
-        await session.execute(
-            select(Event)
-            .where(Event.observed_at >= since, Event.observed_at <= start)
-            .order_by(asc(Event.observed_at))
-        )
-    ).scalars()
-    changes = [e for e in rows if _is_change_event(e)]
+    rows = list(
+        (
+            await session.execute(
+                select(Event)
+                .where(
+                    Event.observed_at >= since,
+                    Event.observed_at <= start,
+                    _change_event_filter(),
+                )
+                .order_by(asc(Event.observed_at), asc(Event.event_id))
+                .limit(_MAX_CHANGES + 1)
+            )
+        ).scalars()
+    )
+    truncated = len(rows) > _MAX_CHANGES
+    changes = rows[:_MAX_CHANGES]
     return {
         "run_id": run_id,
         "window_hours": window.total_seconds() / 3600,
         "changes": [_event_json(e) for e in changes],
         "evidence": [str(e.event_id) for e in changes],
+        "truncated": truncated,
     }
 
 
@@ -218,10 +261,11 @@ async def run_impact(session: AsyncSession, run_id: str) -> dict[str, Any] | Non
     run = await session.get(Run, run_id)
     if run is None:
         return None
-    suffix = f"/{run_id}"
     edges = (
         await session.execute(
-            select(Relationship).where(Relationship.from_entity.like(f"%{suffix}"))
+            select(Relationship)
+            .where(Relationship.from_entity.like(_run_entity_pattern(run_id), escape="\\"))
+            .limit(_MAX_RUN_EDGES)
         )
     ).scalars()
     impacted: dict[str, list[str]] = {}
@@ -333,10 +377,14 @@ async def asset_lineage(session: AsyncSession, entity_id: str) -> dict[str, Any]
     if asset is None:
         return None
     upstream = (
-        await session.execute(select(Relationship).where(Relationship.to_entity == entity_id))
+        await session.execute(
+            select(Relationship).where(Relationship.to_entity == entity_id).limit(_MAX_RUN_EDGES)
+        )
     ).scalars()
     downstream = (
-        await session.execute(select(Relationship).where(Relationship.from_entity == entity_id))
+        await session.execute(
+            select(Relationship).where(Relationship.from_entity == entity_id).limit(_MAX_RUN_EDGES)
+        )
     ).scalars()
 
     def _edge(e: Relationship) -> dict[str, Any]:

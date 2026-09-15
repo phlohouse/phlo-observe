@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import delete, func, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -414,6 +414,72 @@ def apply_run_state(run: Run, state: dict[str, Any], now: Any) -> None:
     run.provenance = se.provenance(state, se.RUN_RULE, se.RUN_RULE_VERSION, now)
 
 
+def _fold_derived(
+    entity_states: dict[str, dict[str, Any]],
+    edge_states: dict[tuple[str, str, str], dict[str, Any]],
+    batch: se.DerivedBatch,
+    event: dict[str, Any],
+    event_id: str,
+) -> None:
+    """Fold one event's derived batch into rebuild accumulators."""
+    observed = event.get("observed_at")
+    for eid, est in batch.entities.items():
+        target = entity_states.setdefault(eid, {**est, "first_seen_at": None, "last_seen_at": None})
+        se._record(target, event)
+        if est.get("attributes"):
+            target["attributes"] = {**(target.get("attributes") or {}), **est["attributes"]}
+        if observed:
+            if target["first_seen_at"] is None or observed < target["first_seen_at"]:
+                target["first_seen_at"] = observed
+            if target["last_seen_at"] is None or observed > target["last_seen_at"]:
+                target["last_seen_at"] = observed
+    for edge in batch.edges:
+        key = (edge.from_entity, edge.to_entity, edge.relationship_type)
+        estate = edge_states.setdefault(
+            key,
+            {
+                "from_entity": edge.from_entity,
+                "to_entity": edge.to_entity,
+                "relationship_type": edge.relationship_type,
+                "method": edge.method,
+                "confidence": edge.confidence,
+                "source_event_ids": [],
+            },
+        )
+        estate["confidence"] = max(estate["confidence"], edge.confidence)
+        estate["source_event_ids"] = se.merge_edge_sources(estate["source_event_ids"], event_id)
+
+
+async def _paged_events(
+    session: AsyncSession,
+    stmt: Any,
+    batch_size: int,
+) -> list[Event]:
+    """Keyset-paginate a rebuild scan on (observed_at, event_id).
+
+    The fold order must match the incremental path exactly (observed_at,
+    then event_id as the tie-break), so pagination follows the same key.
+    """
+    rows: list[Event] = []
+    last_ts = None
+    last_id = None
+    while True:
+        page = stmt.order_by(Event.observed_at.asc(), Event.event_id.asc()).limit(batch_size)
+        if last_id is not None:
+            page = page.where(
+                (Event.observed_at > last_ts)
+                | ((Event.observed_at == last_ts) & (Event.event_id > last_id))
+            )
+        batch = (await session.execute(page)).scalars().all()
+        if not batch:
+            break
+        rows.extend(batch)
+        last_ts, last_id = batch[-1].observed_at, batch[-1].event_id
+        if len(batch) < batch_size:
+            break
+    return rows
+
+
 async def rebuild_projections(
     session: AsyncSession,
     *,
@@ -423,10 +489,12 @@ async def rebuild_projections(
     """Recompute projections from canonical events (spec §12.4).
 
     With no scope, every projection table is rebuilt from the full event
-    history in ``observed_at`` order. With ``--run <id>``, only that run's
-    events are replayed — the run row is replaced and the entities/edges/
-    assets it touched are re-derived and merged, leaving unrelated
-    projections untouched.
+    history in ``observed_at`` order. With ``--run <id>``, that run's row is
+    replaced; the entities/edges it touched are merged into existing state,
+    and assets it touched are re-derived from *all* events referencing the
+    asset — a shared asset's history is never regressed by another run's
+    contribution. Insights/incidents/baselines are only rebuilt in the
+    unscoped path (their state depends on cross-run history).
     """
     counts = {
         "events": 0,
@@ -438,7 +506,7 @@ async def rebuild_projections(
         "insights": 0,
         "incidents": 0,
     }
-    stmt = select(Event).order_by(Event.observed_at.asc(), Event.event_id.asc())
+    stmt = select(Event)
     if run_id:
         stmt = stmt.where(Event.run_id == run_id)
     else:
@@ -452,12 +520,15 @@ async def rebuild_projections(
     entity_states: dict[str, dict[str, Any]] = {}
     asset_states: dict[str, dict[str, Any]] = {}
     edge_states: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # Asset entity ids / keys this run touched — the scoped pass replays
+    # every event touching them, not just this run's.
+    asset_eids: set[str] = set()
+    asset_keys: set[str] = set()
 
     # Insight state shares the projection's asset_states dict: BatchState.step
     # folds each event after evaluating it, so both consume the same fold.
     insight_state = insights.BatchState.empty(asset_states)
-    rows = (await session.execute(stmt)).scalars()
-    for row in rows:
+    for row in await _paged_events(session, stmt, batch_size):
         event = _event_view(row)
         counts["events"] += 1
         batch = se.derive(event)
@@ -465,50 +536,37 @@ async def rebuild_projections(
         if rid:
             state = run_states.setdefault(rid, se.new_run_state(rid))
             se.apply_run_event(state, event)
-        for eid, est in batch.entities.items():
-            target = entity_states.setdefault(
-                eid, {**est, "first_seen_at": None, "last_seen_at": None}
-            )
-            se._record(target, event)
-            if est.get("attributes"):
-                target["attributes"] = {**(target.get("attributes") or {}), **est["attributes"]}
-            observed = event.get("observed_at")
-            if observed:
-                if target["first_seen_at"] is None or observed < target["first_seen_at"]:
-                    target["first_seen_at"] = observed
-                if target["last_seen_at"] is None or observed > target["last_seen_at"]:
-                    target["last_seen_at"] = observed
+        _fold_derived(entity_states, edge_states, batch, event, str(row.event_id))
         if not run_id:
             # The shared insight pass: evaluate -> record -> group -> resolve
             # -> baselines -> asset fold, identical to incremental ingest.
             await insight_state.step(session, event)
         elif batch.asset_entity_id:
-            # Scoped rebuild replays no insight pass; the asset fold applies.
+            asset_eids.add(batch.asset_entity_id)
+            corr = event.get("correlation") or {}
+            if corr.get("asset_key"):
+                asset_keys.add(corr["asset_key"])
+
+    if run_id and (asset_eids or asset_keys):
+        # Scoped rebuild: re-derive each touched asset from its full event
+        # history so contributions from other runs survive the rebuild.
+        asset_predicates = []
+        if asset_keys:
+            asset_predicates.append(Event.asset_key.in_(asset_keys))
+        if asset_eids:
+            asset_predicates.append(Event.entities["asset"].as_string().in_(asset_eids))
+        asset_stmt = select(Event).where(or_(*asset_predicates))
+        for row in await _paged_events(session, asset_stmt, batch_size):
+            event = _event_view(row)
+            eid = se.event_entities(event).get("asset")
+            if not eid:
+                continue
             corr = event.get("correlation") or {}
             astate = asset_states.setdefault(
-                batch.asset_entity_id,
-                se.new_asset_state(
-                    batch.asset_entity_id,
-                    corr.get("asset_key") or batch.asset_entity_id.split("://", 1)[-1],
-                ),
+                eid,
+                se.new_asset_state(eid, corr.get("asset_key") or eid.split("://", 1)[-1]),
             )
             se.apply_asset_event(astate, event)
-        for edge in batch.edges:
-            key = (edge.from_entity, edge.to_entity, edge.relationship_type)
-            estate = edge_states.setdefault(
-                key,
-                {
-                    "from_entity": edge.from_entity,
-                    "to_entity": edge.to_entity,
-                    "relationship_type": edge.relationship_type,
-                    "method": edge.method,
-                    "confidence": edge.confidence,
-                    "source_event_ids": [],
-                },
-            )
-            estate["source_event_ids"] = se.merge_edge_sources(
-                estate["source_event_ids"], str(row.event_id)
-            )
 
     now = utcnow()
     for eid, state in entity_states.items():
@@ -535,33 +593,53 @@ async def rebuild_projections(
             )
         )
         counts["entities"] += 1
+    existing_edges: dict[tuple[str, str, str], Relationship] = {}
+    if run_id and edge_states:
+        # Scoped rebuild merges into shared edges: other runs' events may
+        # have contributed the same (from, to, type) tuple.
+        existing_edges = {
+            (r.from_entity, r.to_entity, r.relationship_type): r
+            for r in (
+                await session.execute(
+                    select(Relationship).where(
+                        tuple_(
+                            Relationship.from_entity,
+                            Relationship.to_entity,
+                            Relationship.relationship_type,
+                        ).in_(list(edge_states))
+                    )
+                )
+            ).scalars()
+        }
     for key, state in edge_states.items():
-        if run_id:
-            # Scoped rebuild: replace only edges this run's events re-derive.
-            await session.execute(
-                delete(Relationship).where(
-                    Relationship.from_entity == key[0],
-                    Relationship.to_entity == key[1],
-                    Relationship.relationship_type == key[2],
+        row = existing_edges.get(key)
+        if row is not None:
+            merged = list(row.source_event_ids or [])
+            for src in state["source_event_ids"]:
+                merged = se.merge_edge_sources(merged, src)
+            row.source_event_ids = merged
+            if state["confidence"] > (row.confidence or 0):
+                row.confidence = state["confidence"]
+            if now > (row.last_seen_at or now):
+                row.last_seen_at = now
+        else:
+            session.add(
+                Relationship(
+                    from_entity=state["from_entity"],
+                    to_entity=state["to_entity"],
+                    relationship_type=state["relationship_type"],
+                    method=state["method"],
+                    confidence=state["confidence"],
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    source_event_ids=state["source_event_ids"],
+                    provenance={
+                        "rule": se.EDGE_RULE,
+                        "rule_version": se.EDGE_RULE_VERSION,
+                        "derived_at": now.isoformat(),
+                    },
                 )
             )
-        session.add(
-            Relationship(
-                from_entity=state["from_entity"],
-                to_entity=state["to_entity"],
-                relationship_type=state["relationship_type"],
-                method=state["method"],
-                confidence=state["confidence"],
-                first_seen_at=now,
-                last_seen_at=now,
-                source_event_ids=state["source_event_ids"],
-                provenance={
-                    "rule": se.EDGE_RULE,
-                    "rule_version": se.EDGE_RULE_VERSION,
-                    "derived_at": now.isoformat(),
-                },
-            )
-        )
         counts["edges"] += 1
     for eid, state in asset_states.items():
         if run_id:

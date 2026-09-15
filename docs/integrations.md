@@ -48,6 +48,12 @@ configure(
 - Server-side: POST the document to `/v1/ingest/dbt`, or
   `{"run_results": ..., "manifest": ...}` to `/v1/ingest/dbt/artifacts`
   (manifest supplies project/adapter metadata).
+- Normalization emits a terminal `dbt.invocation` event carrying the
+  invocation id as `run_id`, the worst-result outcome, and
+  `elapsed_time` as `duration_ms`, plus `run://dbt/<invocation_id>` as
+  the run entity. Per-result events carry `model`/`test` entities —
+  tests link to their model through `depends_on.nodes` — and per-result
+  `execution_time` as `duration_ms`.
 
 ## Trino
 
@@ -90,6 +96,7 @@ envelope is carried as `observe.*` record attributes (shared encoder:
 | `observe.correlation.extra` | non-canonical correlation (JSON) |
 | `observe.trace_id`, `observe.span_id` | trace-join shortcuts |
 | `observe.service`, `observe.error`, `observe.source`, `observe.attributes` | structured sections (JSON) |
+| `observe.entities`, `observe.tags`, `observe.contract` | V2 envelope sections (JSON) |
 
 The `/v1/ingest/otlp` adapter restores these attributes: a record carrying
 `observe.event_id` re-enters as the original canonical event — same

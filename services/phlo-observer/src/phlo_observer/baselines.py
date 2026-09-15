@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer.models import Baseline
+from phlo_observer.state_engine import event_producer
 
 MAX_SAMPLES = 200
 """Bounded rolling window per (entity, metric) — enough for stable medians."""
@@ -56,8 +57,9 @@ def metric_entity(event: dict[str, Any]) -> str | None:
     if corr.get("asset_key"):
         return f"asset://{corr['asset_key']}"
     if corr.get("run_id"):
-        producer = (event.get("source") or {}).get("producer") or "phlo"
-        return f"run://{producer}/{corr['run_id']}"
+        # Same producer fallback chain as event_entities() so the baseline
+        # entity id matches the entity-registry id exactly.
+        return f"run://{event_producer(event)}/{corr['run_id']}"
     return None
 
 
@@ -81,7 +83,11 @@ def observations_of(event: dict[str, Any]) -> list[tuple[str, str, float]]:
         return f"{base}|{partition}" if partition else base
 
     if name.startswith("metric.") and attrs.get("metric") is not None:
+        # metric.recorded carries a single ``value``; metric.summary is an
+        # aggregate whose ``mean`` is the best per-sample representative.
         raw_value = attrs.get("value")
+        if raw_value is None:
+            raw_value = attrs.get("mean")
         if raw_value is None:
             return out
         try:
@@ -96,8 +102,7 @@ def observations_of(event: dict[str, Any]) -> list[tuple[str, str, float]]:
         # threshold, so duration-regression could never fire.
         job = corr.get("job_id") or corr.get("pipeline")
         if job:
-            producer = (event.get("source") or {}).get("producer") or "phlo"
-            entity = f"job://{producer}/{job}"
+            entity = f"job://{event_producer(event)}/{job}"
         if entity:
             out.append((entity, _key("run.duration_ms"), float(event["duration_ms"])))
     elif attrs.get("rows_written") is not None or attrs.get("row_count") is not None:

@@ -34,6 +34,11 @@ _operation: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextV
 )
 
 _SERVICE_KEYS = frozenset({"service_name", "service_version", "environment", "host", "instance_id"})
+_SOURCE_KEYS = frozenset({"producer"})
+"""Ambient source identity — e.g. ``bind_context(producer="dagster")`` inside an
+integration scope so every contained event namespaces its derived entities
+(``run://dagster/...``) under the same producer as the integration's own
+explicit entity declarations."""
 
 
 class BoundContext:
@@ -153,10 +158,16 @@ def ambient_service() -> dict[str, str]:
     }
 
 
+def ambient_producer() -> str | None:
+    """Producer identity bound in ambient context, if any."""
+    value = (_ambient.get() or {}).get("producer")
+    return str(value) if value is not None else None
+
+
 def ambient_extra() -> dict[str, Any]:
     """Non-canonical bound values, destined for ``correlation.extra``."""
     return {
         k: v
         for k, v in (_ambient.get() or {}).items()
-        if k not in CORRELATION_KEYS and k not in _SERVICE_KEYS
+        if k not in CORRELATION_KEYS and k not in _SERVICE_KEYS and k not in _SOURCE_KEYS
     }

@@ -164,6 +164,80 @@ class TestRunEndpoints:
         assert body["duration_delta_ms"] == 1500.0
         assert body["status_changed"] is True
 
+    async def test_v2_failures_includes_errorless_failures(self, client: Any) -> None:
+        """Regression: a failure without an error payload is still a failure."""
+        await _post(
+            client,
+            [
+                _event(run_id="nofail-err", outcome="failure"),  # no error body
+                _event(run_id="nofail-err", event="pipeline.step", outcome="success"),
+            ],
+        )
+        resp = await client.get("/v2/runs/nofail-err/failures")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["failures"]) == 1
+        assert body["failures"][0]["outcome"] == "failure"
+
+    async def test_v2_failures_excludes_json_null_error(self, client: Any) -> None:
+        """A success event carrying an explicit JSON null error is not a failure."""
+        ev = _event(run_id="nullerr", outcome="success")
+        ev["error"] = None  # serialized as JSON null, not absent
+        await _post(client, [ev])
+        resp = await client.get("/v2/runs/nullerr/failures")
+        assert resp.status_code == 200
+        assert resp.json()["failures"] == []
+
+    async def test_v2_impact_like_metachars_escaped(self, client: Any) -> None:
+        """Regression: run_id LIKE metacharacters must match literally.
+
+        ``a_b`` must not see edges belonging to ``axb`` — the underscore is
+        data, not a wildcard.
+        """
+        await _post(
+            client,
+            [
+                _event(
+                    event="asset.materialize",
+                    run_id="axb",
+                    asset_key="other/asset",
+                    outcome="success",
+                ),
+                _event(
+                    event="asset.materialize",
+                    run_id="a_b",
+                    asset_key="own/asset",
+                    outcome="success",
+                ),
+            ],
+        )
+        resp = await client.get("/v2/runs/a_b/impact")
+        assert resp.status_code == 200
+        impacted = [e for edges in resp.json()["impact"].values() for e in edges]
+        assert "asset://own/asset" in impacted
+        assert "asset://other/asset" not in impacted
+
+    async def test_v2_changes_reports_truncation_flag(self, client: Any) -> None:
+        """run_changes answers from a bounded SQL-filtered scan and reports
+        truncation instead of silently dropping rows."""
+        await _post(
+            client,
+            [
+                _event(
+                    event="deployment.deploy",
+                    run_id=None,
+                    category="infrastructure",
+                    observed_at="2025-01-01T00:00:00Z",
+                ),
+                _event(run_id="trunc-run", observed_at="2025-01-01T01:00:00Z"),
+            ],
+        )
+        resp = await client.get("/v2/runs/trunc-run/changes")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["truncated"] is False
+        assert len(body["changes"]) == 1
+
 
 @pytest.mark.asyncio
 class TestAssetEndpoints:

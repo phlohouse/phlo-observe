@@ -28,6 +28,7 @@ class TelemetryStats:
         "tail_buffered",
         "tail_flushed",
         "tail_reduced",
+        "tail_released",
         "aggregated_events",
         "truncated_events",
         "spooled_events",

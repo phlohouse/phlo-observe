@@ -45,6 +45,9 @@ def test_dagster_run_scope_binds(captured: tuple[Runtime, MemoryDrain]):
     assert corr["partition_key"] == "2026-09-14"
     assert corr["asset_key"] == "silver.samples"
     assert corr["extra"]["retry_number"] == 1
+    # Ambient producer: server-derived entity ids land in the dagster
+    # namespace (run://dagster/...), matching declared entities.
+    assert ev["source"]["producer"] == "dagster"
 
 
 def test_dagster_emit_materialization(captured: tuple[Runtime, MemoryDrain]):
@@ -55,6 +58,7 @@ def test_dagster_emit_materialization(captured: tuple[Runtime, MemoryDrain]):
     assert ev["event"] == "asset.materialize"
     assert ev["correlation"]["asset_key"] == "silver.samples"
     assert ev["attributes"]["rows_out"] == 100
+    assert ev["source"]["producer"] == "dagster"
 
 
 def test_dagster_asset_check(captured: tuple[Runtime, MemoryDrain]):
@@ -86,6 +90,7 @@ RUN_RESULTS = {
             "status": "fail",
             "execution_time": 0.3,
             "failures": 8,
+            "depends_on": {"nodes": ["model.phlo.silver_samples"]},
         },
     ],
 }
@@ -100,17 +105,44 @@ def test_dbt_run_results_events(captured: tuple[Runtime, MemoryDrain]):
     assert invocation["event"] == "dbt.invocation"
     assert invocation["correlation"]["invocation_id"] == "inv-123"
     assert invocation["attributes"]["dbt_version"] == "1.8.0"
+    # The invocation is the run's terminal event: run_id correlation gives the
+    # observer a real run projection, outcome reflects the worst result.
+    assert invocation["correlation"]["run_id"] == "inv-123"
+    assert invocation["outcome"] == "failure"  # a result failed
+    assert invocation["duration_ms"] == 12_400.0
+    assert invocation["entities"]["run"] == "run://dbt/inv-123"
 
     model = events[1]
     assert model["event"] == "dbt.model.execute"
     assert model["outcome"] == "success"
     assert model["attributes"]["rows_affected"] == 14277
     assert model["source"]["producer"] == "dbt"
+    assert model["entities"]["run"] == "run://dbt/inv-123"
+    assert model["entities"]["model"] == "model://dbt/silver_samples"
+    assert model["correlation"]["run_id"] == "inv-123"
 
     test_ev = events[2]
     assert test_ev["event"] == "dbt.test.execute"
     assert test_ev["outcome"] == "failure"
+    assert test_ev["severity"] == "error"
     assert test_ev["attributes"]["failures"] == 8
+    # depends_on.nodes links the test to the model it checks.
+    assert test_ev["entities"]["model"] == "model://dbt/silver_samples"
+    assert test_ev["entities"]["run"] == "run://dbt/inv-123"
+
+
+def test_dbt_invocation_success_when_all_pass(captured: tuple[Runtime, MemoryDrain]):
+    """A clean run_results document yields a successful invocation outcome."""
+    _, drain = captured
+    doc = {
+        "metadata": {"invocation_id": "inv-ok"},
+        "elapsed_time": 1.0,
+        "results": [{"unique_id": "model.p.m1", "status": "success"}],
+    }
+    dbt.emit_run_results(doc)
+    events = _data(drain)
+    assert events[0]["outcome"] == "success"
+    assert events[0]["duration_ms"] == 1000.0
 
 
 def test_dbt_manifest_metadata():
@@ -134,6 +166,7 @@ def test_trino_query_hash_no_sql_by_default(captured: tuple[Runtime, MemoryDrain
     assert ev["event"] == "trino.query"
     assert ev["attributes"]["query_class"] == "select"
     assert ev["attributes"]["query_hash"]
+    assert ev["source"]["producer"] == "trino"
     assert "sql" not in ev["attributes"]
 
 
@@ -221,6 +254,7 @@ def test_dlt_pipeline_run(captured: tuple[Runtime, MemoryDrain]):
     assert ev["event"] == "dlt.pipeline.run"
     assert ev["correlation"]["pipeline"] == "github_issues"
     assert ev["attributes"]["destination"] == "iceberg"
+    assert ev["source"]["producer"] == "dlt"
 
 
 def test_dlt_load_info_attributes():

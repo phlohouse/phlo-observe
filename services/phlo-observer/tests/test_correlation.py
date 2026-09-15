@@ -83,16 +83,30 @@ async def test_explicit_run_id_wins_over_trace(client: AsyncClient, session_fact
 
 
 async def test_ambiguous_trace_first_owner_wins(client: AsyncClient, session_factory: Any) -> None:
-    """Two runs claiming one trace: the orphan binds to an existing owner."""
+    """Two runs claiming one trace: the orphan binds deterministically."""
     a = _corr_event(run_id="run-a", trace_id="tr-dupe")
     b = _corr_event(run_id="run-b", trace_id="tr-dupe")
     orphan = _corr_event(trace_id="tr-dupe")
     await client.post("/v1/events", json=[a, b, orphan])
     row = await _stored(session_factory, orphan["event_id"])
     assert row is not None
-    # Either owner is defensible; what matters is a declared trace link was
-    # reused and the event did not stay silently orphaned or get invented.
-    assert row.run_id in ("run-a", "run-b")
+    # Deterministic by run_id ordering — the answer must not depend on plan.
+    assert row.run_id == "run-a"
+
+
+async def test_ambiguous_trace_stable_across_batches(
+    client: AsyncClient, session_factory: Any
+) -> None:
+    """A later orphan of a multi-run trace resolves to the same owner."""
+    trace = f"tr-{uuid.uuid4().hex[:8]}"
+    b = _corr_event(run_id="run-b", trace_id=trace)
+    a = _corr_event(run_id="run-a", trace_id=trace)
+    await client.post("/v1/events", json=[b, a])  # insert order != id order
+    orphan = _corr_event(trace_id=trace)
+    await client.post("/v1/events", json=[orphan])
+    row = await _stored(session_factory, orphan["event_id"])
+    assert row is not None
+    assert row.run_id == "run-a"
 
 
 async def test_edges_only_from_declared_entities(client: AsyncClient, session_factory: Any) -> None:

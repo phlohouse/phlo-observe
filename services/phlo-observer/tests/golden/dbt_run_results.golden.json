@@ -19,20 +19,23 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 4800.0,
     "ended_at": null,
+    "entities": {
+      "run": "run://dbt/5f3f2f10-aaaa-bbbb-cccc-111111111111"
+    },
     "error": null,
     "event": "dbt.invocation",
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
-    "outcome": "unknown",
+    "outcome": "failure",
     "schema_version": "2.0",
     "service": {
       "environment": null,
@@ -41,7 +44,7 @@
       "name": "dbt",
       "version": null
     },
-    "severity": "info",
+    "severity": "error",
     "source": {
       "adapter": "dbt.1.0",
       "ingested_at": null,
@@ -73,15 +76,19 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 1250.0,
     "ended_at": null,
+    "entities": {
+      "model": "model://dbt/fct_orders",
+      "run": "run://dbt/5f3f2f10-aaaa-bbbb-cccc-111111111111"
+    },
     "error": null,
     "event": "dbt.model.execute",
     "event_id": "<event-id>",
@@ -126,15 +133,19 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 310.0,
     "ended_at": null,
+    "entities": {
+      "model": "model://dbt/fct_orders",
+      "run": "run://dbt/5f3f2f10-aaaa-bbbb-cccc-111111111111"
+    },
     "error": null,
     "event": "dbt.test.execute",
     "event_id": "<event-id>",
@@ -180,15 +191,19 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 20.0,
     "ended_at": null,
+    "entities": {
+      "model": "model://dbt/dim_customers",
+      "run": "run://dbt/5f3f2f10-aaaa-bbbb-cccc-111111111111"
+    },
     "error": null,
     "event": "dbt.model.execute",
     "event_id": "<event-id>",

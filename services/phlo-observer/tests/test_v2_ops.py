@@ -113,6 +113,22 @@ class TestSearch:
         resp = await client.get("/v2/search", params={"q": "zzz-no-such"})
         assert resp.json()["items"] == []
 
+    async def test_q_like_metachars_match_literally(self, client: Any) -> None:
+        """Regression: ``%``/``_`` in the search term are data, not wildcards."""
+        await client.post(
+            "/v1/events",
+            json=[_event(event="pipeline.run", run_id="q-esc")],
+        )
+        # '%' must not act as a wildcard that matches everything.
+        resp = await client.get("/v2/search", params={"q": "%"})
+        assert resp.json()["items"] == []
+        # Underscore is literal: "pipeline_run" does not match "pipeline.run".
+        resp = await client.get("/v2/search", params={"q": "pipeline_run"})
+        assert resp.json()["items"] == []
+        # And the literal form still matches.
+        resp = await client.get("/v2/search", params={"q": "pipeline.run"})
+        assert len(resp.json()["items"]) == 1
+
     async def test_structured_filters_still_apply(self, client: Any) -> None:
         await client.post(
             "/v1/events",
@@ -191,6 +207,32 @@ class TestLifecycle:
         )
         assert missing.status_code == 404
 
+    async def test_insight_illegal_transition_conflicts(
+        self, client: Any, session_factory: Any
+    ) -> None:
+        """Regression: lifecycle is a state machine, not a free-for-all."""
+        async with session_factory() as session, session.begin():
+            row = _insight()
+            session.add(row)
+            iid = str(row.insight_id)
+        # resolved -> suppressed is not a legal transition.
+        resp = await client.post(f"/v2/insights/{iid}/transition", json={"state": "resolved"})
+        assert resp.status_code == 200
+        bad = await client.post(f"/v2/insights/{iid}/transition", json={"state": "suppressed"})
+        assert bad.status_code == 409
+        # Same-state is idempotent, not a conflict.
+        same = await client.post(f"/v2/insights/{iid}/transition", json={"state": "resolved"})
+        assert same.status_code == 200
+        # Reopen is legal from resolved.
+        reopen = await client.post(f"/v2/insights/{iid}/transition", json={"state": "open"})
+        assert reopen.status_code == 200
+        # expired is terminal.
+        await client.post(f"/v2/insights/{iid}/transition", json={"state": "acknowledged"})
+        exp = await client.post(f"/v2/insights/{iid}/transition", json={"state": "expired"})
+        assert exp.status_code == 200
+        dead = await client.post(f"/v2/insights/{iid}/transition", json={"state": "open"})
+        assert dead.status_code == 409
+
     async def test_incident_transition_resolved(self, client: Any, session_factory: Any) -> None:
         from observe_core.timestamps import utcnow
 
@@ -212,6 +254,43 @@ class TestLifecycle:
         resp = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "resolved"})
         assert resp.status_code == 200
         assert resp.json()["state"] == "resolved"
+
+    async def test_incident_reopen_clears_resolved_at(
+        self, client: Any, session_factory: Any
+    ) -> None:
+        """Regression: a reopened incident must not carry a stale resolved_at."""
+        from observe_core.timestamps import utcnow
+
+        async with session_factory() as session, session.begin():
+            row = Incident(
+                incident_id=uuid.uuid4(),
+                title="i",
+                state="open",
+                severity="warn",
+                entities=[],
+                insight_ids=[],
+                timeline={},
+                impact={},
+                attributes={},
+                updated_at=utcnow(),
+            )
+            session.add(row)
+            iid = str(row.incident_id)
+        resp = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "resolved"})
+        assert resp.status_code == 200
+        async with session_factory() as session:
+            assert (await session.get(Incident, uuid.UUID(iid))).resolved_at is not None
+        resp = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "open"})
+        assert resp.status_code == 200
+        async with session_factory() as session:
+            row = await session.get(Incident, uuid.UUID(iid))
+            assert row.state == "open"
+            assert row.resolved_at is None
+        # open -> suppressed is legal; suppressed -> acknowledged is not.
+        ok = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "suppressed"})
+        assert ok.status_code == 200
+        bad = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "acknowledged"})
+        assert bad.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -257,6 +336,25 @@ class TestRegistryEndpoints:
         missing = await client.post("/v2/analyses", json={"model": "m"})
         assert missing.status_code == 400
 
+    async def test_provenance_reports_edges(self, client: Any) -> None:
+        """Regression: provenance must name the edges an event contributed to."""
+        import workloads as wl
+
+        events = wl.dagster_run(
+            f"prov-{uuid.uuid4().hex[:8]}",
+            wl.T0,
+            assets=["analytics.prov"],
+            steps=1,
+        )
+        await client.post("/v1/events", json=events)
+        materialize = next(e for e in events if e["event"] == "asset.materialize")
+        resp = await client.get(f"/v2/events/{materialize['event_id']}/provenance")
+        assert resp.status_code == 200
+        projections = resp.json()["projections"]
+        assert projections["edge"], "materialize event must credit its edges"
+        assert any("asset://analytics.prov" in e for e in projections["edge"])
+        assert projections["entity"] or projections["run"]
+
 
 @pytest.mark.asyncio
 class TestArchiveRestore:
@@ -295,3 +393,25 @@ class TestArchiveRestore:
                 .all()
             )
         assert len(rows) == 1
+
+    async def test_reprocess_window_runs(
+        self,
+        client: Any,
+        database_url: str,
+        monkeypatch: Any,
+    ) -> None:
+        """``reprocess --since`` replays the window through apply_event."""
+        import asyncio
+
+        from phlo_observer.cli import app
+        from typer.testing import CliRunner
+
+        await client.post("/v1/events", json=[_event(run_id="repro-1")])
+        monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+        result = await asyncio.to_thread(
+            CliRunner().invoke,
+            app,
+            ["reprocess", "--since", "2000-01-01T00:00:00"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "reprocessed" in result.output

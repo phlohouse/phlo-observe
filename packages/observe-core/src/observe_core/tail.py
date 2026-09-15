@@ -8,8 +8,8 @@ Safety bounds — when a limit is hit the buffer degrades to pass-through
 mode for that run rather than growing unbounded:
 
 - ``max_runs``: concurrent run buffers (new runs pass through);
-- ``max_run_events``: per-run event count (the run's buffer releases and
-  remaining events pass through);
+- ``max_run_events``: per-run event count (the run's buffer releases as one
+  bounded chunk, then buffering resumes so the run drains in chunks);
 - ``max_age_seconds``: orphaned runs without a terminal event are flushed
   when polled.
 """
@@ -87,10 +87,11 @@ class TailSampler:
             buffer.events.append(event)
             self._incr("tail_buffered")
             if len(buffer.events) > self.max_run_events:
-                # Per-run bound hit: release everything buffered plus this
-                # event, then let subsequent events pass through.
+                # Per-run bound hit: release everything buffered (the current
+                # event included — it was appended above), then start a fresh
+                # buffer so the run keeps draining in bounded chunks.
                 self._release(run_id, emit)
-                emit(event)
+                self._incr("tail_released")
                 return
             if not terminal:
                 return

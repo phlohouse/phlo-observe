@@ -139,6 +139,46 @@ async def test_retention_cleanup(session_factory: Any, database_url: str, make_e
 
 
 @pytest.mark.asyncio
+async def test_retention_uses_received_at_not_observed_at(
+    session_factory: Any, database_url: str
+) -> None:
+    """Regression: the retention clock is ``received_at`` (server time).
+
+    A clock-skewed producer must not cause an event to expire early or
+    to outlive retention: ``observed_at`` is untrusted input.
+    """
+    settings = ObserverSettings(database_url=database_url, event_retention_days=30)
+    now = utcnow()
+    old = now - dt.timedelta(days=400)
+
+    def _event(observed: dt.datetime, received: dt.datetime) -> Event:
+        return Event(
+            event_id=uuid.uuid4(),
+            schema_version="1.0",
+            event="pipeline.step",
+            category="pipeline",
+            outcome="success",
+            severity="info",
+            delivery="telemetry",
+            observed_at=observed,
+            received_at=received,
+            attributes={},
+            source={},
+        )
+
+    skewed_old = _event(observed=old, received=now)  # far-past producer clock
+    skewed_future = _event(observed=now, received=old)  # freshly-observed, stale receive
+    async with session_factory() as session, session.begin():
+        session.add(skewed_old)
+        session.add(skewed_future)
+    report = await run_retention_once(session_factory, settings)
+    assert report.events == 1
+    async with session_factory() as session:
+        assert await session.get(Event, skewed_old.event_id) is not None
+        assert await session.get(Event, skewed_future.event_id) is None
+
+
+@pytest.mark.asyncio
 async def test_retention_terminal_insights_incidents(
     session_factory: Any, database_url: str
 ) -> None:

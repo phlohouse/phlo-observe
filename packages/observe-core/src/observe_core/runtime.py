@@ -31,6 +31,7 @@ from observe_core.backends import (
     SyncBackend,
     WorkerBackend,
 )
+from observe_core.builder import EventBuilder
 from observe_core.config import (
     ConsoleDrainConfig,
     HttpDrainConfig,
@@ -42,6 +43,7 @@ from observe_core.config import (
 from observe_core.context import (
     ambient_correlation,
     ambient_extra,
+    ambient_producer,
     ambient_service,
     operation_correlation,
 )
@@ -54,12 +56,15 @@ from observe_core.errors import ObservedError, error_info_from_exception
 from observe_core.ids import new_event_id
 from observe_core.models import (
     CORRELATION_KEYS,
+    Category,
     ContractRef,
     Correlation,
+    Delivery,
     ErrorInfo,
     EventEnvelope,
     Outcome,
     Severity,
+    SourceInfo,
 )
 from observe_core.redaction import Redactor
 from observe_core.sampling import PolicySampler, Sampler, SamplingContext
@@ -70,7 +75,6 @@ from observe_core.tail import TailSampler
 from observe_core.timestamps import utcnow
 
 if TYPE_CHECKING:
-    from observe_core.builder import EventBuilder
     from observe_core.config import ObserveSettings
     from observe_core.enrich import Enricher
 
@@ -372,6 +376,18 @@ class Runtime:
                 schema_id=contract_spec.schema_id,
                 schema_hash=contract_spec.schema_hash,
             )
+        # Producer identity: an explicit ``source.producer`` wins; otherwise an
+        # ambient ``bind_context(producer=...)`` applies so integration scopes
+        # namespace derived entities consistently (``run://dagster/<id>``
+        # rather than ``run://<service.name>/<id>``).
+        source = builder.source
+        bound_producer = ambient_producer()
+        if bound_producer is not None and (source is None or not source.producer):
+            source = (
+                source.model_copy(update={"producer": bound_producer})
+                if source is not None
+                else SourceInfo(producer=bound_producer)
+            )
         envelope = EventEnvelope(
             schema_version=self.settings.envelope_version,
             event_id=new_event_id(),
@@ -394,7 +410,7 @@ class Runtime:
             correlation=correlation,
             attributes=normalize_value(builder.attributes, max_depth=self.settings.max_depth),
             error=error,
-            source=builder.source,
+            source=source,
             entities=normalize_value(builder.entities, max_depth=2),
             tags=normalize_value(builder.tags, max_depth=2),
             contract=contract_ref,
@@ -464,10 +480,42 @@ class Runtime:
             return bool(workers_alive())
         return self._backend.health().workers_alive
 
+    def emit_metric_summaries(self) -> int:
+        """Drain the aggregator and emit each pending ``metric.summary`` event.
+
+        Returns the number of series emitted. Summaries carry their series
+        correlation/entities/tags so observers can attach them to the right
+        entity baselines.
+        """
+        summaries = self.aggregator.flush()
+        for summary in summaries:
+            correlation = summary.pop("correlation", None)
+            entities = summary.pop("entities", None)
+            tags = summary.pop("tags", None)
+            builder = EventBuilder(
+                "metric.summary",
+                category=Category.METRIC,
+                delivery=Delivery.TELEMETRY,
+                attributes=summary,
+            )
+            if correlation:
+                builder.set_correlation(**correlation)
+            for role, identifier in (entities or {}).items():
+                builder.set_entity(role, identifier)
+            for key, value in (tags or {}).items():
+                builder.set_tag(key, value)
+            self.emit(builder, None)
+        return len(summaries)
+
     def flush(self, timeout: float = 5.0) -> bool:
-        """Wait until queued events have been handed to drains. Bounded."""
+        """Wait until queued events have been handed to drains. Bounded.
+
+        Pending metric summaries are emitted first so a ``flush()`` call
+        drains every kind of pending telemetry, not just the queue.
+        """
         if self._closed:
             return True
+        self.emit_metric_summaries()
         if self._tail is not None:
             self._tail.flush_all(self._backend.emit)
         return self._backend.flush(timeout).ok
@@ -508,12 +556,17 @@ class Runtime:
         }
 
     def shutdown(self, timeout: float = 5.0) -> None:
-        """Stop the backend and release resources. Idempotent."""
+        """Stop the backend and release resources. Idempotent.
+
+        Pending metric summaries and tail-sampled buffers are emitted before
+        the backend closes so shutdown does not silently lose telemetry.
+        """
         if self._closed:
             return
-        self._closed = True
+        self.emit_metric_summaries()
         if self._tail is not None:
             self._tail.flush_all(self._backend.emit)
+        self._closed = True
         self._backend.close(timeout)
 
 

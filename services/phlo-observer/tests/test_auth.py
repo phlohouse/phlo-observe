@@ -79,3 +79,62 @@ async def test_dev_mode_accepts_without_tokens(client: AsyncClient, make_event: 
     """No configured tokens = documented dev mode: everything allowed."""
     resp = await client.post("/v1/events", json=make_event())
     assert resp.status_code == 202
+
+
+@pytest.mark.asyncio
+async def test_admin_requires_admin_token_not_read(authed_client: AsyncClient) -> None:
+    """Regression: a read token must not inherit admin powers.
+
+    ``authed_client`` configures ingest+read tokens but no admin tokens —
+    the admin surface must fail closed, not silently fall back to readers.
+    """
+    resp = await authed_client.get(
+        "/v2/admin/quarantine", headers={"Authorization": "Bearer read-one"}
+    )
+    assert resp.status_code == 401
+    resp = await authed_client.get("/v2/admin/quarantine")
+    assert resp.status_code == 401
+    resp = await authed_client.get(
+        "/v2/admin/quarantine", headers={"Authorization": "Bearer ingest-one"}
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_token_unlocks_admin_surface(database_url: str, session_factory: Any) -> None:
+    """An explicitly configured admin token reaches admin endpoints."""
+    settings = ObserverSettings(
+        database_url=database_url,
+        ingest_tokens="ingest-one",
+        read_tokens="read-one",
+        admin_tokens="admin-one",
+    )
+    app = create_app(settings)
+    app.state.session_factory = session_factory
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.get("/v2/admin/quarantine", headers={"Authorization": "Bearer admin-one"})
+        assert resp.status_code == 200
+        # Admin tokens are not read credentials either.
+        resp = await c.get("/v1/events", headers={"Authorization": "Bearer admin-one"})
+        assert resp.status_code == 401
+
+
+def test_strict_mode_requires_admin_tokens(database_url: str) -> None:
+    """auth_optional_dev=false must fail fast when admin tokens are missing."""
+    settings = ObserverSettings(
+        database_url=database_url,
+        auth_optional_dev=False,
+        ingest_tokens="i",
+        read_tokens="r",
+    )
+    with pytest.raises(ValueError, match="admin tokens"):
+        settings.require_tokens()
+    # Fully configured passes.
+    settings = ObserverSettings(
+        database_url=database_url,
+        auth_optional_dev=False,
+        ingest_tokens="i",
+        read_tokens="r",
+        admin_tokens="a",
+    )
+    settings.require_tokens()

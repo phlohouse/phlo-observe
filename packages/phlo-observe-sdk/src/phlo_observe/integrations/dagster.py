@@ -54,6 +54,10 @@ def dagster_run_scope(context: Any, *, asset_key: str | None = None) -> Iterator
         "retry_number": _attr(context, "retry_number"),
         "asset_key": asset_key or _dagster_asset_key(context),
         "dagster_run_tags": _attr(run, "tags") if run else None,
+        # Ambient producer keeps server-derived entity ids in the dagster
+        # namespace (``run://dagster/<id>``) matching the explicit entity
+        # declarations the helpers below stamp.
+        "producer": "dagster",
     }
     with bind_context(**{k: v for k, v in values.items() if v is not None}):
         yield
@@ -77,7 +81,7 @@ def dagster_step(context: Any, name: str = E.PIPELINE_STEP, **kw: Any) -> observ
     op_name = _attr(context, "op.name", "node.name", "op_def.name")
     attrs = {"dagster_op": op_name} if op_name else {}
     attrs.update(kw.pop("attributes", None) or {})
-    return observe(name, category=Category.PIPELINE, attributes=attrs, **kw)
+    return observe(name, category=Category.PIPELINE, attributes=attrs, producer="dagster", **kw)
 
 
 def emit_materialization(
@@ -107,6 +111,7 @@ def emit_materialization(
             "partition_key": _attr(context, "partition_key", "run.partition_key"),
         },
         entities=entities,
+        producer="dagster",
     )
 
 
@@ -142,4 +147,5 @@ def emit_asset_check(
             "asset_key": key,
         },
         entities=entities,
+        producer="dagster",
     )
