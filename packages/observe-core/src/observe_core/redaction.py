@@ -110,7 +110,9 @@ class Redactor:
         # does not depend on ``path``). Bounded against unbounded key sets.
         self._key_cache: dict[str, bool] = {}
 
-    def _key_hit(self, key: str, path: tuple[str, ...]) -> bool:
+    def _key_hit(
+        self, key: str, path: tuple[str, ...], extra_paths: tuple[tuple[str, ...], ...] = ()
+    ) -> bool:
         hit = self._key_cache.get(key)
         if hit is None:
             hit = self._key_hit_uncached(key)
@@ -118,12 +120,12 @@ class Redactor:
                 self._key_cache[key] = hit
         if hit:
             return True
-        if not self._paths:
+        paths = self._paths + list(extra_paths)
+        if not paths:
             return False
         dotted = ".".join((*path, key))
         return any(
-            dotted == ".".join(rule) or dotted.endswith("." + ".".join(rule))
-            for rule in self._paths
+            dotted == ".".join(rule) or dotted.endswith("." + ".".join(rule)) for rule in paths
         )
 
     def _key_hit_uncached(self, key: str) -> bool:
@@ -138,31 +140,46 @@ class Redactor:
             return True
         return any(rx.search(key) for rx in self._key_res)
 
-    def redact_event(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Redact a canonical event dict in place and return it."""
+    def redact_event(
+        self, data: dict[str, Any], *, extra_paths: tuple[tuple[str, ...], ...] = ()
+    ) -> dict[str, Any]:
+        """Redact a canonical event dict in place and return it.
+
+        ``extra_paths`` adds dotted-path rules for this call only — used for
+        contract-declared sensitive fields (spec §7.2/§34).
+        """
         if not self.enabled:
             return data
-        self._redact(data, path=(), depth=0)
+        self._redact(data, path=(), depth=0, extra_paths=extra_paths)
         return data
 
-    def _redact(self, node: Any, *, path: tuple[str, ...], depth: int) -> None:
+    def _redact(
+        self,
+        node: Any,
+        *,
+        path: tuple[str, ...],
+        depth: int,
+        extra_paths: tuple[tuple[str, ...], ...] = (),
+    ) -> None:
         if depth > self._max_depth:
             return
         if isinstance(node, dict):
             for key, value in node.items():
                 key_str = str(key)
-                if self._key_hit(key_str, path) or (
+                if self._key_hit(key_str, path, extra_paths) or (
                     isinstance(value, str) and self._value_hit(value)
                 ):
                     node[key] = REDACTED
                 else:
-                    self._redact(value, path=(*path, key_str), depth=depth + 1)
+                    self._redact(
+                        value, path=(*path, key_str), depth=depth + 1, extra_paths=extra_paths
+                    )
         elif isinstance(node, list):
             for i, item in enumerate(node):
                 if isinstance(item, str) and self._value_hit(item):
                     node[i] = REDACTED
                 else:
-                    self._redact(item, path=path, depth=depth + 1)
+                    self._redact(item, path=path, depth=depth + 1, extra_paths=extra_paths)
 
     def _value_hit(self, value: str) -> bool:
         return any(rx.search(value) for rx in self._value_res)

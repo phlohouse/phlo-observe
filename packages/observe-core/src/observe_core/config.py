@@ -220,6 +220,19 @@ class ObserveSettings(BaseSettings):
     enabled: bool = True
     """Master switch. When false, emission is a near-zero-cost no-op."""
 
+    runtime_backend: Literal["worker", "sync", "capture"] = "worker"
+    """Transport backend (spec §7.5): ``worker`` = bounded queue + background
+    workers (production default), ``sync`` = deliver on the caller's thread,
+    ``capture`` = in-memory capture for tests."""
+
+    envelope_version: Literal["1.0", "2.0"] = "2.0"
+    """Canonical envelope version emitted (spec §43). The observer accepts
+    both; ``2.0`` adds ``entities``, ``tags`` and ``contract`` fields."""
+
+    contract_validation: Literal["off", "warn", "strict"] = "warn"
+    """Event-contract validation mode (spec §7.2). ``warn`` records violations
+    on the event without failing application work; ``strict`` raises."""
+
     service_name: str = "unknown"
     service_version: str | None = None
     environment: str = "development"
@@ -262,6 +275,19 @@ class ObserveSettings(BaseSettings):
     """Fraction of ``debug`` events kept. Default: 1.0 dev / 0.1 production."""
     sampling_telemetry_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     """``critical`` events are never sampled."""
+    sampling_policy: Annotated[list[dict[str, Any]], NoDecode] = Field(default_factory=list)
+    """Ordered sampling rules (spec §7.6), evaluated before the base rates.
+    Each entry may set matchers (``event``, ``severity``, ``outcome``,
+    ``min_duration_ms``, ``environment``, ``service``) and either ``rate``
+    (0.0-1.0, applied at run/trace level) or ``keep`` (true/false). Decisions
+    are recorded on the event under ``attributes._observe.sampling``."""
+    tail_sampling: bool = False
+    """Retain per-run event buffers and emit reduced telemetry for uneventful
+    runs (spec §7.7). Optional; bounded by ``tail_max_runs``."""
+    tail_max_runs: int = 1_000
+    """Maximum concurrent run buffers held by the tail sampler."""
+    tail_min_duration_ms: float = 30_000.0
+    """Runs longer than this keep full telemetry even when successful."""
 
     telemetry_required: bool = False
     """Fail-closed mode: raise instead of dropping when export is impossible."""
@@ -293,7 +319,19 @@ class ObserveSettings(BaseSettings):
     def _coerce_str_list(cls, value: Any) -> Any:
         return _csv_or_json_list(value)
 
-    @field_validator("batch_size", "queue_capacity", "max_event_bytes", "max_depth")
+    @field_validator("sampling_policy", mode="before")
+    @classmethod
+    def _coerce_policy(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            return json.loads(text)
+        return value
+
+    @field_validator(
+        "batch_size", "queue_capacity", "max_event_bytes", "max_depth", "tail_max_runs"
+    )
     @classmethod
     def _positive(cls, value: int) -> int:
         if value <= 0:

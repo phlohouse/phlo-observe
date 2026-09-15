@@ -37,6 +37,14 @@ class MutableEvent(Protocol):
         """Set correlation identifiers."""
         ...
 
+    def set_entity(self, role: str, identifier: object) -> None:
+        """Record a canonical entity identifier (V2 envelope)."""
+        ...
+
+    def set_tag(self, key: str, value: object) -> None:
+        """Attach a searchable label (V2 envelope)."""
+        ...
+
     def annotate(self, note: str) -> None:
         """Attach a human-readable note."""
         ...

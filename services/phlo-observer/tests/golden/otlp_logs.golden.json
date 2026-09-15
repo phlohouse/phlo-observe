@@ -34,7 +34,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "unknown",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "instance_id": "worker-7",
       "name": "ingest-worker",
@@ -86,7 +86,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "unknown",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "instance_id": "worker-7",
       "name": "ingest-worker",

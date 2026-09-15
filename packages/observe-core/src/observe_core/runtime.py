@@ -1,12 +1,16 @@
-"""The emission runtime: bounded queue, background workers, drain fan-out.
+"""The emission runtime: finalize events, then hand them to a backend.
 
 Completed event flow (per spec §11)::
 
     builder -> merge context -> normalize -> enrich -> redact
-      -> validate limits -> sample -> enqueue -> worker batch -> drains
+      -> validate limits -> sample -> backend.emit -> drains
 
-Nothing on the application path performs network I/O: ``emit`` only builds the
-canonical event and enqueues it.
+Nothing on the application path performs network I/O with the default
+:class:`~observe_core.backends.WorkerBackend`: ``emit`` only builds the
+canonical event and enqueues it. ``ObserveSettings.runtime_backend`` selects
+``worker`` (default), ``sync`` or ``capture`` transports; a custom
+:class:`~observe_core.backends.RuntimeBackend` may be passed to
+:func:`configure` via ``backend=``.
 """
 
 from __future__ import annotations
@@ -14,13 +18,19 @@ from __future__ import annotations
 import atexit
 import contextlib
 import logging
-import queue
 import sys
 import threading
-import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from observe_core.aggregate import MetricAggregator
+from observe_core.backends import (
+    BackendHealth,
+    CaptureBackend,
+    RuntimeBackend,
+    SyncBackend,
+    WorkerBackend,
+)
 from observe_core.config import (
     ConsoleDrainConfig,
     HttpDrainConfig,
@@ -44,18 +54,19 @@ from observe_core.errors import ObservedError, error_info_from_exception
 from observe_core.ids import new_event_id
 from observe_core.models import (
     CORRELATION_KEYS,
+    ContractRef,
     Correlation,
-    Delivery,
     ErrorInfo,
     EventEnvelope,
     Outcome,
     Severity,
 )
 from observe_core.redaction import Redactor
-from observe_core.sampling import Sampler
+from observe_core.sampling import PolicySampler, Sampler, SamplingContext
 from observe_core.serialization import dumps, normalize_value
 from observe_core.spool import Spool
 from observe_core.stats import TelemetryStats
+from observe_core.tail import TailSampler
 from observe_core.timestamps import utcnow
 
 if TYPE_CHECKING:
@@ -65,7 +76,6 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("observe_core")
 
-_STOP = object()
 _TRUNCATE_FIELD_BYTES = 4 * 1024
 _TRUNCATE_STACKTRACE_BYTES = 16 * 1024
 
@@ -78,13 +88,6 @@ class TelemetryError(Exception):
     """Raised in ``telemetry_required`` mode when an event cannot be accepted."""
 
 
-class _FlushRequest:
-    __slots__ = ("done",)
-
-    def __init__(self) -> None:
-        self.done = threading.Event()
-
-
 def _diag(message: str) -> None:
     """Minimal stderr diagnostic that never raises."""
     with contextlib.suppress(Exception):
@@ -92,9 +95,15 @@ def _diag(message: str) -> None:
 
 
 class Runtime:
-    """Owns the queue, workers, drains, spool, redactor and sampler."""
+    """Owns the pipeline (finalize/redact/sample) and the transport backend."""
 
-    def __init__(self, settings: ObserveSettings, enrichers: Iterable[Enricher] = ()) -> None:
+    def __init__(
+        self,
+        settings: ObserveSettings,
+        enrichers: Iterable[Enricher] = (),
+        *,
+        backend: RuntimeBackend | None = None,
+    ) -> None:
         self.settings = settings
         self.stats = TelemetryStats()
         self.enrichers: list[Enricher] = list(enrichers)
@@ -110,6 +119,22 @@ class Runtime:
             debug_rate=settings.resolved_debug_rate(),
             telemetry_rate=settings.sampling_telemetry_rate,
         )
+        self.policy_sampler: PolicySampler | None = (
+            PolicySampler.from_settings(self.sampler, settings.sampling_policy)
+            if settings.sampling_policy
+            else None
+        )
+        self._tail: TailSampler | None = (
+            TailSampler(
+                min_duration_ms=settings.tail_min_duration_ms,
+                max_runs=settings.tail_max_runs,
+                stats=self.stats,
+            )
+            if settings.tail_sampling
+            else None
+        )
+        self._tail_poll = 0
+        self.aggregator = MetricAggregator()
         self.spool: Spool | None = None
         if settings.spool_enabled:
             try:
@@ -129,16 +154,17 @@ class Runtime:
                 _log.warning("critical-event spool unavailable: %s", exc)
                 _diag(f"critical-event spool unavailable: {exc}")
         self.drains: list[Drain] = [self._build_drain(cfg) for cfg in settings.drains]
-        self._queue: queue.Queue[Any] = queue.Queue(maxsize=settings.queue_capacity)
-        self._stop = threading.Event()
+        if backend is not None:
+            self._backend = backend
+        elif settings.runtime_backend == "sync":
+            self._backend: RuntimeBackend = SyncBackend(
+                settings, self.stats, self.spool, self.drains
+            )
+        elif settings.runtime_backend == "capture":
+            self._backend = CaptureBackend(capacity=settings.queue_capacity, stats=self.stats)
+        else:
+            self._backend = WorkerBackend(settings, self.stats, self.spool, self.drains)
         self._closed = False
-        self._last_replay = 0.0
-        self._workers = [
-            threading.Thread(target=self._worker_loop, name=f"observe-core-{i}", daemon=True)
-            for i in range(max(1, settings.worker_count))
-        ]
-        for worker in self._workers:
-            worker.start()
 
     # -- construction ---------------------------------------------------------
 
@@ -200,17 +226,53 @@ class Runtime:
             # TelemetryError is only raised when telemetry_required is set;
             # it must propagate even when fail_fast is off, or the fail-closed
             # contract silently degrades to drop-on-floor for oversized events.
-            if self.settings.fail_fast or isinstance(error, TelemetryError):
+            # ContractViolation is raised only in strict mode — likewise an
+            # explicit opt-in contract that must not silently degrade.
+            from observe_core.contracts import ContractViolation  # noqa: PLC0415
+
+            if self.settings.fail_fast or isinstance(error, TelemetryError | ContractViolation):
                 raise
             self.stats.incr("worker_errors")
             _diag(f"event finalization failed for {builder.event!r}: {error}")
             return
         if event is None:
             return
-        if not self.sampler.should_keep(event.delivery, event.event, self._sample_key(event.data)):
+        if self.policy_sampler is not None:
+            backend_health = self._backend.health()
+            service_info = event.data.get("service") or {}
+            outcome = Outcome(event.outcome)
+            ctx = SamplingContext(
+                event=event.event,
+                delivery=event.delivery,
+                severity=Severity(event.severity),
+                outcome=outcome,
+                duration_ms=event.data.get("duration_ms"),
+                service=service_info.get("name"),
+                environment=service_info.get("environment"),
+                sample_key=self._sample_key(event.data),
+                queue_depth=backend_health.queue_depth,
+                queue_capacity=backend_health.queue_capacity,
+                recent_error_rate=self.policy_sampler.recent_error_rate(),
+            )
+            decision = self.policy_sampler.decide(ctx)
+            self.policy_sampler.note_outcome(outcome)
+            if not decision.keep:
+                self.stats.incr("dropped_sampled")
+                return
+        elif not self.sampler.should_keep(
+            event.delivery, event.event, self._sample_key(event.data)
+        ):
             self.stats.incr("dropped_sampled")
             return
-        self._offer(event)
+        if self._tail is not None:
+            self._tail.process(event, self._backend.emit)
+            # Sweep orphaned run buffers occasionally so crashed producers do
+            # not pin events forever (bounded: at most every 64 emits).
+            self._tail_poll = (self._tail_poll + 1) % 64
+            if self._tail_poll == 0:
+                self._tail.flush_expired(self._backend.emit)
+            return
+        self._backend.emit(event)
 
     @staticmethod
     def _sample_key(data: dict[str, Any]) -> str | None:
@@ -265,6 +327,30 @@ class Runtime:
             ),
         )
         ambient_svc = ambient_service()
+        # Contract validation (spec §7.2): ``warn`` (the production default)
+        # records violations under attributes._observe without failing
+        # application work; ``strict`` raises ContractViolation from
+        # ``validate_event_attributes``.
+        contract_spec = None
+        if self.settings.contract_validation != "off":
+            from observe_core.contracts import get_contract  # noqa: PLC0415
+
+            contract_spec = get_contract(builder.event)
+            if contract_spec is not None:
+                violations = contract_spec.validate_attributes(builder.attributes)
+                if violations:
+                    self.stats.incr("contract_violations")
+                    if self.settings.contract_validation == "strict":
+                        from observe_core.contracts import (  # noqa: PLC0415
+                            ContractViolation,
+                        )
+
+                        raise ContractViolation(
+                            f"event {builder.event!r} violates contract "
+                            f"{contract_spec.schema_id}: {'; '.join(violations)}"
+                        )
+                    meta = builder.attributes.setdefault("_observe", {})
+                    meta.setdefault("contract_violations", []).extend(violations)
         error = builder.error
         if isinstance(error, ErrorInfo):
             # ``error.details`` accepts arbitrary values; normalize them like
@@ -278,7 +364,16 @@ class Runtime:
         elif isinstance(error, dict):
             # Callers may assign a raw error dict; normalize it whole.
             error = normalize_value(error, max_depth=self.settings.max_depth)
+        contract_ref = None
+        if contract_spec is not None:
+            contract_ref = ContractRef(
+                name=contract_spec.name,
+                version=contract_spec.version,
+                schema_id=contract_spec.schema_id,
+                schema_hash=contract_spec.schema_hash,
+            )
         envelope = EventEnvelope(
+            schema_version=self.settings.envelope_version,
             event_id=new_event_id(),
             event=builder.event,
             category=builder.category,
@@ -300,9 +395,17 @@ class Runtime:
             attributes=normalize_value(builder.attributes, max_depth=self.settings.max_depth),
             error=error,
             source=builder.source,
+            entities=normalize_value(builder.entities, max_depth=2),
+            tags=normalize_value(builder.tags, max_depth=2),
+            contract=contract_ref,
         )
         data = envelope.to_canonical_dict()
-        self.redactor.redact_event(data)
+        extra_paths: tuple[tuple[str, ...], ...] = ()
+        if contract_spec is not None and contract_spec.sensitive_fields:
+            # Contract-declared sensitive fields redact regardless of key-name
+            # heuristics (spec §7.2/§34).
+            extra_paths = tuple(("attributes", name) for name in contract_spec.sensitive_fields)
+        self.redactor.redact_event(data, extra_paths=extra_paths)
         payload = dumps(data)
         if len(payload) > self.settings.max_event_bytes:
             data = self._truncate(data)
@@ -340,241 +443,78 @@ class Runtime:
             self.stats.incr("truncated_events")
         return data
 
-    # -- queue -----------------------------------------------------------------
+    # -- backend-facing helpers --------------------------------------------------
 
-    def _offer(self, event: CanonicalEvent) -> None:
-        try:
-            self._queue.put_nowait(event)
-            self.stats.incr("enqueued")
-            return
-        except queue.Full:
-            pass
-        if event.delivery == Delivery.CRITICAL:
-            self._spool(event)
-            return
-        if self.settings.drop_policy == "drop_oldest":
-            evicted = self._evict_oldest_event()
-            if evicted is not None:
-                if evicted.delivery == Delivery.CRITICAL:
-                    # Critical events are never silently dropped: an evicted
-                    # one goes to the spool instead (spec §12.1).
-                    self._spool(evicted)
-                else:
-                    self.stats.incr(
-                        "dropped_debug"
-                        if evicted.delivery == Delivery.DEBUG
-                        else "dropped_telemetry"
-                    )
-            try:
-                self._queue.put_nowait(event)
-                self.stats.incr("enqueued")
-            except queue.Full:
-                if event.delivery == Delivery.CRITICAL:
-                    self._spool(event)
-                else:
-                    self._drop_noncritical(event.delivery)
-        else:
-            self._drop_noncritical(event.delivery)
-
-    def _evict_oldest_event(self) -> CanonicalEvent | None:
-        """Remove one queued event to make room, preferring non-critical ones.
-
-        Control sentinels (``_FlushRequest``/``_STOP``) are never evicted:
-        dropping one would hang ``flush()``/``shutdown()``. Critical events
-        are evicted only when the queue holds nothing else; the caller spools
-        them rather than counting a drop. Items pulled during the scan are
-        re-queued in their original order.
-        """
-        held: list[Any] = []
-        evicted: CanonicalEvent | None = None
-        oldest_critical: CanonicalEvent | None = None
-        # Drain the whole queue so survivors can be re-queued in their
-        # original order; stopping at the first eviction would move held items
-        # behind everything never dequeued.
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(item, CanonicalEvent):
-                if item.delivery == Delivery.CRITICAL:
-                    if oldest_critical is None:
-                        oldest_critical = item
-                elif evicted is None:
-                    evicted = item
-                    continue
-            held.append(item)
-        if evicted is None and oldest_critical is not None:
-            # Queue holds only criticals/sentinels: the oldest critical makes
-            # room and is spooled by the caller. Compare by identity — two
-            # canonical events may be equal by value.
-            for i, item in enumerate(held):
-                if item is oldest_critical:
-                    del held[i]
-                    break
-            evicted = oldest_critical
-        for item in held:
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                # A racing producer refilled the slot between the scan and the
-                # re-put. Sentinels must never be lost; criticals go to the
-                # spool; anything else counts as a normal drop.
-                if isinstance(item, CanonicalEvent):
-                    if item.delivery == Delivery.CRITICAL:
-                        self._spool(item)
-                    else:
-                        self.stats.incr(
-                            "dropped_debug"
-                            if item.delivery == Delivery.DEBUG
-                            else "dropped_telemetry"
-                        )
-                else:
-                    with contextlib.suppress(queue.Full):
-                        self._queue.put(item, timeout=0.5)
-        return evicted
-
-    def _drop_noncritical(self, delivery: Delivery) -> None:
-        field = "dropped_debug" if delivery == Delivery.DEBUG else "dropped_telemetry"
-        self.stats.incr(field)
-        if self.settings.telemetry_required:
-            raise TelemetryError("observe queue is full")
-
-    def _spool(self, event: CanonicalEvent) -> None:
-        if self.spool is not None and self.spool.append(event.payload):
-            self.stats.incr("spooled_events")
-            return
-        self.stats.incr("spool_errors")
-        _diag(f"critical event {event.event!r} could not be queued or spooled")
-        if self.settings.telemetry_required:
-            raise TelemetryError("critical event could not be queued or spooled")
-
-    # -- worker -----------------------------------------------------------------
-
-    def _worker_loop(self) -> None:
-        batch: list[CanonicalEvent] = []
-        while True:
-            deadline = time.monotonic() + self.settings.flush_interval_ms / 1000.0
-            while len(batch) < self.settings.batch_size:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                try:
-                    item = self._queue.get(timeout=remaining)
-                except queue.Empty:
-                    break
-                if item is _STOP:
-                    self._fan_out(batch)
-                    self._flush_drains()
-                    return
-                if isinstance(item, _FlushRequest):
-                    self._fan_out(batch)
-                    batch = []
-                    self._flush_drains()
-                    self.stats.incr("flushes")
-                    item.done.set()
-                    continue
-                batch.append(item)
-            if batch:
-                self._fan_out(batch)
-                batch = []
-            self._maybe_replay()
-            if self._stop.is_set() and self._queue.empty():
-                self._flush_drains()
-                return
-
-    def _fan_out(self, batch: list[CanonicalEvent]) -> None:
-        if not batch:
-            return
-        for drain in self.drains:
-            try:
-                drain.emit_batch(batch)
-                self.stats.incr("emitted_events", len(batch))
-            except (KeyboardInterrupt, SystemExit):
-                raise
-            except BaseException as error:  # drain isolation
-                self.stats.incr("drain_errors")
-                _diag(f"drain {getattr(drain, 'name', '?')} failed: {error}")
-                # Spool criticals when a remote drain rejects them and that
-                # drain opted in (HttpDrainConfig.spool_on_failure). Local
-                # drain failures are counted but never spooled: the spool
-                # replays to remote drains only.
-                wants_spool = getattr(drain, "spool_on_failure", True)
-                if getattr(drain, "is_remote", False) and wants_spool:
-                    for event in batch:
-                        if event.delivery == Delivery.CRITICAL:
-                            self._spool(event)
-        self.stats.incr("emitted_batches")
-
-    def _flush_drains(self) -> None:
-        for drain in self.drains:
-            try:
-                drain.flush()
-            except Exception as error:
-                _diag(f"drain {getattr(drain, 'name', '?')} flush failed: {error}")
-
-    def _maybe_replay(self) -> None:
-        if self.spool is None or self.spool.pending_segments() == 0:
-            return
-        now = time.monotonic()
-        if now - self._last_replay < self.settings.spool_replay_interval_s:
-            return
-        self._last_replay = now
-        for drain in self.drains:
-            if getattr(drain, "is_remote", False):
-                try:
-                    self.spool.replay(drain)
-                except (KeyboardInterrupt, SystemExit):
-                    raise
-                except BaseException as error:
-                    _diag(f"spool replay via {drain.name} failed: {error}")
-
-    # -- lifecycle ----------------------------------------------------------------
+    @property
+    def backend(self) -> RuntimeBackend:
+        """The transport backend in use (``worker``, ``sync`` or ``capture``)."""
+        return self._backend
 
     def queue_depth(self) -> int:
-        """Current number of events waiting in the queue."""
-        return self._queue.qsize()
+        """Current number of events waiting in the backend's queue."""
+        queue_depth = getattr(self._backend, "queue_depth", None)
+        if callable(queue_depth):
+            return int(queue_depth())
+        return self._backend.health().queue_depth
 
     def workers_alive(self) -> bool:
-        """True while every worker thread is running its drain loop."""
-        return all(worker.is_alive() for worker in self._workers)
+        """True while the backend's workers (if any) are running."""
+        workers_alive = getattr(self._backend, "workers_alive", None)
+        if callable(workers_alive):
+            return bool(workers_alive())
+        return self._backend.health().workers_alive
 
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until queued events have been handed to drains. Bounded."""
         if self._closed:
             return True
-        deadline = time.monotonic() + timeout
-        requests = []
-        for _ in self._workers:
-            req = _FlushRequest()
-            try:
-                self._queue.put(req, timeout=max(0.0, deadline - time.monotonic()))
-            except queue.Full:
-                return False
-            requests.append(req)
-        remaining = deadline - time.monotonic()
-        return all(req.done.wait(max(0.0, remaining)) for req in requests)
+        if self._tail is not None:
+            self._tail.flush_all(self._backend.emit)
+        return self._backend.flush(timeout).ok
+
+    def health(self) -> dict[str, Any]:
+        """SDK health surface (spec §7.8): queue, counters, spool, backend.
+
+        Applications may expose this directly without emitting recursive
+        telemetry.
+        """
+        backend_health: BackendHealth = self._backend.health()
+        stats = self.stats.snapshot()
+        return {
+            "backend": backend_health.backend,
+            "queue_depth": backend_health.queue_depth,
+            "queue_capacity": backend_health.queue_capacity,
+            "workers_alive": backend_health.workers_alive,
+            "enqueued": stats.get("enqueued", 0),
+            "emitted": stats.get("emitted_events", 0),
+            "dropped": sum(
+                stats.get(name, 0)
+                for name in (
+                    "dropped_debug",
+                    "dropped_telemetry",
+                    "dropped_sampled",
+                    "dropped_oversized",
+                    "dropped_disabled",
+                    "dropped_closed",
+                )
+            ),
+            "spooled_events": stats.get("spooled_events", 0),
+            "spool_bytes": self.spool.pending_bytes() if self.spool else 0,
+            "tail_buffered_runs": self._tail.buffered_runs() if self._tail else 0,
+            "aggregated_series": self.aggregator.series_count(),
+            "last_export_ok_at": backend_health.last_export_ok_at,
+            "last_export_error": backend_health.last_export_error,
+            "exporter_endpoints": backend_health.endpoints,
+        }
 
     def shutdown(self, timeout: float = 5.0) -> None:
-        """Stop workers, flush drains and release resources. Idempotent."""
+        """Stop the backend and release resources. Idempotent."""
         if self._closed:
             return
         self._closed = True
-        self._stop.set()
-        deadline = time.monotonic() + timeout
-        for _ in self._workers:
-            try:
-                self._queue.put(_STOP, timeout=max(0.05, deadline - time.monotonic()))
-            except queue.Full:
-                break
-        per_worker = max(0.05, (deadline - time.monotonic()) / len(self._workers))
-        for worker in self._workers:
-            worker.join(timeout=per_worker)
-        for drain in self.drains:
-            try:
-                drain.close()
-            except Exception as error:
-                _diag(f"drain {getattr(drain, 'name', '?')} close failed: {error}")
+        if self._tail is not None:
+            self._tail.flush_all(self._backend.emit)
+        self._backend.close(timeout)
 
 
 # -- module-level runtime management ------------------------------------------
@@ -596,12 +536,17 @@ def get_runtime() -> Runtime:
     return _runtime
 
 
-def _new_runtime(settings: ObserveSettings, enrichers: list[Enricher] | None = None) -> Runtime:
+def _new_runtime(
+    settings: ObserveSettings,
+    enrichers: list[Enricher] | None = None,
+    *,
+    backend: RuntimeBackend | None = None,
+) -> Runtime:
     """Build and start a runtime, registering atexit flush once."""
     global _atexit_registered  # noqa: PLW0603 - one-shot registration flag
     all_enrichers = [*_pending_enrichers, *(enrichers or [])]
     _pending_enrichers.clear()
-    runtime = Runtime(settings, enrichers=all_enrichers)
+    runtime = Runtime(settings, enrichers=all_enrichers, backend=backend)
     if not _atexit_registered:
         atexit.register(_atexit_shutdown)
         _atexit_registered = True
@@ -612,12 +557,15 @@ def configure(
     settings: ObserveSettings | None = None,
     *,
     enrichers: list[Enricher] | None = None,
+    backend: RuntimeBackend | None = None,
     **overrides: Any,
 ) -> Runtime:
     """(Re)configure the global runtime.
 
     Safe to call repeatedly: the previous runtime is shut down first. Keyword
-    arguments are forwarded to :class:`ObserveSettings`.
+    arguments are forwarded to :class:`ObserveSettings`. ``backend`` accepts a
+    custom :class:`RuntimeBackend`; otherwise
+    ``ObserveSettings.runtime_backend`` selects ``worker``/``sync``/``capture``.
     """
     global _runtime  # noqa: PLW0603 - process-wide singleton by design
 
@@ -628,7 +576,7 @@ def configure(
     with _runtime_lock:
         if _runtime is not None:
             _runtime.shutdown(timeout=settings.shutdown_timeout_s)
-        _runtime = _new_runtime(settings, enrichers)
+        _runtime = _new_runtime(settings, enrichers, backend=backend)
         return _runtime
 
 

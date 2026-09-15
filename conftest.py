@@ -29,7 +29,13 @@ def _load_schema(name: str) -> dict:
 
 @pytest.fixture
 def envelope_schema() -> dict:
-    """The event-envelope-v1 JSON Schema."""
+    """The event-envelope-v2 JSON Schema (accepts 1.x and 2.x envelopes)."""
+    return _load_schema("event-envelope-v2.schema.json")
+
+
+@pytest.fixture
+def envelope_schema_v1() -> dict:
+    """The legacy event-envelope-v1 JSON Schema (V1 payload pin)."""
     return _load_schema("event-envelope-v1.schema.json")
 
 

@@ -37,7 +37,11 @@ def _envelope(**overrides) -> EventEnvelope:
 def test_minimal_envelope_serializes():
     env = _envelope()
     data = env.to_canonical_dict()
-    assert data["schema_version"] == "1.0"
+    assert data["schema_version"] == "2.0"
+    # Empty V2 extensions stay out of the wire format (V1 byte-compat).
+    assert "entities" not in data
+    assert "tags" not in data
+    assert "contract" not in data
     assert data["event"] == "asset.materialize"
     assert data["correlation"]["run_id"] is None
     assert data["error"] is None
@@ -79,9 +83,10 @@ def test_invalid_event_name_rejected():
 
 def test_invalid_schema_version_rejected():
     with pytest.raises(ValidationError):
-        _envelope(schema_version="2.0")
-    env = _envelope(schema_version="1.1")
-    assert env.schema_version == "1.1"
+        _envelope(schema_version="3.0")
+    for valid in ("1.0", "1.1", "2.0", "2.1"):
+        env = _envelope(schema_version=valid)
+        assert env.schema_version == valid
 
 
 def test_enums():

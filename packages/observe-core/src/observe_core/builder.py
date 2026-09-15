@@ -37,12 +37,14 @@ class EventBuilder:
         "delivery",
         "duration_ms",
         "ended_at",
+        "entities",
         "error",
         "event",
         "outcome",
         "severity",
         "source",
         "started_at",
+        "tags",
     )
 
     def __init__(
@@ -65,6 +67,9 @@ class EventBuilder:
         self.correlation: dict[str, Any] = {}
         self.error: ErrorInfo | None = None
         self.source: SourceInfo | None = None
+        self.entities: dict[str, str] = {}
+        """Canonical entity identifiers by role (V2 envelope, spec §9.2)."""
+        self.tags: dict[str, str] = {}
         self.started_at: dt.datetime | None = None
         self.ended_at: dt.datetime | None = None
         self.duration_ms: float | None = None
@@ -105,6 +110,18 @@ class EventBuilder:
     def set_source(self, source: SourceInfo) -> None:
         """Set the canonical source object."""
         self.source = source
+
+    def set_entity(self, role: str, identifier: object) -> None:
+        """Record a canonical entity this event involves (spec §9.2/§13).
+
+        ``identifier`` may be an ``EntityId`` or a ``namespace://path`` URI
+        string; values are stored verbatim so custom namespaces work.
+        """
+        self.entities[role] = str(identifier)
+
+    def set_tag(self, key: str, value: object) -> None:
+        """Attach a searchable label (spec §23)."""
+        self.tags[str(key)] = str(value)
 
     def add_warning(self, *, code: str, message: str, **details: Any) -> None:
         """Record a structured warning inside event attributes."""

@@ -10,6 +10,16 @@ Quick start::
         evt.set(rows=100)
 """
 
+from observe_core.aggregate import MetricAggregator
+from observe_core.backends import (
+    BackendHealth,
+    CaptureBackend,
+    EmitResult,
+    FlushResult,
+    RuntimeBackend,
+    SyncBackend,
+    WorkerBackend,
+)
 from observe_core.builder import EventBuilder
 from observe_core.config import (
     ConsoleDrainConfig,
@@ -26,11 +36,41 @@ from observe_core.context import (
     get_context,
     propagate,
 )
-from observe_core.emit import event
+from observe_core.contracts import (
+    ContractSpec,
+    ContractViolation,
+    EventContract,
+    FieldMeta,
+    all_contracts,
+    clear_contracts,
+    field,
+    get_contract,
+    register_contract,
+    validate_event_attributes,
+)
+from observe_core.emit import event, flush_metrics, metric
 from observe_core.enrich import Enricher, MutableEvent
 from observe_core.errors import ObservedError
+from observe_core.identifiers import (
+    EntityId,
+    EntityKind,
+    asset_id,
+    branch_id,
+    entity_id,
+    iceberg_id,
+    incident_id,
+    is_entity_id,
+    model_id,
+    parse_entity_id,
+    run_id_for,
+    service_id,
+    snapshot_id_for,
+    source_id,
+    table_id,
+)
 from observe_core.models import (
     Category,
+    ContractRef,
     Correlation,
     Delivery,
     ErrorInfo,
@@ -41,6 +81,16 @@ from observe_core.models import (
     SourceInfo,
 )
 from observe_core.operation import observe
+from observe_core.propagation import (
+    CONTEXT_ARG,
+    CONTEXT_ENV_VAR,
+    bind_from_argv,
+    bind_from_env,
+    child_env,
+    context_arg,
+    decode_context,
+    encode_context,
+)
 from observe_core.redaction import REDACTED, sanitize_url
 from observe_core.runtime import (
     TelemetryError,
@@ -51,46 +101,112 @@ from observe_core.runtime import (
     get_stats,
     shutdown,
 )
+from observe_core.sampling import (
+    PolicySampler,
+    Sampler,
+    SamplingContext,
+    SamplingDecision,
+    SamplingRule,
+)
+from observe_core.schema_registry import (
+    diff_contracts,
+    export_schemas,
+    sensitive_attribute_paths,
+)
+from observe_core.tail import TailSampler
 from observe_core.timestamps import format_rfc3339, utcnow
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "CONTEXT_ARG",
+    "CONTEXT_ENV_VAR",
     "REDACTED",
+    "BackendHealth",
     "BoundContext",
+    "CaptureBackend",
     "Category",
     "ConsoleDrainConfig",
+    "ContractRef",
+    "ContractSpec",
+    "ContractViolation",
     "Correlation",
     "Delivery",
+    "EmitResult",
     "Enricher",
+    "EntityId",
+    "EntityKind",
     "ErrorInfo",
     "EventBuilder",
+    "EventContract",
     "EventEnvelope",
+    "FieldMeta",
+    "FlushResult",
     "HttpDrainConfig",
     "JsonlDrainConfig",
+    "MetricAggregator",
     "MutableEvent",
     "ObserveSettings",
     "ObservedError",
     "OtlpDrainConfig",
     "Outcome",
+    "PolicySampler",
+    "RuntimeBackend",
+    "Sampler",
+    "SamplingContext",
+    "SamplingDecision",
+    "SamplingRule",
     "ServiceInfo",
     "Severity",
     "SourceInfo",
+    "SyncBackend",
+    "TailSampler",
     "TelemetryError",
+    "WorkerBackend",
     "add_enricher",
+    "all_contracts",
+    "asset_id",
     "bind_context",
     "bind_context_token",
+    "bind_from_argv",
+    "bind_from_env",
+    "branch_id",
+    "child_env",
     "clear_context",
+    "clear_contracts",
     "configure",
+    "context_arg",
+    "decode_context",
+    "diff_contracts",
+    "encode_context",
+    "entity_id",
     "event",
+    "export_schemas",
+    "field",
     "flush",
+    "flush_metrics",
     "format_rfc3339",
     "get_context",
+    "get_contract",
     "get_runtime",
     "get_stats",
+    "iceberg_id",
+    "incident_id",
+    "is_entity_id",
+    "metric",
+    "model_id",
     "observe",
+    "parse_entity_id",
     "propagate",
+    "register_contract",
+    "run_id_for",
     "sanitize_url",
+    "sensitive_attribute_paths",
+    "service_id",
     "shutdown",
+    "snapshot_id_for",
+    "source_id",
+    "table_id",
     "utcnow",
+    "validate_event_attributes",
 ]

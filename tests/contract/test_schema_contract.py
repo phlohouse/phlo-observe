@@ -1,8 +1,10 @@
 """Contract tests: emitted events validate against the published schemas.
 
 These pin the wire format: if observe-core ever emits a payload that fails
-`schemas/event-envelope-v1.schema.json`, this suite fails before a deploy
-breaks consumers.
+`schemas/event-envelope-v2.schema.json`, this suite fails before a deploy
+breaks consumers. V1 envelopes (`schema_version` 1.x, no V2 extensions) must
+additionally still validate against `event-envelope-v1.schema.json` — V2 is
+additive (spec §43).
 """
 
 from __future__ import annotations
@@ -34,6 +36,14 @@ def _registry() -> Registry:
 
 @pytest.fixture(scope="module")
 def envelope_validator() -> Validator:
+    """Validator for the current emitted envelope (V2)."""
+    schema = json.loads((SCHEMA_DIR / "event-envelope-v2.schema.json").read_text())
+    return Draft202012Validator(schema, registry=_registry())
+
+
+@pytest.fixture(scope="module")
+def v1_validator() -> Validator:
+    """Validator for the legacy V1 envelope (backward-compatibility pin)."""
     schema = json.loads((SCHEMA_DIR / "event-envelope-v1.schema.json").read_text())
     return Draft202012Validator(schema, registry=_registry())
 
@@ -116,3 +126,42 @@ def test_schema_rejects_missing_required(
 
     with pytest.raises(ValidationError):
         envelope_validator.validate({"schema_version": "1.0", "event_id": str(uuid.uuid4())})
+
+
+def test_v1_envelope_still_validates(v1_validator: Validator) -> None:
+    """A V1-shaped emission stays valid under the V1 schema (spec §43)."""
+    env = EventEnvelope(
+        schema_version="1.0",
+        event_id=new_event_id(),
+        event="pipeline.run",
+        category="pipeline",
+        outcome="success",
+        severity="info",
+        delivery="telemetry",
+        observed_at="2025-01-01T00:00:00Z",
+        service={"name": "contract-test"},
+    )
+    v1_validator.validate(env.to_canonical_dict())
+
+
+def test_v2_envelope_extensions_validate(envelope_validator: Validator) -> None:
+    """entities/tags/contract round-trip through the V2 schema."""
+    env = EventEnvelope(
+        event_id=new_event_id(),
+        event="asset.materialized",
+        category="data",
+        outcome="success",
+        severity="info",
+        delivery="telemetry",
+        observed_at="2025-01-01T00:00:00Z",
+        service={"name": "contract-test"},
+        entities={"subject": "asset://silver/samples"},
+        tags={"team": "data"},
+        contract={
+            "name": "asset.materialized",
+            "version": 1,
+            "schema_id": "asset.materialized/v1",
+            "schema_hash": "0" * 64,
+        },
+    )
+    envelope_validator.validate(env.to_canonical_dict())

@@ -74,17 +74,17 @@ def test_drop_oldest_preserves_flush_sentinels(make_runtime):
     Regression: previously drop_oldest evicted the queue head even when it was
     a control sentinel, which could hang flush()/shutdown() under pressure.
     """
-    from observe_core.runtime import _FlushRequest
+    from observe_core.backends import _FlushRequest
 
     gate = threading.Event()
     rt = _stall_runtime(make_runtime, gate, drop_policy="drop_oldest")
     try:
         req = _FlushRequest()
-        rt._queue.put_nowait(req)
+        rt._backend._queue.put_nowait(req)
         for _ in range(20):
             event("application.log", delivery="telemetry")
         # evictions happened, but the sentinel is still queued
-        assert req in rt._queue.queue
+        assert req in rt._backend._queue.queue
         assert not req.done.is_set()
         gate.set()
         assert req.done.wait(5.0), "flush sentinel was lost to drop_oldest"
@@ -124,7 +124,9 @@ def test_drop_oldest_prefers_evicting_telemetry(make_runtime, tmp_path):
         event("wap.promote", delivery="critical")  # queued first, has room
         for _ in range(5):
             event("application.log")
-        queued = [item.event for item in rt._queue.queue if isinstance(item, CanonicalEvent)]
+        queued = [
+            item.event for item in rt._backend._queue.queue if isinstance(item, CanonicalEvent)
+        ]
         assert "wap.promote" in queued, "critical event was evicted over telemetry"
         stats = rt.stats.snapshot()
         assert stats["spooled_events"] == 0
@@ -267,7 +269,7 @@ def test_drop_oldest_preserves_queue_order(make_runtime):
         event("application.log", attributes={"tag": "t3"})
         tags = [
             item.data["attributes"]["tag"]
-            for item in rt._queue.queue
+            for item in rt._backend._queue.queue
             if isinstance(item, CanonicalEvent)
         ]
         assert tags == ["c0", "t1", "t2", "t3"]

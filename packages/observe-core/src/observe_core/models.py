@@ -16,10 +16,13 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, PlainSerializ
 
 from observe_core.timestamps import ensure_utc, format_rfc3339
 
-SCHEMA_VERSION = "1.0"
-"""Canonical schema version emitted by this library."""
+SCHEMA_VERSION = "2.0"
+"""Canonical schema version emitted by this library (V2 envelope)."""
 
-SCHEMA_VERSION_PATTERN = re.compile(r"^1\.\d+$")
+SCHEMA_VERSION_V1 = "1.0"
+"""The V1 envelope version, still accepted for ingestion (spec §43)."""
+
+SCHEMA_VERSION_PATTERN = re.compile(r"^[12]\.\d+$")
 EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
 DURATION_TOLERANCE_MS = 2.0
 """Allowed drift between ``duration_ms`` and ``ended_at - started_at``."""
@@ -45,6 +48,10 @@ class Category(StrEnum):
     INFRASTRUCTURE = "infrastructure"
     SECURITY = "security"
     OBSERVER = "observer"
+    METRIC = "metric"
+    LINEAGE = "lineage"
+    INSIGHT = "insight"
+    INCIDENT = "incident"
     OTHER = "other"
 
 
@@ -150,6 +157,21 @@ class Correlation(BaseModel):
         return {key: getattr(self, key) for key in CORRELATION_KEYS}
 
 
+class ContractRef(BaseModel):
+    """Contract reference on a V2 envelope (spec §7.2/§7.3).
+
+    Names the registered :class:`~observe_core.contracts.EventContract` the
+    event validated against.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    version: int
+    schema_id: str | None = None
+    schema_hash: str | None = None
+
+
 class ErrorInfo(BaseModel):
     """Structured, machine-readable failure details."""
 
@@ -204,11 +226,19 @@ class EventEnvelope(BaseModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     error: ErrorInfo | None = None
     source: SourceInfo | None = None
+    # V2 envelope extensions (spec §43): additive, optional, and omitted from
+    # the canonical dict when empty so 1.x emissions stay byte-compatible.
+    entities: dict[str, str] = Field(default_factory=dict)
+    """Canonical entity identifiers by role, e.g. ``{"asset": "asset://silver/samples"}``."""
+    tags: dict[str, str] = Field(default_factory=dict)
+    """Searchable labels (spec §23)."""
+    contract: ContractRef | None = None
+    """Contract the event validated against, when one is registered."""
 
     @model_validator(mode="after")
     def _check_envelope(self) -> EventEnvelope:
         if not SCHEMA_VERSION_PATTERN.match(self.schema_version):
-            raise ValueError(f"schema_version must be 1.x for V1, got {self.schema_version!r}")
+            raise ValueError(f"schema_version must be 1.x or 2.x, got {self.schema_version!r}")
         if not EVENT_NAME_PATTERN.match(self.event):
             raise ValueError(
                 f"event name must be lowercase ASCII dot-delimited, got {self.event!r}"
@@ -229,8 +259,18 @@ class EventEnvelope(BaseModel):
         return self
 
     def to_canonical_dict(self) -> dict[str, Any]:
-        """Return the JSON-mode dict matching ``event-envelope-v1`` exactly."""
-        return self.model_dump(mode="json")
+        """Return the JSON-mode dict matching the emitted envelope version.
+
+        Empty V2 extensions are dropped so a ``1.x`` envelope stays
+        byte-compatible with ``event-envelope-v1``.
+        """
+        data = self.model_dump(mode="json")
+        for key in ("entities", "tags"):
+            if not data.get(key):
+                data.pop(key, None)
+        if data.get("contract") is None:
+            data.pop("contract", None)
+        return data
 
     def to_json_bytes(self) -> bytes:
         """Serialize the envelope to canonical UTF-8 JSON bytes."""

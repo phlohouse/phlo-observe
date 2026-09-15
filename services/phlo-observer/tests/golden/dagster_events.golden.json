@@ -31,7 +31,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "unknown",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
@@ -82,7 +82,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "unknown",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
@@ -132,7 +132,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "success",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
@@ -182,7 +182,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "success",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
@@ -233,7 +233,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "success",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
@@ -284,7 +284,7 @@
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
     "outcome": "success",
-    "schema_version": "1.0",
+    "schema_version": "2.0",
     "service": {
       "environment": null,
       "host": null,
