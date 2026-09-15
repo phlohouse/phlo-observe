@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core import observe
+from observe_core.identifiers import branch_id, snapshot_id_for, table_id
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -37,12 +38,18 @@ def _wap_op(
     if attributes:
         attrs.update(attributes)
     correlation: dict[str, Any] = {"branch": branch, "table": table, "snapshot_id": snapshot_id}
+    entities: dict[str, Any] = {"branch": branch_id("nessie", branch)}
+    if table:
+        entities["table"] = table_id(table)
+    if snapshot_id:
+        entities["snapshot"] = snapshot_id_for(table or "unknown", snapshot_id)
     return observe(
         name,
         category=Category.WAP,
         delivery=delivery,
         attributes=attrs,
         correlation=correlation,
+        entities=entities,
     )
 
 

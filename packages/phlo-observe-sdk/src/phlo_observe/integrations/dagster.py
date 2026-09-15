@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from observe_core import bind_context, event, observe
+from observe_core.identifiers import asset_id, run_id_for
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -89,16 +90,23 @@ def emit_materialization(
 ) -> observe:
     """Wrap an asset materialization inside a Dagster step."""
     key = asset_key or _dagster_asset_key(context)
+    run_id = _attr(context, "run_id", "run.run_id")
     attrs = {"rows_out": rows, "bytes_written": bytes_written, **attributes}
+    entities: dict[str, Any] = {}
+    if run_id:
+        entities["run"] = run_id_for("dagster", run_id)
+    if key:
+        entities["asset"] = asset_id(key)
     return observe(
         E.ASSET_MATERIALIZE,
         category=Category.DATA,
         attributes={k: v for k, v in attrs.items() if v is not None},
         correlation={
-            "run_id": _attr(context, "run_id", "run.run_id"),
+            "run_id": run_id,
             "asset_key": key,
             "partition_key": _attr(context, "partition_key", "run.partition_key"),
         },
+        entities=entities,
     )
 
 
@@ -111,6 +119,13 @@ def emit_asset_check(
     **attributes: Any,
 ) -> None:
     """Emit a ``quality.check`` event for a Dagster asset check result."""
+    run_id = _attr(context, "run_id", "run.run_id")
+    key = _dagster_asset_key(context)
+    entities: dict[str, Any] = {}
+    if run_id:
+        entities["run"] = run_id_for("dagster", run_id)
+    if key:
+        entities["asset"] = asset_id(key)
     event(
         E.QUALITY_CHECK,
         category="quality",
@@ -123,7 +138,8 @@ def emit_asset_check(
             **attributes,
         },
         correlation={
-            "run_id": _attr(context, "run_id", "run.run_id"),
-            "asset_key": _dagster_asset_key(context),
+            "run_id": run_id,
+            "asset_key": key,
         },
+        entities=entities,
     )

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from observe_core import bind_context, observe
+from observe_core.identifiers import source_id
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -92,9 +93,11 @@ def dlt_pipeline_run(pipeline: Any, *, attributes: dict[str, Any] | None = None)
         "dataset_name": _attr(pipeline, "dataset_name"),
     }
     attrs.update(attributes or {})
+    pipeline_name = _attr(pipeline, "pipeline_name")
     return observe(
         E.DLT_PIPELINE_RUN,
         category=Category.PIPELINE,
         attributes={k: v for k, v in attrs.items() if v is not None},
-        correlation={"pipeline": _attr(pipeline, "pipeline_name")},
+        correlation={"pipeline": pipeline_name},
+        entities={"source": source_id("dlt", pipeline_name)} if pipeline_name else None,
     )

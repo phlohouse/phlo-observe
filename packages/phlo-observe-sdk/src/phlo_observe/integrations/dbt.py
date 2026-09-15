@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from observe_core import event
+from observe_core.identifiers import model_id, run_id_for
 from observe_core.models import SourceInfo
 
 from phlo_observe import events as E
@@ -68,6 +69,7 @@ def run_results_events(path_or_dict: str | Path | dict[str, Any]) -> list[dict[s
                 "results_count": len(results_doc.get("results", [])),
             },
             "correlation": {"invocation_id": invocation_id},
+            "entities": ({"run": str(run_id_for("dbt", invocation_id))} if invocation_id else {}),
         }
     ]
 
@@ -108,6 +110,14 @@ def run_results_events(path_or_dict: str | Path | dict[str, Any]) -> list[dict[s
                 "outcome": outcome,
                 "attributes": {k: v for k, v in attrs.items() if v is not None},
                 "correlation": {"invocation_id": invocation_id},
+                "entities": (
+                    {
+                        "run": str(run_id_for("dbt", invocation_id)),
+                        **({"model": str(model_id("dbt", name))} if name and not is_test else {}),
+                    }
+                    if invocation_id
+                    else ({"model": str(model_id("dbt", name))} if name and not is_test else {})
+                ),
             }
         )
     return events
@@ -124,6 +134,7 @@ def emit_run_results(path_or_dict: str | Path | dict[str, Any]) -> int:
             outcome=payload.get("outcome"),
             attributes=payload.get("attributes"),
             correlation=payload.get("correlation"),
+            entities=payload.get("entities"),
             source=source,
         )
     return len(payloads)

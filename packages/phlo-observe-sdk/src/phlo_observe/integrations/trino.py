@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from observe_core import observe
+from observe_core.identifiers import service_id
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -82,4 +83,5 @@ def trino_query(
         category=Category.QUERY,
         attributes=attrs,
         correlation=correlation,
+        entities={"service": service_id("trino")},
     )

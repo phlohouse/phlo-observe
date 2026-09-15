@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core import observe
+from observe_core.identifiers import branch_id, iceberg_id, snapshot_id_for
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -51,6 +52,14 @@ def iceberg_commit(
     attrs = model.attrs()
     if attributes:
         attrs.update(attributes)
+    snapshot = snapshot_id_after or snapshot_id_before
+    entities: dict[str, Any] = {
+        "iceberg": iceberg_id(catalog or "default", namespace, table),
+    }
+    if branch:
+        entities["branch"] = branch_id("nessie", branch)
+    if snapshot:
+        entities["snapshot"] = snapshot_id_for(table, snapshot)
     return observe(
         E.ICEBERG_COMMIT,
         category=Category.STORAGE,
@@ -58,8 +67,9 @@ def iceberg_commit(
         correlation={
             "table": table,
             "branch": branch,
-            "snapshot_id": snapshot_id_after or snapshot_id_before,
+            "snapshot_id": snapshot,
         },
+        entities=entities,
     )
 
 
@@ -71,4 +81,5 @@ def nessie_branch_create(*, branch: str, base_branch: str | None = None, **kw: A
         category=Category.STORAGE,
         attributes={k: v for k, v in attrs.items() if v is not None},
         correlation={"branch": branch},
+        entities={"branch": branch_id("nessie", branch)},
     )

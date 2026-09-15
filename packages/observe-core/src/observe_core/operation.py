@@ -61,6 +61,8 @@ class observe:
         severity: Severity | str | None = None,
         attributes: dict[str, Any] | None = None,
         correlation: dict[str, Any] | None = None,
+        entities: dict[str, object] | None = None,
+        tags: dict[str, object] | None = None,
         capture_stacktrace: bool | None = None,
     ) -> None:
         self.name = name
@@ -69,6 +71,8 @@ class observe:
         self.severity = Severity(severity) if severity else None
         self.attributes = attributes
         self.correlation = correlation
+        self.entities = entities
+        self.tags = tags
         self.capture_stacktrace = capture_stacktrace
         self._builder: EventBuilder | None = None
         self._token: contextvars.Token[dict[str, Any] | None] | None = None
@@ -88,6 +92,10 @@ class observe:
         )
         if self.correlation:
             builder.set_correlation(**self.correlation)
+        for role, identifier in (self.entities or {}).items():
+            builder.set_entity(role, identifier)
+        for key, value in (self.tags or {}).items():
+            builder.set_tag(key, value)
 
         parent = _ctx._operation_context()
         merged: dict[str, Any] = {**_ctx.ambient_correlation()}
@@ -230,5 +238,7 @@ class observe:
             severity=self.severity,
             attributes=self.attributes,
             correlation=self.correlation,
+            entities=self.entities,
+            tags=self.tags,
             capture_stacktrace=self.capture_stacktrace,
         )
