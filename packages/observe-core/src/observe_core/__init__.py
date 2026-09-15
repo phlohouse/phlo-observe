@@ -53,7 +53,7 @@ from observe_core.runtime import (
 )
 from observe_core.timestamps import format_rfc3339, utcnow
 
-__version__ = "1.0.0"
+__version__ = "0.0.0"
 
 __all__ = [
     "REDACTED",

@@ -1,6 +1,6 @@
 [project]
 name = "phlo-observe"
-version = "1.0.0"
+version = "0.0.0"
 description = "Phlo-specific observability SDK: domain contexts, typed event attributes and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino."
 readme = "README.md"
 requires-python = ">=3.12"

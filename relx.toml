@@ -1,0 +1,76 @@
+# ReleaseX configuration — phlo-observe monorepo.
+# Each package releases independently via its own release PR and
+# `<package>/v<version>` tag (release_mode = "per_package").
+
+[project]
+ecosystem = "python"
+
+[release]
+branch = "main"
+tag_prefix = "v"
+changelog_file = "CHANGELOG.md"
+pr_title = "chore(release): {version}"
+release_name = "{tag_name}"
+plan_file = ".relx/release-manifest.json"
+transformers = []
+replacements = []
+
+[versioning]
+strategy = "conventional_commits"
+initial_version = "0.1.0"
+
+[monorepo]
+enabled = true
+packages = [
+  "packages/observe-core",
+  "packages/phlo-observe-sdk",
+  "services/phlo-observer",
+]
+release_mode = "per_package"
+legacy_releases = []
+first_release_packages = ["observe-core", "phlo-observe", "phlo-observer"]
+
+[changelog]
+contributors = true
+first_contribution_emoji = ""
+exclude_bots = true
+bot_patterns = []
+
+[changelog.sections]
+feat = "Added"
+fix = "Fixed"
+perf = "Changed"
+refactor = "Changed"
+docs = false
+chore = false
+ci = false
+test = false
+build = false
+style = false
+
+[publish]
+enabled = false
+provider = "uv"
+repository = "pypi"
+dist_dir = "dist"
+trusted_publishing = false
+oidc = false
+skip_published = false
+
+[github]
+owner = "phlohouse"
+repo = "phlo-observe"
+api_base = "https://api.github.com"
+token_env = "GITHUB_TOKEN"
+release_branch_prefix = "relx/release"
+pending_label = "autorelease: pending"
+tagged_label = "autorelease: tagged"
+commit_author = "github-actions[bot]"
+commit_email = "41898282+github-actions[bot]@users.noreply.github.com"
+
+[workspace]
+cascade_bumps = true
+
+[ci]
+provider = "github"
+workflow_path = ".github/workflows/release-python.yml"

@@ -1,38 +1,87 @@
 name: release-python
 
-# Release automation (spec §87): release-please maintains changelog PRs per
-# package; merged release PRs tag versions and trigger the wheel build below.
+# Release automation via ReleaseX (relx): on every push to main, relx opens or
+# updates one release PR per changed package (monorepo per_package mode,
+# configured in relx.toml). When a release PR merges, its squash commit title
+# (`chore(release): ...`) switches the run to `relx release tag`, which creates
+# the `<package>/v<version>` tags and GitHub Releases from the committed
+# .relx/release-manifest.json.
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: relx-release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  release-please:
+  release:
+    name: release PR / tag
     runs-on: ubuntu-latest
     outputs:
-      releases_created: ${{ steps.release.outputs.releases_created }}
+      mode: ${{ steps.check.outputs.mode }}
     steps:
-      - uses: googleapis/release-please-action@v4
-        id: release
+      - uses: actions/checkout@v4
         with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
+          fetch-depth: 0
+
+      - name: Install relx for the pending-release check
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/relx" \
+            "https://github.com/iamgp/ReleaseX/releases/latest/download/relx-x86_64-unknown-linux-musl"
+          chmod +x "$RUNNER_TEMP/relx"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+      - name: Decide release action
+        id: check
+        run: |
+          msg="$(git log -1 --format='%s')"
+          if echo "$msg" | grep -qP '^chore\(release\):'; then
+            echo "mode=tag" >> "$GITHUB_OUTPUT"
+          else
+            pending="$(relx status --json | jq -r '[.packages[]? | select(.selected == true)] | length')"
+            if [ "$pending" -gt 0 ]; then
+              echo "mode=pr" >> "$GITHUB_OUTPUT"
+            else
+              echo "mode=noop" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Tag merged release PR
+        if: steps.check.outputs.mode == 'tag'
+        uses: iamgp/ReleaseX@v1
+        with:
+          command: release tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create or update release PRs
+        if: steps.check.outputs.mode == 'pr'
+        uses: iamgp/ReleaseX@v1
+        with:
+          command: release pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Nothing releasable
+        if: steps.check.outputs.mode == 'noop'
+        run: echo "No releasable package changes pending on main."
 
   build-wheels:
-    name: build + verify wheels
+    name: build + verify wheels after tagging
     runs-on: ubuntu-latest
-    needs: release-please
-    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    needs: release
+    if: needs.release.outputs.mode == 'tag'
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - run: uv build --all-packages --out-dir dist
       - run: ls -la dist
-      # Publishing to PyPI is intentionally manual-gated: add a protected
-      # `pypi` environment + trusted publishing before enabling this step.
-      # - uses: pypa/gh-action-pypi-publish@release/v1
+      # Publishing to PyPI is intentionally manual-gated: enable
+      # [publish] in relx.toml plus OIDC trusted publishing first.
