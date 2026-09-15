@@ -21,18 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import metrics
 from phlo_observer.models import Event, Run
-
-_TERMINAL_RUN_EVENTS = {"pipeline.run"}
-_STATUS_PRECEDENCE = {
-    "unknown": 0,
-    "running": 1,
-    "partial": 2,
-    "cancelled": 3,
-    "success": 4,
-    "failure": 5,
-}
-_WARNING_SEVERITIES = {"warn", "error", "critical"}
-_MAX_SUMMARY_ASSETS = 1000
+from phlo_observer.projections import (
+    _event_view,
+    apply_run_state,
+    run_state_from_row,
+)
+from phlo_observer.state_engine import apply_run_event
 
 
 def correlation_method(event: dict[str, Any]) -> str | None:
@@ -60,7 +54,9 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
     """Upsert the ``runs`` row for an event's run_id.
 
     Safe for late-arriving events: counters increment, status upgrades to a
-    terminal state when an explicit ``pipeline.run`` outcome arrives.
+    terminal state when an explicit ``pipeline.run`` outcome arrives. The
+    fold itself is ``state_engine.apply_run_event`` — the same reducer the
+    rebuild path uses — so incremental and rebuilt state agree (spec §12.4).
     """
     run_id = event.run_id
     if not run_id:
@@ -72,7 +68,13 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
     if run is None:
         try:
             async with session.begin_nested():
-                run = Run(run_id=run_id, status="unknown", updated_at=now, summary={})
+                run = Run(
+                    run_id=run_id,
+                    status="unknown",
+                    updated_at=now,
+                    summary={},
+                    provenance={},
+                )
                 session.add(run)
         except IntegrityError:
             # A concurrent request inserted the same run_id between the SELECT
@@ -81,46 +83,9 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
             run = await session.get(Run, run_id, with_for_update=True, populate_existing=True)
     if run is None:  # pragma: no cover - defensive; the inserter committed
         return
-    run.updated_at = now
-    run.event_count = (run.event_count or 0) + 1
-    if event.error is not None or event.severity in ("error", "critical"):
-        run.error_count = (run.error_count or 0) + 1
-    elif event.severity in _WARNING_SEVERITIES:
-        run.warning_count = (run.warning_count or 0) + 1
-    if event.asset_key:
-        assets = set((run.summary or {}).get("asset_keys") or [])
-        if event.asset_key not in assets and len(assets) < _MAX_SUMMARY_ASSETS:
-            assets.add(event.asset_key)
-            run.asset_count = (run.asset_count or 0) + 1
-            run.summary = {**(run.summary or {}), "asset_keys": sorted(assets)}
-    if event.branch and not run.branch:
-        run.branch = event.branch
-    for field, value in (
-        ("job_name", event.job_id),
-        ("service_name", event.service_name),
-        ("environment", event.environment),
-    ):
-        if value and not getattr(run, field):
-            setattr(run, field, value)
-
-    if event.event in _TERMINAL_RUN_EVENTS:
-        # Explicit run-level signal; outcome=unknown means "started".
-        new_status = "running" if event.outcome == "unknown" else event.outcome
-        if _STATUS_PRECEDENCE.get(new_status, 0) >= _STATUS_PRECEDENCE.get(run.status, 0):
-            run.status = new_status
-        run.started_at = event.started_at or run.started_at
-        if event.outcome != "unknown":
-            run.ended_at = event.ended_at or event.observed_at or run.ended_at
-        run.duration_ms = event.duration_ms or run.duration_ms
-        trigger = (event.attributes or {}).get("trigger")
-        if trigger:
-            run.trigger = trigger
-    elif run.status == "unknown" and run.started_at is None:
-        run.status = "running"
-        run.started_at = event.started_at or event.observed_at
-
-    if run.started_at is None and (event.started_at or event.observed_at):
-        run.started_at = event.started_at or event.observed_at
+    state = run_state_from_row(run)
+    apply_run_event(state, _event_view(event))
+    apply_run_state(run, state, now)
 
 
 async def link_trace_to_run(session: AsyncSession, event: Event) -> None:

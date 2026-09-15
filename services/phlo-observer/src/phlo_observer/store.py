@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import metrics
+from phlo_observer import metrics, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
 from phlo_observer.models import Event, RawEvent, Run
 
@@ -142,6 +142,9 @@ def _event_row(data: dict[str, Any], received_at: Any, raw_event_id: uuid.UUID |
         source=data.get("source") or {},
         payload=data,
         raw_event_id=raw_event_id,
+        entities=data.get("entities") or {},
+        tags=data.get("tags") or {},
+        contract_id=(data.get("contract") or {}).get("schema_id"),
     )
 
 
@@ -201,8 +204,8 @@ async def persist_events(
         staged.append((index, row, data))
     accepted_rows = await _insert_rows(session, staged, result)
     correlated = [row for row in accepted_rows if row.run_id or row.trace_id]
-    if correlated:
-        # One savepoint for the whole correlation pass: event rows are already
+    if accepted_rows:
+        # One savepoint for the whole projection pass: event rows are already
         # durable, so a projection failure is logged rather than rejecting
         # anything. Projections are derived state and can be rebuilt.
         try:
@@ -223,6 +226,7 @@ async def persist_events(
                                     "status": "unknown",
                                     "updated_at": received_at,
                                     "summary": {},
+                                    "provenance": {},
                                 }
                                 for run_id in run_ids
                             ]
@@ -231,11 +235,13 @@ async def persist_events(
                     )
                 for row in correlated:
                     await update_run_projection(session, row)
+                for row in accepted_rows:
+                    await projections.apply_event(session, row)
                 await session.flush()
         except SQLAlchemyError:
             logger.warning(
-                "correlation/run-projection update failed for %d events",
-                len(correlated),
+                "correlation/projection update failed for %d events",
+                len(accepted_rows),
                 exc_info=True,
             )
     return result

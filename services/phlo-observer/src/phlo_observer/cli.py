@@ -122,6 +122,46 @@ def config() -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True))
 
 
+@app.command(name="rebuild-projections")
+def rebuild_projections_cmd(
+    run: Annotated[
+        str | None,
+        typer.Option("--run", help="Rebuild only projections for this run_id"),
+    ] = None,
+) -> None:
+    """Rebuild derived projections from canonical events (spec §12.4).
+
+    Without ``--run`` every projection (runs, entities, relationships,
+    assets) is dropped and recomputed from the full event history. With
+    ``--run`` only that run's scope is rebuilt; other projections are
+    untouched.
+    """
+    import asyncio
+
+    from phlo_observer.db import make_engine, make_sessionmaker
+    from phlo_observer.projections import rebuild_projections
+
+    settings = _settings()
+
+    async def _rebuild() -> dict[str, int]:
+        engine = make_engine(settings)
+        try:
+            factory = make_sessionmaker(engine)
+            async with factory() as session, session.begin():
+                return await rebuild_projections(session, run_id=run)
+        finally:
+            await engine.dispose()
+
+    counts = asyncio.run(_rebuild())
+    scope = f"run {run}" if run else "all events"
+    typer.echo(
+        f"rebuilt projections for {scope}: "
+        f"{counts['events']} events -> {counts['runs']} runs, "
+        f"{counts['entities']} entities, {counts['edges']} edges, "
+        f"{counts['assets']} assets"
+    )
+
+
 @app.command(name="replay-spool")
 def replay_spool(
     spool_dir: Annotated[Path, typer.Argument(help="Spool directory to replay")],
