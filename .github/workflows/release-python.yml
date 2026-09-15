@@ -1,11 +1,11 @@
 name: release-python
 
 # Release automation via ReleaseX (relx): on every push to main, relx opens or
-# updates one release PR per changed package (monorepo per_package mode,
-# configured in relx.toml). When a release PR merges, its squash commit title
-# (`chore(release): ...`) switches the run to `relx release tag`, which creates
-# the `<package>/v<version>` tags and GitHub Releases from the committed
-# .relx/release-manifest.json.
+# updates a single release PR covering every changed package (monorepo
+# release_set mode, configured in relx.toml). When a release PR merges, its
+# squash commit title (`chore(release): ...`) switches the run to
+# `relx release tag`, which creates the `<package>/v<version>` tags and GitHub
+# Releases from the committed .relx/release-manifest.json.
 
 on:
   push:

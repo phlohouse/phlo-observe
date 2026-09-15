@@ -1,6 +1,8 @@
 # ReleaseX configuration — phlo-observe monorepo.
-# Each package releases independently via its own release PR and
-# `<package>/v<version>` tag (release_mode = "per_package").
+# release_set mode: one release PR covers whichever packages changed, and each
+# still gets its own `<package>/v<version>` tag. (per_package mode pushes each
+# package to relx/release/v<version>, which collides when packages share a
+# version — e.g. all three releasing 0.1.0 together.)
 
 [project]
 ecosystem = "python"
@@ -26,7 +28,7 @@ packages = [
   "packages/phlo-observe-sdk",
   "services/phlo-observer",
 ]
-release_mode = "per_package"
+release_mode = "release_set"
 legacy_releases = []
 first_release_packages = ["observe-core", "phlo-observe", "phlo-observer"]
 
