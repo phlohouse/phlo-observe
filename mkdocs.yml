@@ -34,6 +34,7 @@ nav:
   - Integrations: integrations.md
   - Deployment: deployment.md
   - Troubleshooting: troubleshooting.md
+  - Examples: examples.md
 
 plugins:
   - search

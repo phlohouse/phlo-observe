@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
+  "release-type": "python",
+  "packages": {
+    "packages/observe-core": {
+      "package-name": "observe-core",
+      "release-type": "python"
+    },
+    "packages/phlo-observe-sdk": {
+      "package-name": "phlo-observe",
+      "release-type": "python"
+    },
+    "services/phlo-observer": {
+      "package-name": "phlo-observer",
+      "release-type": "python"
+    }
+  }
+}

@@ -32,9 +32,48 @@ DEFAULT_SECRET_KEYS = frozenset(
         "client_secret",
         "access_key",
         "private_key",
+        "credentials",
     }
 )
-"""Default case-insensitive key names whose values are always redacted."""
+"""Default case-insensitive secret key *patterns* (spec §16).
+
+A key matches when a pattern occurs in the key at a segment boundary —
+``_``, ``-``, ``.``, whitespace, or a lower/UPPER camel split — so real-world
+names like ``access_token``, ``refresh-token``, ``secretKey``,
+``x.api.key`` and ``aws_access_key_id`` are all covered without raw substring
+matching (which would redact e.g. ``monkey`` or ``tokenizer``).
+"""
+
+_SEGMENT_SPLIT = re.compile(r"[_\-\.\s/]+|(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _key_segments(key: str) -> list[str]:
+    """Split a key into lowercase segments on ``_ - . /`` and camel bounds."""
+    return [s.lower() for s in _SEGMENT_SPLIT.split(key) if s]
+
+
+def _segments_match(pattern: tuple[str, ...], segments: list[str]) -> bool:
+    """True when ``pattern`` occurs as a consecutive run within ``segments``."""
+    n = len(pattern)
+    return any(segments[i : i + n] == list(pattern) for i in range(len(segments) - n + 1))
+
+
+_DEFAULT_KEY_PATTERNS = [tuple(_key_segments(p)) for p in DEFAULT_SECRET_KEYS]
+_SINGLE_SEGMENT_DEFAULTS = frozenset(p[0] for p in _DEFAULT_KEY_PATTERNS if len(p) == 1)
+_MULTI_SEGMENT_DEFAULTS = [p for p in _DEFAULT_KEY_PATTERNS if len(p) > 1]
+
+
+def _is_secret_key(key: str) -> bool:
+    """Segment-aware check against the default secret key patterns."""
+    lowered = key.lower()
+    if lowered in DEFAULT_SECRET_KEYS:
+        return True
+    segments = _key_segments(key)
+    seg_set = frozenset(segments)
+    if seg_set & _SINGLE_SEGMENT_DEFAULTS:
+        return True
+    return any(p[0] in seg_set and _segments_match(p, segments) for p in _MULTI_SEGMENT_DEFAULTS)
+
 
 DEFAULT_VALUE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]{8,}={0,2}", re.IGNORECASE),
@@ -60,12 +99,44 @@ class Redactor:
     ) -> None:
         self.enabled = enabled
         self._keys = DEFAULT_SECRET_KEYS | {k.lower() for k in (extra_keys or [])}
+        self._default_patterns = _DEFAULT_KEY_PATTERNS
         self._key_res = [re.compile(p, re.IGNORECASE) for p in (key_patterns or [])]
         self._paths = [tuple(p.split(".")) for p in (path_rules or [])]
         self._value_res = list(DEFAULT_VALUE_PATTERNS) + [
             re.compile(p) for p in (value_patterns or [])
         ]
         self._max_depth = max_depth
+        # Verdict cache for key name / pattern / regex checks (everything that
+        # does not depend on ``path``). Bounded against unbounded key sets.
+        self._key_cache: dict[str, bool] = {}
+
+    def _key_hit(self, key: str, path: tuple[str, ...]) -> bool:
+        hit = self._key_cache.get(key)
+        if hit is None:
+            hit = self._key_hit_uncached(key)
+            if len(self._key_cache) < 4096:
+                self._key_cache[key] = hit
+        if hit:
+            return True
+        if not self._paths:
+            return False
+        dotted = ".".join((*path, key))
+        return any(
+            dotted == ".".join(rule) or dotted.endswith("." + ".".join(rule))
+            for rule in self._paths
+        )
+
+    def _key_hit_uncached(self, key: str) -> bool:
+        lowered = key.lower()
+        if lowered in self._keys:
+            return True
+        segments = _key_segments(key)
+        seg_set = frozenset(segments)
+        if seg_set & _SINGLE_SEGMENT_DEFAULTS:
+            return True
+        if any(p[0] in seg_set and _segments_match(p, segments) for p in _MULTI_SEGMENT_DEFAULTS):
+            return True
+        return any(rx.search(key) for rx in self._key_res)
 
     def redact_event(self, data: dict[str, Any]) -> dict[str, Any]:
         """Redact a canonical event dict in place and return it."""
@@ -73,18 +144,6 @@ class Redactor:
             return data
         self._redact(data, path=(), depth=0)
         return data
-
-    def _key_hit(self, key: str, path: tuple[str, ...]) -> bool:
-        lowered = key.lower()
-        if lowered in self._keys:
-            return True
-        if any(rx.search(key) for rx in self._key_res):
-            return True
-        dotted = ".".join((*path, key))
-        return any(
-            dotted == ".".join(rule) or dotted.endswith("." + ".".join(rule))
-            for rule in self._paths
-        )
 
     def _redact(self, node: Any, *, path: tuple[str, ...], depth: int) -> None:
         if depth > self._max_depth:
@@ -116,16 +175,18 @@ def sanitize_url(url: str) -> str:
     """
     try:
         parts = urlsplit(url)
+        # ``.port`` raises ValueError on a malformed port (e.g. ``h:abc``).
+        hostname, port = parts.hostname or "", parts.port
     except ValueError:
         return REDACTED
-    netloc = parts.hostname or ""
-    if parts.port:
-        netloc = f"{netloc}:{parts.port}"
+    netloc = hostname
+    if port:
+        netloc = f"{netloc}:{port}"
     if parts.username:
         netloc = f"{parts.username}:***@{netloc}"
     query = urlencode(
         [
-            (k, REDACTED if k.lower() in DEFAULT_SECRET_KEYS else v)
+            (k, REDACTED if _is_secret_key(k) else v)
             for k, v in parse_qsl(parts.query, keep_blank_values=True)
         ]
     )

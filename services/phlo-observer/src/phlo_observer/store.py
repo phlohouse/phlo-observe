@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import datetime as dt
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -13,15 +15,26 @@ from typing import Any
 from observe_core.models import EventEnvelope
 from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import asc, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import metrics
 from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
 from phlo_observer.models import Event, RawEvent, Run
 
+logger = logging.getLogger("phlo_observer.store")
+
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
+
+
+class InvalidQuery(ValueError):
+    """A query parameter (cursor, timestamp, filter) cannot be interpreted.
+
+    The HTTP layer maps this to a ``400`` response; it must never surface as
+    an unhandled internal error.
+    """
 
 
 @dataclass
@@ -131,15 +144,96 @@ async def persist_events(
     Duplicate ``event_id`` with identical content: counted and skipped.
     Duplicate ``event_id`` with different content: reported as a conflict;
     the original row is never overwritten.
+
+    The common case is a bulk insert inside a single savepoint (one
+    ``INSERT`` round-trip via executemany). Any batch-level failure falls
+    back to per-item savepoints so one bad row rejects only itself.
     """
     result = IngestResult()
     received_at = utcnow()
+    staged: list[tuple[int, Event, dict[str, Any]]] = []
     for index, data in enumerate(event_dicts):
-        row = _event_row(data, received_at, raw_event_id)
-        # ORM columns need real datetimes; canonical dicts carry ISO strings.
-        row.observed_at = _parse_dt(row.observed_at)
-        row.started_at = _parse_dt(row.started_at)
-        row.ended_at = _parse_dt(row.ended_at)
+        try:
+            row = _event_row(data, received_at, raw_event_id)
+            # ORM columns need real datetimes; canonical dicts carry ISO strings.
+            row.observed_at = _parse_dt(row.observed_at)
+            row.started_at = _parse_dt(row.started_at)
+            row.ended_at = _parse_dt(row.ended_at)
+        except (KeyError, TypeError, ValueError) as exc:
+            result.rejected += 1
+            result.errors.append(
+                {
+                    "index": index,
+                    "code": "SCHEMA_INVALID",
+                    "message": f"malformed canonical event: {exc}",
+                }
+            )
+            continue
+        staged.append((index, row, data))
+    accepted_rows = await _insert_rows(session, staged, result)
+    correlated = [row for row in accepted_rows if row.run_id or row.trace_id]
+    if correlated:
+        # One savepoint for the whole correlation pass: event rows are already
+        # durable, so a projection failure is logged rather than rejecting
+        # anything. Projections are derived state and can be rebuilt.
+        try:
+            async with session.begin_nested():
+                for row in correlated:
+                    await link_trace_to_run(session, row)
+                # Pre-create missing run projections in one statement so the
+                # per-event update below is a single locked read, not a
+                # savepoint-guarded insert per run_id.
+                run_ids = {row.run_id for row in correlated if row.run_id}
+                if run_ids:
+                    await session.execute(
+                        pg_insert(Run)
+                        .values(
+                            [
+                                {
+                                    "run_id": run_id,
+                                    "status": "unknown",
+                                    "updated_at": received_at,
+                                    "summary": {},
+                                }
+                                for run_id in run_ids
+                            ]
+                        )
+                        .on_conflict_do_nothing(index_elements=["run_id"])
+                    )
+                for row in correlated:
+                    await update_run_projection(session, row)
+                await session.flush()
+        except SQLAlchemyError:
+            logger.warning(
+                "correlation/run-projection update failed for %d events",
+                len(correlated),
+                exc_info=True,
+            )
+    return result
+
+
+async def _insert_rows(
+    session: AsyncSession,
+    staged: list[tuple[int, Event, dict[str, Any]]],
+    result: IngestResult,
+) -> list[Event]:
+    """Persist staged rows: bulk fast path, per-item fallback on failure."""
+    if not staged:
+        return []
+    rows = [row for _, row, _ in staged]
+    try:
+        async with session.begin_nested():
+            session.add_all(rows)
+    except (IntegrityError, DataError):
+        pass  # isolate the bad rows one by one
+    else:
+        for row in rows:
+            result.accepted += 1
+            result.event_ids.append(str(row.event_id))
+            metrics.EVENTS_STORED.inc()
+        return rows
+    accepted: list[Event] = []
+    for index, row, data in staged:
         try:
             async with session.begin_nested():
                 session.add(row)
@@ -158,12 +252,21 @@ async def persist_events(
                     }
                 )
             continue
-        await link_trace_to_run(session, row)
-        await update_run_projection(session, row)
+        except DataError as exc:
+            result.rejected += 1
+            result.errors.append(
+                {
+                    "index": index,
+                    "code": "SCHEMA_INVALID",
+                    "message": f"event cannot be stored: {exc.orig}",
+                }
+            )
+            continue
+        accepted.append(row)
         result.accepted += 1
         result.event_ids.append(str(row.event_id))
         metrics.EVENTS_STORED.inc()
-    return result
+    return accepted
 
 
 def _rows_match(existing: Event, incoming: dict[str, Any]) -> bool:
@@ -200,9 +303,19 @@ def _cursor_encode(observed_at: Any, event_id: uuid.UUID) -> str:
 
 
 def _cursor_decode(cursor: str) -> tuple[Any, uuid.UUID]:
-    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
-    ts, eid = raw.rsplit("|", 1)
-    return parse_rfc3339(ts), uuid.UUID(eid)
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+        ts, eid = raw.rsplit("|", 1)
+        return parse_rfc3339(ts), uuid.UUID(eid)
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise InvalidQuery(f"invalid cursor: {exc}") from exc
+
+
+def _parse_dt_filter(value: Any, name: str) -> Any:
+    try:
+        return _parse_dt(value)
+    except (ValueError, TypeError) as exc:
+        raise InvalidQuery(f"invalid {name} timestamp {value!r}: {exc}") from exc
 
 
 @dataclass
@@ -240,9 +353,9 @@ async def query_events(
         if filters.get(key):
             stmt = stmt.where(column == filters[key])
     if filters.get("since"):
-        stmt = stmt.where(Event.observed_at >= _parse_dt(filters["since"]))
+        stmt = stmt.where(Event.observed_at >= _parse_dt_filter(filters["since"], "since"))
     if filters.get("until"):
-        stmt = stmt.where(Event.observed_at <= _parse_dt(filters["until"]))
+        stmt = stmt.where(Event.observed_at <= _parse_dt_filter(filters["until"], "until"))
     if cursor:
         cur_ts, cur_id = _cursor_decode(cursor)
         stmt = stmt.where(
@@ -275,7 +388,10 @@ async def query_runs(
     if job_name:
         stmt = stmt.where(Run.job_name == job_name)
     if cursor:
-        marker = base64.urlsafe_b64decode(cursor.encode()).decode()
+        try:
+            marker = base64.urlsafe_b64decode(cursor.encode()).decode()
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise InvalidQuery(f"invalid cursor: {exc}") from exc
         stmt = stmt.where(Run.run_id > marker)
     rows = list((await session.execute(stmt.limit(limit + 1))).scalars())
     next_cursor = None

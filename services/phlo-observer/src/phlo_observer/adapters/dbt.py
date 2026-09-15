@@ -39,9 +39,16 @@ class DbtAdapter:
 
     def normalize(self, payload: RawPayload) -> NormalizedBatch:
         """Return canonical events for invocation + each node result."""
-        body = payload.json()
+        try:
+            body = payload.json()
+        except Exception as exc:
+            raise AdapterError(f"payload is not valid JSON: {exc}") from exc
+        if not isinstance(body, dict):
+            raise AdapterError("dbt payload must be a JSON object")
         doc = body.get("run_results", body)
-        manifest = body.get("manifest") if isinstance(body, dict) else None
+        manifest = body.get("manifest")
+        if not isinstance(doc, dict):
+            raise AdapterError("run_results document must be a JSON object")
         try:
             payloads = run_results_events(doc)
         except Exception as exc:

@@ -1,0 +1,38 @@
+name: release-python
+
+# Release automation (spec §87): release-please maintains changelog PRs per
+# package; merged release PRs tag versions and trigger the wheel build below.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build-wheels:
+    name: build + verify wheels
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: ${{ needs.release-please.outputs.releases_created == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - run: uv build --all-packages --out-dir dist
+      - run: ls -la dist
+      # Publishing to PyPI is intentionally manual-gated: add a protected
+      # `pypi` environment + trusted publishing before enabling this step.
+      # - uses: pypa/gh-action-pypi-publish@release/v1

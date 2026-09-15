@@ -56,11 +56,24 @@ async def retention_loop(
     *,
     interval_seconds: float = 3600.0,
     stop: asyncio.Event | None = None,
+    self_observe: bool = False,
 ) -> None:
     """Hourly-ish background retention; stopped by ``stop`` or app shutdown."""
     while stop is None or not stop.is_set():
         try:
-            await run_retention_once(factory, settings)
+            report = await run_retention_once(factory, settings)
+            if self_observe:
+                import observe_core  # noqa: PLC0415 - optional internal telemetry
+
+                observe_core.event(
+                    "observer.retention",
+                    category="observer",
+                    attributes={
+                        "raw_events_deleted": report.raw_events,
+                        "events_deleted": report.events,
+                        "runs_deleted": report.runs,
+                    },
+                )
         except Exception:
             logging.getLogger("phlo_observer.retention").exception("retention pass failed")
         try:

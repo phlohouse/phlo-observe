@@ -9,7 +9,7 @@
   read-only-rootfs friendly (no runtime writes outside the DB)
 - labels: `org.opencontainers.image.{title,source,revision,version}` —
   pass `--build-arg VCS_REF=$(git rev-parse HEAD)` at build time
-- `HEALTHCHECK` hits `/healthz`; `SIGTERM` stops uvicorn gracefully via the
+- `HEALTHCHECK` hits `/health/live`; `SIGTERM` stops uvicorn gracefully via the
   ASGI lifespan (retention task cancelled, engine disposed)
 
 ## Compose
@@ -25,10 +25,10 @@ service can run it as a one-off task before deploys).
 
 ## Kubernetes notes
 
-- Liveness probe: `GET /healthz`; readiness: `GET /readyz` (verifies DB).
+- Liveness probe: `GET /health/live`; readiness: `GET /health/ready` (verifies DB).
 - Secrets: mount token files and use `PHLO_OBSERVER_*_FILE`.
 - Rollouts: migrations must reach `head` before new pods serve traffic —
-  `/readyz` reports `schema_version` so mismatches are visible.
+  `/health/ready` reports `schema_version` so mismatches are visible.
 - `readOnlyRootFilesystem: true` is supported; mount `/tmp` as emptyDir if a
   tmpdir is needed.
 

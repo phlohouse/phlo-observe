@@ -42,7 +42,7 @@ USER observer
 EXPOSE 8080
 
 HEALTHCHECK --interval=10s --timeout=5s --retries=6 --start-period=10s \
-  CMD ["python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/healthz',timeout=4).status==200 else 1)"]
+  CMD ["python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/live',timeout=4).status==200 else 1)"]
 
 # Graceful shutdown: uvicorn handles SIGTERM; retention task stops via lifespan.
 ENTRYPOINT ["python", "-m", "phlo_observer.cli"]

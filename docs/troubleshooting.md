@@ -2,7 +2,7 @@
 
 ## Events not appearing
 
-1. `GET /readyz` — is the database reachable and migrated?
+1. `GET /health/ready` — is the database reachable and migrated?
 2. `GET /metrics` — check `phlo_observer_ingest_events_total{status="rejected"}`
    and `phlo_observer_normalization_total{status="error"}`.
 3. Inspect `raw_events` rows with `normalization_status='failed'` — the
@@ -35,7 +35,7 @@ flush path (queue depth, drain errors, `OBSERVE_TELEMETRY_REQUIRED`).
 
 ## Database schema mismatch
 
-`/readyz` reports `schema_version` from `alembic_version`. If it differs from
+`/health/ready` reports `schema_version` from `alembic_version`. If it differs from
 the packaged head, run `phlo-observer migrate`. If the table is missing
 entirely, `schema_version` is `null`.
 

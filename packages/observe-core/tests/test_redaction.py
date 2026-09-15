@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import unquote
 
 from observe_core import ObserveSettings, configure, event, flush, observe, shutdown
 from observe_core.drains.jsonl import JsonlDrain
@@ -122,3 +123,59 @@ def test_sanitize_url():
     )
     assert "q=1" in out
     assert sanitize_url("not a url") is not None
+
+
+def test_default_keys_match_segment_boundaries():
+    """Real-world secret key names redact without raw substring matching."""
+    redactor = Redactor()
+    data = {
+        "attributes": {
+            # all of these must redact by default
+            "access_token": "x",
+            "refresh_token": "x",
+            "refresh-token": "x",
+            "secretKey": "x",
+            "x-api-key": "x",
+            "X_API_KEY": "x",
+            "aws_access_key_id": "x",
+            "clientSecret": "x",
+            "my.password": "x",
+            "db/credentials": "x",
+            # look-alike keys must NOT redact
+            "tokenizer": "keep",
+            "monkey": "keep",
+            "keyboard": "keep",
+            "keynote": "keep",
+        }
+    }
+    redactor.redact_event(data)
+    attrs = data["attributes"]
+    for key in (
+        "access_token",
+        "refresh_token",
+        "refresh-token",
+        "secretKey",
+        "x-api-key",
+        "X_API_KEY",
+        "aws_access_key_id",
+        "clientSecret",
+        "my.password",
+        "db/credentials",
+    ):
+        assert attrs[key] == REDACTED, key
+    for key in ("tokenizer", "monkey", "keyboard", "keynote"):
+        assert attrs[key] == "keep", key
+
+
+def test_sanitize_url_secret_query_params_segment_aware():
+    """Query params use the same segment-aware key rules as attributes."""
+    out = unquote(sanitize_url("https://h/x?access_token=abc123&refresh-token=r&ok=1"))
+    assert "abc123" not in out
+    assert "access_token=[REDACTED]" in out
+    assert "refresh-token=[REDACTED]" in out
+    assert "ok=1" in out
+
+
+def test_sanitize_url_malformed_port():
+    """A malformed port must not propagate ValueError to callers."""
+    assert sanitize_url("postgresql://user:p@host:notaport/db") == REDACTED

@@ -20,6 +20,24 @@ _PHASE_BY_EVENT_PREFIX = {
     "external.": "external",
 }
 
+_LABELS = {
+    "pipeline.run": "Run",
+    "pipeline.step": "Step",
+    "ingestion.load": "Ingest",
+    "ingestion.extract": "Extract",
+    "asset.materialize": "Materialize",
+    "quality.validate": "Validate",
+    "quality.check": "Check",
+    "wap.branch.create": "Create branch",
+    "wap.promote": "Promote",
+    "table.commit": "Commit",
+    "iceberg.snapshot.create": "Snapshot",
+    "dbt.run": "dbt run",
+    "dbt.test": "dbt test",
+    "external.source_event": "External event",
+    "observer.ingest": "Observer ingest",
+}
+
 
 def _phase_for(event_name: str) -> str:
     for prefix, phase in _PHASE_BY_EVENT_PREFIX.items():
@@ -28,11 +46,60 @@ def _phase_for(event_name: str) -> str:
     return "other"
 
 
+def _label_for(event_name: str) -> str:
+    """Human label for a step; observer owns this derivation (spec §40)."""
+    if event_name in _LABELS:
+        return _LABELS[event_name]
+    tail = event_name.rsplit(".", 1)[-1]
+    return tail.replace("_", " ").title() if tail else event_name
+
+
+def _summary_for(row: Event) -> str | None:
+    """One-line step summary derived from the event's own fields."""
+    attrs = row.attributes or {}
+    if isinstance(row.error, dict) and row.error.get("message"):
+        return str(row.error["message"])
+    name = row.event
+    if name.startswith("ingestion."):
+        rows = attrs.get("rows_out", attrs.get("rows_in"))
+        if isinstance(rows, int | float):
+            return f"{int(rows):,} rows"
+    if name == "quality.validate":
+        total = attrs.get("checks_total")
+        if isinstance(total, int) and total:
+            return f"{attrs.get('checks_passed') or 0}/{total} checks passed"
+        return attrs.get("suite")
+    if name == "quality.check":
+        check = attrs.get("check_name")
+        verdict = "passed" if attrs.get("passed") else "failed"
+        return f"{check} {verdict}" if check else verdict
+    if name == "wap.promote":
+        branch = attrs.get("branch") or row.branch
+        target = attrs.get("target")
+        return f"{branch} -> {target}" if branch and target else branch
+    if name == "wap.branch.create":
+        branch = attrs.get("branch") or row.branch
+        return f"branch {branch}" if branch else None
+    if name.startswith("asset.") and row.asset_key:
+        return row.asset_key
+    if name == "pipeline.step":
+        return attrs.get("step_key")
+    if name == "pipeline.run":
+        return attrs.get("job") or row.job_id
+    if row.asset_key:
+        return row.asset_key
+    if row.table_name:
+        return row.table_name
+    return None
+
+
 def _event_summary(row: Event) -> dict[str, Any]:
     return {
         "event_id": str(row.event_id),
         "event": row.event,
         "category": row.category,
+        "label": _label_for(row.event),
+        "summary": _summary_for(row),
         "outcome": row.outcome,
         "severity": row.severity,
         "observed_at": _fmt(row.observed_at),
@@ -69,6 +136,7 @@ async def run_timeline(session: AsyncSession, run_id: str) -> dict[str, Any] | N
     phases: dict[str, list[dict[str, Any]]] = {}
     for row in events:
         phases.setdefault(_phase_for(row.event), []).append(_event_summary(row))
+    steps = [_event_summary(row) for row in events]
     return {
         "run": {
             "run_id": run_id,
@@ -88,7 +156,8 @@ async def run_timeline(session: AsyncSession, run_id: str) -> dict[str, Any] | N
             "summary": run.summary if run else {},
         },
         "phases": phases,
-        "events": [_event_summary(row) for row in events],
+        "steps": steps,
+        "events": steps,
     }
 
 

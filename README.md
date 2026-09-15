@@ -32,7 +32,7 @@ curl -X POST localhost:8080/v1/events -H 'content-type: application/json' -d "{
 
 Instrumented apps emit through `observe-core` (see `examples/`); the observer
 normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
-`/healthz`, `/readyz`, `/metrics`. Auth via `PHLO_OBSERVER_INGEST_TOKENS` /
+`/health/live`, `/health/ready`, `/metrics`. Auth via `PHLO_OBSERVER_INGEST_TOKENS` /
 `PHLO_OBSERVER_READ_TOKENS` (bearer or `X-API-Key`).
 
 ## Repository layout

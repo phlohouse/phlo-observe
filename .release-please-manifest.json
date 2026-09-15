@@ -1,0 +1,5 @@
+{
+  "packages/observe-core": "1.0.0",
+  "packages/phlo-observe-sdk": "1.0.0",
+  "services/phlo-observer": "1.0.0"
+}

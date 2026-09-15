@@ -312,11 +312,24 @@ class Runtime:
             self._spool(event)
             return
         if self.settings.drop_policy == "drop_oldest":
+            # Evict the oldest *event*, but never control sentinels: dropping a
+            # _FlushRequest would hang flush() and dropping _STOP would hang
+            # shutdown(). Sentinels pulled while scanning are re-queued.
+            held: list[Any] = []
+            evicted: Any = None
             try:
-                evicted = self._queue.get_nowait()
+                while True:
+                    item = self._queue.get_nowait()
+                    if isinstance(item, CanonicalEvent):
+                        evicted = item
+                        break
+                    held.append(item)
             except queue.Empty:
-                evicted = None
-            if evicted is not None and isinstance(evicted, CanonicalEvent):
+                pass
+            for item in held:
+                with contextlib.suppress(queue.Full):
+                    self._queue.put_nowait(item)
+            if evicted is not None:
                 self.stats.incr(
                     "dropped_debug" if evicted.delivery == Delivery.DEBUG else "dropped_telemetry"
                 )

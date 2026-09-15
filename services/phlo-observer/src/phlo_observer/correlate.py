@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import metrics
@@ -31,6 +32,7 @@ _STATUS_PRECEDENCE = {
     "failure": 5,
 }
 _WARNING_SEVERITIES = {"warn", "error", "critical"}
+_MAX_SUMMARY_ASSETS = 1000
 
 
 def correlation_method(event: dict[str, Any]) -> str | None:
@@ -63,11 +65,22 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
     run_id = event.run_id
     if not run_id:
         return
-    run = await session.get(Run, run_id)
     now = event.received_at
+    # Lock the projection row: counter increments below are read-modify-write,
+    # so concurrent events for one run must serialize to avoid lost updates.
+    run = await session.get(Run, run_id, with_for_update=True)
     if run is None:
-        run = Run(run_id=run_id, status="unknown", updated_at=now, summary={})
-        session.add(run)
+        try:
+            async with session.begin_nested():
+                run = Run(run_id=run_id, status="unknown", updated_at=now, summary={})
+                session.add(run)
+        except IntegrityError:
+            # A concurrent request inserted the same run_id between the SELECT
+            # and this INSERT; its row is now committed, so re-read it under
+            # the row lock.
+            run = await session.get(Run, run_id, with_for_update=True, populate_existing=True)
+    if run is None:  # pragma: no cover - defensive; the inserter committed
+        return
     run.updated_at = now
     run.event_count = (run.event_count or 0) + 1
     if event.error is not None or event.severity in ("error", "critical"):
@@ -76,7 +89,7 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
         run.warning_count = (run.warning_count or 0) + 1
     if event.asset_key:
         assets = set((run.summary or {}).get("asset_keys") or [])
-        if event.asset_key not in assets:
+        if event.asset_key not in assets and len(assets) < _MAX_SUMMARY_ASSETS:
             assets.add(event.asset_key)
             run.asset_count = (run.asset_count or 0) + 1
             run.summary = {**(run.summary or {}), "asset_keys": sorted(assets)}
@@ -91,10 +104,13 @@ async def update_run_projection(session: AsyncSession, event: Event) -> None:
             setattr(run, field, value)
 
     if event.event in _TERMINAL_RUN_EVENTS:
-        # Explicit run-level signal wins; outcome=unknown means "started".
-        run.status = "running" if event.outcome == "unknown" else event.outcome
+        # Explicit run-level signal; outcome=unknown means "started".
+        new_status = "running" if event.outcome == "unknown" else event.outcome
+        if _STATUS_PRECEDENCE.get(new_status, 0) >= _STATUS_PRECEDENCE.get(run.status, 0):
+            run.status = new_status
         run.started_at = event.started_at or run.started_at
-        run.ended_at = event.ended_at or event.observed_at or run.ended_at
+        if event.outcome != "unknown":
+            run.ended_at = event.ended_at or event.observed_at or run.ended_at
         run.duration_ms = event.duration_ms or run.duration_ms
         trigger = (event.attributes or {}).get("trigger")
         if trigger:

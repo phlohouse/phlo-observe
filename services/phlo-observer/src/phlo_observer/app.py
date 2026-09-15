@@ -9,7 +9,9 @@ Routes:
 - ``GET  /v1/events``                 filtered, cursor-paginated query
 - ``GET  /v1/events/{event_id}``      single event
 - ``GET  /v1/runs`` / ``/v1/runs/{id}`` / ``/v1/runs/{id}/timeline``
-- ``GET  /healthz`` / ``/readyz`` / ``/metrics``
+- ``GET  /v1/assets/{key}/events`` / ``/v1/branches/{b}/events`` / ``/v1/tables/{t}/events``
+- ``GET  /health/live`` / ``/health/ready`` (aliases: ``/healthz`` / ``/readyz``)
+- ``GET  /metrics``
 """
 
 from __future__ import annotations
@@ -17,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
+import io
 import logging
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import observe_core
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -43,9 +47,10 @@ from phlo_observer.metrics import (
     PERSIST_DURATION,
 )
 from phlo_observer.retention import retention_loop
-from phlo_observer.settings import ObserverSettings
+from phlo_observer.settings import ObserverSettings, load_settings
 from phlo_observer.store import (
     DEFAULT_PAGE_SIZE,
+    InvalidQuery,
     _fmt,
     count_events,
     persist_events,
@@ -57,15 +62,41 @@ from phlo_observer.timeline import event_by_id, run_timeline
 
 logger = logging.getLogger("phlo_observer")
 
-_UNAUTHENTICATED = {"/healthz", "/readyz", "/metrics", "/docs", "/openapi.json"}
+_UNAUTHENTICATED = {
+    "/healthz",
+    "/readyz",
+    "/health/live",
+    "/health/ready",
+    "/metrics",
+    "/docs",
+    "/openapi.json",
+}
 
 
 def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     """Build the application. ``settings`` defaults to environment config."""
-    settings = settings or ObserverSettings()
+    if settings is None:
+        # load_settings resolves *_FILE secret variants; plain ObserverSettings()
+        # would silently ignore them and leave the API unauthenticated.
+        settings = load_settings()
+    settings.require_tokens()
+
+    self_observe_configs = settings.self_observe_drain_configs()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if self_observe_configs:
+            observe_core.configure(
+                service_name="phlo-observer",
+                service_version=__version__,
+                drains=self_observe_configs,
+            )
+            app.state.self_observe = True
+            observe_core.event(
+                "observer.start",
+                category="observer",
+                attributes={"version": __version__},
+            )
         if settings.run_migrations:
             await asyncio.to_thread(_run_migrations, settings)
         engine = make_engine(settings)
@@ -75,9 +106,14 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         stop = asyncio.Event()
         retention_task = asyncio.create_task(
             retention_loop(
-                factory, settings, interval_seconds=settings.retention_interval_s, stop=stop
+                factory,
+                settings,
+                interval_seconds=settings.retention_interval_s,
+                stop=stop,
+                self_observe=app.state.self_observe,
             )
         )
+        app.state.retention_task = retention_task
         try:
             yield
         finally:
@@ -86,35 +122,70 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             with contextlib.suppress(asyncio.CancelledError):
                 await retention_task
             await engine.dispose()
+            if app.state.self_observe:
+                observe_core.shutdown()
 
-    app = FastAPI(title="phlo-observer", version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title="phlo-observer",
+        version=__version__,
+        lifespan=lifespan,
+        docs_url="/docs" if settings.docs_enabled else None,
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
+    )
     app.state.settings = settings
+    # Lifespan flips this on when internal drains are configured; tests and
+    # embedders that bypass lifespan still get a defined value.
+    app.state.self_observe = False
+
+    @app.exception_handler(InvalidQuery)
+    async def invalid_query_handler(request: Request, exc: InvalidQuery) -> JSONResponse:
+        """Malformed cursors/filters are client errors, never 500s."""
+        return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_400_BAD_REQUEST)
 
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next: Any) -> Response:
         """Count HTTP traffic and enforce the configured body limit."""
         if request.url.path not in _UNAUTHENTICATED:
             length = request.headers.get("content-length")
-            if length and int(length) > settings.max_body_bytes:
-                return JSONResponse(
-                    {"detail": "request body too large"},
-                    status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                )
+            if length:
+                try:
+                    declared = int(length)
+                except ValueError:
+                    declared = -1
+                if declared < 0 or declared > settings.max_body_bytes:
+                    return JSONResponse(
+                        {"detail": "request body too large"},
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                    )
         start = time.perf_counter()
         response = await call_next(request)
         if settings.metrics_enabled:
             route = request.scope.get("route")
-            path = getattr(route, "path", request.url.path)
+            # Unmatched requests must not leak raw paths into a label —
+            # arbitrary 404 URLs are attacker-controllable cardinality.
+            path = getattr(route, "path", "unmatched")
             HTTP_REQUESTS.labels(route=path, status=str(response.status_code)).inc()
             HTTP_DURATION.labels(route=path).observe(time.perf_counter() - start)
         return response
 
     async def _body(request: Request) -> bytes:
-        body = await request.body()
+        """Read the request body with hard bounds on wire and decompressed size.
+
+        Chunked bodies and gzip bombs cannot bypass the configured limit.
+        """
+        chunks: list[bytes] = []
+        wire_bytes = 0
+        async for chunk in request.stream():
+            wire_bytes += len(chunk)
+            if wire_bytes > settings.max_body_bytes:
+                raise _http_error(413, "request body too large")
+            chunks.append(chunk)
+        body = b"".join(chunks)
         if request.headers.get("content-encoding") == "gzip":
             try:
-                body = gzip.decompress(body)
-            except OSError as exc:
+                with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
+                    body = gz.read(settings.max_body_bytes + 1)
+            except (OSError, EOFError) as exc:
                 raise _http_error(400, f"invalid gzip body: {exc}") from exc
         if len(body) > settings.max_body_bytes:
             raise _http_error(413, "request body too large")
@@ -176,6 +247,18 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         INGEST_BATCHES.labels(status="accepted" if result.accepted else "rejected").inc()
         INGEST_EVENTS.labels(producer=producer, status="accepted").inc(result.accepted)
         INGEST_EVENTS.labels(producer=producer, status="rejected").inc(result.rejected)
+        if app.state.self_observe:
+            observe_core.event(
+                "observer.ingest",
+                category="observer",
+                attributes={
+                    "producer": producer,
+                    "source_kind": source_kind,
+                    "accepted": result.accepted,
+                    "rejected": result.rejected,
+                    "duplicates": result.duplicates,
+                },
+            )
         code = status.HTTP_202_ACCEPTED
         if result.accepted == 0 and result.rejected:
             code = status.HTTP_422_UNPROCESSABLE_CONTENT
@@ -205,6 +288,17 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         except AdapterError as exc:
             record_normalization(adapter.name, "error")
             return [], [{"index": -1, "code": exc.code, "message": str(exc)}]
+        except Exception as exc:
+            # Spec §35: a malformed source event must never crash the observer.
+            logger.exception("adapter %s raised unexpectedly", adapter.name)
+            record_normalization(adapter.name, "error")
+            return [], [
+                {
+                    "index": -1,
+                    "code": "NORMALIZATION_FAILED",
+                    "message": f"{adapter.name} adapter failed: {exc}",
+                }
+            ]
 
     # -- ingestion ----------------------------------------------------------
 
@@ -360,19 +454,86 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(404, "run not found")
             return timeline
 
+    async def _scoped_events(
+        request: Request,
+        key: str,
+        value: str,
+        since: str | None,
+        until: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Shared handler for asset/branch/table-scoped event queries."""
+        if not value:
+            raise _http_error(400, f"empty {key} path parameter")
+        filters: dict[str, Any] = {key: value}
+        if since is not None:
+            filters["since"] = since
+        if until is not None:
+            filters["until"] = until
+        async with request.app.state.session_factory() as session:
+            page = await query_events(session, filters=filters, cursor=cursor, limit=limit)
+            return {
+                "items": [_event_json(row) for row in page.items],
+                "next_cursor": page.next_cursor,
+            }
+
+    @app.get("/v1/assets/{asset_key:path}/events", dependencies=[Depends(require_read_token)])
+    async def asset_events(
+        asset_key: str,
+        request: Request,
+        since: str | None = None,
+        until: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Events correlated to one asset key."""
+        return await _scoped_events(request, "asset_key", asset_key, since, until, cursor, limit)
+
+    @app.get("/v1/branches/{branch:path}/events", dependencies=[Depends(require_read_token)])
+    async def branch_events(
+        branch: str,
+        request: Request,
+        since: str | None = None,
+        until: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Events correlated to one branch."""
+        return await _scoped_events(request, "branch", branch, since, until, cursor, limit)
+
+    @app.get("/v1/tables/{table:path}/events", dependencies=[Depends(require_read_token)])
+    async def table_events(
+        table: str,
+        request: Request,
+        since: str | None = None,
+        until: str | None = None,
+        cursor: str | None = None,
+        limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Events correlated to one table name."""
+        return await _scoped_events(request, "table", table, since, until, cursor, limit)
+
     # -- health / metrics ----------------------------------------------------
 
-    @app.get("/healthz")
+    @app.get("/health/live")
+    @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
         """Liveness: process is up."""
         return {"status": "ok", "version": __version__}
 
-    @app.get("/readyz")
+    @app.get("/health/ready")
+    @app.get("/readyz", include_in_schema=False)
     async def readyz(request: Request) -> Response:
-        """Readiness: database reachable and schema-compatible."""
+        """Readiness: database reachable, schema-compatible, workers alive."""
         ok = await check_database(request.app.state.session_factory)
         if not ok:
             return JSONResponse({"status": "not_ready", "database": "unreachable"}, status_code=503)
+        retention_task = getattr(request.app.state, "retention_task", None)
+        if retention_task is not None and retention_task.done():
+            return JSONResponse(
+                {"status": "not_ready", "retention_worker": "stopped"}, status_code=503
+            )
         async with request.app.state.session_factory() as session:
             try:
                 version = (

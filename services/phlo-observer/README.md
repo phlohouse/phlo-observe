@@ -34,7 +34,8 @@ startup instead.
 | `GET /v1/events` | read | Filter + cursor pagination |
 | `GET /v1/events/{id}` | read | Single event |
 | `GET /v1/runs`, `GET /v1/runs/{id}`, `GET /v1/runs/{id}/timeline` | read | Run projections |
-| `GET /healthz`, `GET /readyz` | none | Liveness / readiness (DB + schema) |
+| `GET /v1/assets/{key}/events`, `GET /v1/branches/{b}/events`, `GET /v1/tables/{t}/events` | read | Scoped event queries |
+| `GET /health/live`, `GET /health/ready` | none | Liveness / readiness (DB + schema + workers) |
 | `GET /metrics` | read unless `metrics_public` | Prometheus exposition |
 
 ### Ingestion response

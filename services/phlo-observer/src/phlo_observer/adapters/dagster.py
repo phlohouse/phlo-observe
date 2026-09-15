@@ -118,7 +118,10 @@ class DagsterAdapter:
 
     def normalize(self, payload: RawPayload) -> NormalizedBatch:
         """Normalize allowlisted Dagster records; skip the rest."""
-        body = payload.json()
+        try:
+            body = payload.json()
+        except Exception as exc:
+            raise AdapterError(f"payload is not valid JSON: {exc}") from exc
         records = body if isinstance(body, list) else [body]
         events: list[dict[str, Any]] = []
         for record in records:

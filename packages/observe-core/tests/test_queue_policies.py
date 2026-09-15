@@ -67,6 +67,31 @@ def test_queue_full_drop_oldest_evicts(make_runtime):
         shutdown(2.0)
 
 
+def test_drop_oldest_preserves_flush_sentinels(make_runtime):
+    """A queued _FlushRequest must survive drop_oldest eviction.
+
+    Regression: previously drop_oldest evicted the queue head even when it was
+    a control sentinel, which could hang flush()/shutdown() under pressure.
+    """
+    from observe_core.runtime import _FlushRequest
+
+    gate = threading.Event()
+    rt = _stall_runtime(make_runtime, gate, drop_policy="drop_oldest")
+    try:
+        req = _FlushRequest()
+        rt._queue.put_nowait(req)
+        for _ in range(20):
+            event("application.log", delivery="telemetry")
+        # evictions happened, but the sentinel is still queued
+        assert req in rt._queue.queue
+        assert not req.done.is_set()
+        gate.set()
+        assert req.done.wait(5.0), "flush sentinel was lost to drop_oldest"
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
 def test_critical_event_spooled_when_queue_full(make_runtime, tmp_path):
     gate = threading.Event()
     rt = _stall_runtime(make_runtime, gate, spool_enabled=True, spool_dir=tmp_path / "spool")

@@ -48,6 +48,23 @@ def test_env_drain_shorthand_http_requires_endpoint(monkeypatch):
     assert "OBSERVE_HTTP_ENDPOINT" in str(excinfo.value.__cause__ or excinfo.value)
 
 
+def test_env_drain_shorthand_http_token_and_api_key(monkeypatch):
+    """Both OBSERVE_HTTP_TOKEN and OBSERVE_HTTP_API_KEY reach the drain."""
+    monkeypatch.setenv("OBSERVE_DRAINS", "http")
+    monkeypatch.setenv("OBSERVE_HTTP_ENDPOINT", "https://o.test/v1/events")
+    monkeypatch.setenv("OBSERVE_HTTP_API_KEY", "key-abc")
+    s = ObserveSettings(service_name="x")
+    assert isinstance(s.drains[0], HttpDrainConfig)
+    assert s.drains[0].api_key == "key-abc"
+    assert s.drains[0].token is None
+
+    monkeypatch.setenv("OBSERVE_HTTP_TOKEN", "tok-xyz")
+    monkeypatch.delenv("OBSERVE_HTTP_API_KEY")
+    s = ObserveSettings(service_name="x")
+    assert s.drains[0].token == "tok-xyz"
+    assert s.drains[0].api_key is None
+
+
 def test_drain_discriminated_union():
     s = ObserveSettings(
         service_name="x",

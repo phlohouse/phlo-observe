@@ -132,6 +132,7 @@ class _ShorthandEnvSource(EnvSettingsSource):
                 "type": "http",
                 "endpoint": endpoint,
                 "token": os.environ.get("OBSERVE_HTTP_TOKEN"),
+                "api_key": os.environ.get("OBSERVE_HTTP_API_KEY"),
             }
         if name == "otlp":
             return {"type": "otlp", "endpoint": os.environ.get("OBSERVE_OTLP_ENDPOINT")}

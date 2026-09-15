@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -56,6 +57,15 @@ class ObserverSettings(BaseSettings):
     metrics_public: bool = False
     """When False, /metrics requires a read token (if read tokens are set)."""
 
+    docs_enabled: bool = True
+    """Serve /docs and /openapi.json. Disable for hardened deployments."""
+
+    self_observe_drains: str = "console"
+    """Internal self-observation drains (comma list): console, jsonl, otlp,
+    memory. The observer instruments itself with observe-core per spec §46;
+    ``http`` is rejected here so internal events can never loop back into
+    this service's own ingest endpoint."""
+
     otlp_endpoint: str | None = None
     """Optional OTLP HTTP endpoint for forwarding normalized events."""
 
@@ -96,6 +106,37 @@ class ObserverSettings(BaseSettings):
                 "Set PHLO_OBSERVER_INGEST_TOKENS (or *_FILE) before serving."
             )
 
+    def self_observe_drain_configs(self) -> list[dict[str, Any]]:
+        """Parse ``self_observe_drains`` into observe-core drain configs.
+
+        Only non-HTTP drains are permitted: internal observer events must
+        never be posted back into this service's own ingest API (spec §46
+        recursion guard). An ``http`` entry is a configuration error.
+        """
+        allowed = {"console", "jsonl", "otlp", "memory"}
+        configs: list[dict[str, Any]] = []
+        for name in (d.strip() for d in self.self_observe_drains.split(",")):
+            if not name:
+                continue
+            if name == "http":
+                raise ValueError(
+                    "PHLO_OBSERVER_SELF_OBSERVE_DRAINS may not include 'http': "
+                    "internal events must not post back into this observer. "
+                    "Use console, jsonl or otlp."
+                )
+            if name not in allowed:
+                raise ValueError(
+                    f"Unknown self-observation drain {name!r}. "
+                    f"Allowed values: {', '.join(sorted(allowed))}."
+                )
+            cfg: dict[str, Any] = {"type": name}
+            if name == "otlp" and self.otlp_endpoint:
+                cfg["endpoint"] = self.otlp_endpoint
+            if name == "jsonl":
+                cfg["path"] = "phlo-observer-events.jsonl"
+            configs.append(cfg)
+        return configs
+
 
 def load_settings() -> ObserverSettings:
     """Build settings, resolving ``_FILE`` token variants into the token lists."""
@@ -109,6 +150,4 @@ def load_settings() -> ObserverSettings:
             file_tokens = [t.strip() for t in resolved.split(",") if t.strip()]
             merged = [*getattr(settings, attr), *file_tokens]
             object.__setattr__(settings, attr, merged)
-            for prop in ("ingest_token_set", "read_token_set"):
-                settings.__dict__.pop(prop, None)
     return settings

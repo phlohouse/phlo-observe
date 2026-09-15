@@ -61,20 +61,27 @@ def make_event() -> Any:
 
 
 @pytest_asyncio.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    """HTTP client against a fresh-schema observer app."""
+async def session_factory() -> AsyncIterator[async_sessionmaker[Any]]:
+    """Session factory on a freshly created observer schema."""
     if not await _reachable(TEST_DATABASE_URL):
         pytest.skip("PostgreSQL not reachable; set PHLO_OBSERVER_TEST_DATABASE_URL")
-    from phlo_observer.app import create_app
     from phlo_observer.models import Base
-    from phlo_observer.settings import ObserverSettings
 
     engine = create_async_engine(TEST_DATABASE_URL)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
+    yield async_sessionmaker(engine, expire_on_commit=False)
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def client(session_factory: Any) -> AsyncIterator[AsyncClient]:
+    """HTTP client against a fresh-schema observer app."""
+    from phlo_observer.app import create_app
+    from phlo_observer.settings import ObserverSettings
+
     app = create_app(ObserverSettings(database_url=TEST_DATABASE_URL))
-    app.state.session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.session_factory = session_factory
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
-    await engine.dispose()

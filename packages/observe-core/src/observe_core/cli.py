@@ -31,7 +31,16 @@ def main(argv: list[str] | None = None) -> int:
         from observe_core.config import ObserveSettings
 
         settings = ObserveSettings()
-        print(json.dumps(settings.model_dump(mode="json"), indent=2, default=str))
+        data = settings.model_dump(mode="json")
+        # Never print configured secrets: drain credentials and headers are
+        # masked before output.
+        for drain in data.get("drains") or []:
+            for key in ("token", "api_key"):
+                if drain.get(key):
+                    drain[key] = "***"
+            if drain.get("headers"):
+                drain["headers"] = dict.fromkeys(drain["headers"], "***")
+        print(json.dumps(data, indent=2, default=str))
         return 0
 
     if args.command == "emit-test":
@@ -63,11 +72,21 @@ def main(argv: list[str] | None = None) -> int:
 
         settings = ObserveSettings()
         drains = [Runtime._build_drain(cfg) for cfg in settings.drains]
-        if not drains:
-            print("no drains configured", file=sys.stderr)
+        # Spooled events exist to reach a remote observer: replaying to a
+        # console/jsonl drain would print them locally and then delete the
+        # segments — a data-loss footgun. Remote drains only.
+        remote = [d for d in drains if getattr(d, "is_remote", False)]
+        if not remote:
+            print(
+                "no remote drain configured; replay-spool requires a remote "
+                "drain (e.g. OBSERVE_DRAINS=http + OBSERVE_HTTP_ENDPOINT)",
+                file=sys.stderr,
+            )
+            for drain in drains:
+                drain.close()
             return 1
         spool = Spool(Path(args.dir))
-        replayed = spool.replay(drains[0], max_events=args.max_events)
+        replayed = spool.replay(remote[0], max_events=args.max_events)
         for drain in drains:
             drain.close()
         print(json.dumps({"replayed": replayed}))

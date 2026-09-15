@@ -1,5 +1,9 @@
 # OTel Collector: receive OTLP, forward to phlo-observer.
 # Enabled via `docker compose --profile otel up`.
+#
+# The observer's /v1/ingest/otlp endpoint accepts OTLP *JSON* log payloads —
+# `encoding: json` on the otlphttp exporter is required (the default protobuf
+# encoding is not accepted by the JSON ingest API).
 receivers:
   otlp:
     protocols:
@@ -12,16 +16,13 @@ processors:
   batch:
     timeout: 5s
     send_batch_size: 512
-  transform/canonical:
-    # Forward structured log bodies; the observer's generic adapter wraps them.
-    log_statements: []
 
 exporters:
   otlphttp/phlo:
-    # The observer's /v1/ingest/otlp endpoint accepts collector-forwarded
-    # OTLP JSON payloads.
+    # Each OTLP logs batch is normalized as an `external.source_event` event.
     endpoint: http://phlo-observer:8080
     logs_endpoint: http://phlo-observer:8080/v1/ingest/otlp
+    encoding: json
     headers:
       Authorization: Bearer ${env:PHLO_OBSERVER_INGEST_TOKEN}
     retry_on_failure:
