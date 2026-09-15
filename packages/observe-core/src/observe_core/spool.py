@@ -31,6 +31,7 @@ _log = logging.getLogger("observe_core.spool")
 _SEGMENT_PREFIX = "seg-"
 _SEGMENT_SUFFIX = ".jsonl"
 _CORRUPT_SUFFIX = ".corrupt"
+_DEAD_SUFFIX = ".dead"
 
 
 class Spool:
@@ -54,6 +55,7 @@ class Spool:
         self._current: Path | None = None
         self._current_size = 0
         self._lock = threading.Lock()
+        self._replay_lock = threading.Lock()
         directory.mkdir(parents=True, exist_ok=True)
 
     # -- write path ---------------------------------------------------------
@@ -105,25 +107,28 @@ class Spool:
             key=lambda p: p.name,
         )
 
+    def _all_files(self) -> list[Path]:
+        """Every file this spool owns, including quarantined segments."""
+        return sorted(self.directory.glob(f"{_SEGMENT_PREFIX}*"), key=lambda p: p.name)
+
     def _total_size(self) -> int:
+        # Quarantined segments still occupy disk: they must count toward
+        # max_bytes or a poison-payload flood grows the directory unboundedly.
         try:
-            return sum(p.stat().st_size for p in self._segments())
+            return sum(p.stat().st_size for p in self._all_files())
         except OSError:
             return 0
 
     def _evict_oldest(self) -> bool:
-        segments = self._segments()
-        if self._current is not None and segments and segments[0] == self._current:
-            if len(segments) > 1:
-                target = segments[1]
-            else:
-                return False
-        elif segments:
-            target = segments[0]
-        else:
+        # Oldest pending segment first (never the active one); when nothing
+        # pending can go, evict the oldest quarantined file — dead/corrupt
+        # segments still count toward the disk budget.
+        pending = [p for p in self._segments() if p != self._current]
+        candidates = pending or [p for p in self._all_files() if p != self._current]
+        if not candidates:
             return False
         try:
-            target.unlink()
+            candidates[0].unlink()
             return True
         except OSError:
             return False
@@ -141,39 +146,64 @@ class Spool:
     def replay(self, drain: Drain, *, max_events: int | None = None) -> int:
         """Replay oldest segments through ``drain``. Returns events replayed.
 
-        A segment is deleted only after the drain accepts its whole batch.
-        Segments containing undecodable lines are quarantined to ``.corrupt``.
+        The active segment is sealed first so its records are replayable now
+        rather than stranded until a size rotation. A segment is deleted only
+        after the drain accepts its whole batch. Undecodable segments are
+        quarantined to ``.corrupt``; segments the drain permanently rejects
+        are quarantined to ``.dead`` so one poison segment cannot block all
+        later critical events forever. Transient drain failures stop the
+        replay and keep the segment for the next interval.
         """
-        replayed = 0
-        for segment in self._segments():
-            if max_events is not None and replayed >= max_events:
-                break
-            if segment == self._current:
-                continue
-            try:
-                lines = [line for line in segment.read_bytes().splitlines() if line.strip()]
-            except OSError:
-                continue
-            if any(not _looks_like_json(line) for line in lines):
-                self._quarantine(segment)
-                continue
-            try:
-                drain.emit_raw(lines)
-            except Exception:
-                break
-            with contextlib.suppress(OSError):
-                segment.unlink()
-            replayed += len(lines)
-            if self._stats:
-                self._stats.incr("spool_replayed_events", len(lines))
-        return replayed
+        from observe_core.drains.base import PermanentDrainFailure  # noqa: PLC0415
 
-    def _quarantine(self, segment: Path) -> None:
+        if not self._replay_lock.acquire(blocking=False):
+            return 0  # another worker is already replaying
+        try:
+            with self._lock:
+                # Seal the open segment: no writer touches it again, so its
+                # complete records can be replayed and the file removed.
+                self._current = None
+                self._current_size = 0
+            replayed = 0
+            for segment in self._segments():
+                if max_events is not None and replayed >= max_events:
+                    break
+                with self._lock:
+                    # A racing append can have opened a new current segment
+                    # between sealing and the glob; it is still being written
+                    # (a partial trailing line would look "corrupt") and must
+                    # never be renamed or deleted under a writer.
+                    if segment == self._current:
+                        continue
+                try:
+                    lines = [line for line in segment.read_bytes().splitlines() if line.strip()]
+                except OSError:
+                    continue
+                if any(not _looks_like_json(line) for line in lines):
+                    self._quarantine(segment, _CORRUPT_SUFFIX, "corrupt")
+                    continue
+                try:
+                    drain.emit_raw(lines)
+                except PermanentDrainFailure:
+                    self._quarantine(segment, _DEAD_SUFFIX, "permanently rejected")
+                    continue
+                except Exception:
+                    break  # transient: keep for the next replay interval
+                with contextlib.suppress(OSError):
+                    segment.unlink()
+                replayed += len(lines)
+                if self._stats:
+                    self._stats.incr("spool_replayed_events", len(lines))
+            return replayed
+        finally:
+            self._replay_lock.release()
+
+    def _quarantine(self, segment: Path, suffix: str, reason: str) -> None:
         with contextlib.suppress(OSError):
-            segment.rename(segment.with_suffix(_CORRUPT_SUFFIX))
+            segment.rename(segment.with_suffix(suffix))
         if self._stats:
-            self._stats.incr("spool_errors")
-        _log.warning("quarantined corrupt spool segment %s", segment)
+            self._stats.incr("spool_quarantined")
+        _log.warning("quarantined %s spool segment %s", reason, segment)
 
 
 def _looks_like_json(line: bytes) -> bool:

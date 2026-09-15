@@ -1,0 +1,97 @@
+[
+  {
+    "attributes": {
+      "assets": 3
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": "run-42",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "pipeline.run",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": "prod",
+      "host": null,
+      "instance_id": null,
+      "name": "etl-worker",
+      "version": "2.1.0"
+    },
+    "severity": "info",
+    "source": null,
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "checks_passed": 11,
+      "checks_total": 12,
+      "suite": "mart"
+    },
+    "category": "quality",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": "run-42",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "critical",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": {
+      "code": "QUALITY_CHECK_FAILED",
+      "details": {},
+      "exception_type": null,
+      "fix": null,
+      "message": "1 check failed",
+      "retryable": false,
+      "stacktrace": null,
+      "why": null
+    },
+    "event": "quality.validate",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "failure",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "etl-worker",
+      "version": null
+    },
+    "severity": "error",
+    "source": null,
+    "started_at": null
+  }
+]

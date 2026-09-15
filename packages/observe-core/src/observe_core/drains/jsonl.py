@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -36,16 +37,19 @@ class JsonlDrain:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = path.open("ab")
         self._size = path.stat().st_size if path.exists() else 0
+        self._lock = threading.Lock()
 
     def emit_batch(self, events: Sequence[CanonicalEvent]) -> None:
         """Append each event as one JSON line."""
-        for item in events:
-            self._write(item.payload)
+        with self._lock:
+            for item in events:
+                self._write(item.payload)
 
     def emit_raw(self, payloads: Sequence[bytes]) -> None:
         """Append pre-serialized payloads (spool replay)."""
-        for payload in payloads:
-            self._write(payload)
+        with self._lock:
+            for payload in payloads:
+                self._write(payload)
 
     def _write(self, payload: bytes) -> None:
         line = payload if payload.endswith(b"\n") else payload + b"\n"
@@ -73,13 +77,15 @@ class JsonlDrain:
 
     def flush(self) -> None:
         """Flush buffered writes to the OS."""
-        self._fh.flush()
-        if self.fsync:
-            os.fsync(self._fh.fileno())
+        with self._lock:
+            self._fh.flush()
+            if self.fsync:
+                os.fsync(self._fh.fileno())
 
     def close(self) -> None:
         """Flush and close the file handle."""
-        try:
-            self._fh.flush()
-        finally:
-            self._fh.close()
+        with self._lock:
+            try:
+                self._fh.flush()
+            finally:
+                self._fh.close()

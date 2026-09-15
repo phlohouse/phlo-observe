@@ -1,0 +1,6 @@
+{
+  "system": "legacy-etl",
+  "run_id": "legacy-run-42",
+  "trace_id": "0af7651916cd43dd8448eb211c80319c",
+  "detail": {"rows": 5, "phase": "extract"}
+}

@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from observe_core.drains.base import CanonicalEvent, DrainFailure
+from observe_core.drains.base import CanonicalEvent, DrainFailure, PermanentDrainFailure
 from observe_core.models import Severity
 from observe_core.serialization import dumps, loads
 
@@ -91,7 +91,11 @@ class OtlpDrain:
     def emit_raw(self, payloads: Sequence[bytes]) -> None:
         """Replay pre-serialized payloads by re-parsing them."""
         for payload in payloads:
-            self._logger.emit(self._to_log_record(loads(payload)))
+            try:
+                data = loads(payload)
+            except Exception as exc:
+                raise PermanentDrainFailure(f"spooled payload is not parseable: {exc}") from exc
+            self._logger.emit(self._to_log_record(data))
 
     def _to_log_record(self, data: dict[str, Any]) -> Any:
         attributes: dict[str, Any] = {}

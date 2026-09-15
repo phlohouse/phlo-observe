@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 
 from observe_core import context as _ctx
 from observe_core.builder import EventBuilder
-from observe_core.models import Category, Delivery, Severity
+from observe_core.models import DURATION_TOLERANCE_MS, Category, Delivery, Severity
 from observe_core.runtime import get_runtime
 from observe_core.timestamps import monotonic_ms, utcnow
 
@@ -84,6 +84,7 @@ class observe:
             delivery=self.delivery,
             severity=self.severity,
             attributes=self.attributes,
+            capture_stacktrace=self.capture_stacktrace,
         )
         if self.correlation:
             builder.set_correlation(**self.correlation)
@@ -125,6 +126,15 @@ class observe:
             return False
         builder.ended_at = utcnow()
         builder.duration_ms = monotonic_ms() - self._monotonic_start
+        if builder.started_at is not None:
+            # The envelope requires duration_ms to match ended_at-started_at.
+            # A wall-clock step (NTP) can break that invariant against the
+            # monotonic measurement; reconcile so the event is never dropped.
+            if builder.ended_at < builder.started_at:
+                builder.ended_at = builder.started_at
+            wall_ms = (builder.ended_at - builder.started_at).total_seconds() * 1000.0
+            if abs(wall_ms - builder.duration_ms) > DURATION_TOLERANCE_MS:
+                builder.duration_ms = wall_ms
         get_runtime().emit(builder, exc)
         return False  # never swallow application exceptions
 

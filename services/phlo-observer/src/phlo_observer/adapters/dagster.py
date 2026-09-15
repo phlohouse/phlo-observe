@@ -94,6 +94,7 @@ class DagsterAdapter:
 
     name = "dagster"
     version = "1.0"
+    keep_payload = True
 
     def can_handle(self, payload: RawPayload) -> bool:
         """Accept Dagster-looking payloads: records with dagster-ish fields."""

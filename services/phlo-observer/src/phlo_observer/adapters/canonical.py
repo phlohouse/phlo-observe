@@ -17,6 +17,7 @@ class CanonicalAdapter:
 
     name = "canonical"
     version = "1.0"
+    keep_payload = True
 
     def can_handle(self, payload: RawPayload) -> bool:
         """Accept when the body parses to a dict with ``event`` or a list."""

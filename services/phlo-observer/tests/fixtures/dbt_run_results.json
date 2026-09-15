@@ -1,0 +1,33 @@
+{
+  "metadata": {
+    "dbt_version": "1.7.4",
+    "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+    "generated_at": "2025-01-01T00:00:00Z",
+    "project_name": "mart",
+    "adapter_type": "trino"
+  },
+  "results": [
+    {
+      "unique_id": "model.mart.fct_orders",
+      "status": "success",
+      "execution_time": 1.25,
+      "adapter_response": {"code": "OK", "rows_affected": 14291},
+      "timing": []
+    },
+    {
+      "unique_id": "test.mart.fct_orders__order_id_not_null",
+      "status": "pass",
+      "execution_time": 0.31,
+      "failures": 0,
+      "timing": []
+    },
+    {
+      "unique_id": "model.mart.dim_customers",
+      "status": "error",
+      "execution_time": 0.02,
+      "adapter_response": {"code": "QUERY_FAILED", "message": "relation does not exist"},
+      "timing": []
+    }
+  ],
+  "elapsed_time": 4.8
+}

@@ -1,0 +1,111 @@
+[
+  {
+    "attributes": {
+      "adapter_type": "trino",
+      "args": null,
+      "dbt_version": "1.7.4",
+      "elapsed_time_s": 1.1,
+      "invocation_id": "9c1d8e2f-3333-4444-5555-666666666666",
+      "project_name": "staging",
+      "results_count": 1
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "9c1d8e2f-3333-4444-5555-666666666666",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.invocation",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "adapter_type": "trino",
+      "execution_time_s": 0.9,
+      "name": "stg_orders",
+      "project_name": "staging",
+      "status": "success",
+      "unique_id": "model.staging.stg_orders"
+    },
+    "category": "data",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "9c1d8e2f-3333-4444-5555-666666666666",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.model.execute",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  }
+]

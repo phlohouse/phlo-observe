@@ -23,6 +23,7 @@ secret file, e.g. `PHLO_OBSERVER_INGEST_TOKENS_FILE=/run/secrets/tokens`.
 | `RETENTION_INTERVAL_S` | `3600` | in-process sweep cadence |
 | `MAX_BODY_BYTES` | `10485760` | request limit, wire and decompressed size |
 | `MAX_BATCH_EVENTS` | `1000` | events per request |
+| `MAX_RAW_PAYLOAD_BYTES` | `262144` | larger raw bodies are retained as a SHA-256 digest only |
 | `OTLP_ENDPOINT` | — | optional OTLP/HTTP logs destination for accepted events; a bare collector base (`http://host:4318`) gets `/v1/logs` appended |
 | `METRICS_ENABLED` | `true` | expose `/metrics` |
 | `METRICS_PUBLIC` | `false` | `true` skips the read-token check on `/metrics` |
@@ -51,7 +52,7 @@ Security notes:
 | `DROP_POLICY` | `drop_newest` | `drop_newest` / `drop_oldest` — queue pressure policy for non-critical events |
 | `BATCH_SIZE` / `FLUSH_INTERVAL_MS` | `100` / `1000` | worker batching |
 | `WORKER_COUNT` / `SHUTDOWN_TIMEOUT_S` | `1` / `5.0` | drain workers; bounded shutdown |
-| `DRAINS` | `console` | shorthand list (`console,http,jsonl,otlp,memory`) or JSON array of drain configs |
+| `DRAINS` | `console` | shorthand list (`console,http,jsonl,otlp,memory`) or JSON array of drain configs. JSON form exposes per-drain fields such as `{"type": "http", "endpoint": ..., "spool_on_failure": false}` — `spool_on_failure` (default `true`) controls whether a rejected remote write spools critical events |
 | `HTTP_ENDPOINT` | — | observer ingest URL (required when `DRAINS` includes `http`) |
 | `HTTP_TOKEN` | — | observer token → `Authorization: Bearer` |
 | `HTTP_API_KEY` | — | observer token → `X-API-Key` (equivalent to `HTTP_TOKEN`) |
@@ -62,7 +63,7 @@ Security notes:
 | `SPOOL_MAX_BYTES` / `SPOOL_SEGMENT_MAX_BYTES` | `1 GiB` / `32 MiB` | bounded spool |
 | `SPOOL_ON_FULL` | `drop_oldest` | `drop_oldest` / `drop_newest` |
 | `SPOOL_REPLAY_INTERVAL_S` | `30` | how often the worker replays the spool to remote drains |
-| `CAPTURE_STACKTRACE` | `true` | include tracebacks on error events |
+| `CAPTURE_STACKTRACE` | `true` | include tracebacks on error events; `observe(capture_stacktrace=...)` overrides per operation |
 | `MAX_EVENT_BYTES` / `MAX_DEPTH` | `262144` / `8` | event size cap + normalization depth |
 | `REDACT_KEYS` | — | extra exact key names to redact (case-insensitive) |
 | `REDACT_KEY_PATTERNS` / `REDACT_PATHS` / `REDACT_VALUE_PATTERNS` | — | regex key rules, dotted paths, value regexes |

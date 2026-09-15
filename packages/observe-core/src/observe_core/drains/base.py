@@ -42,6 +42,16 @@ class DrainFailure(Exception):
     """Raised when a drain cannot accept a batch after its own retries."""
 
 
+class PermanentDrainFailure(DrainFailure):
+    """Raised when the destination rejected the payload itself.
+
+    Unlike a transient :class:`DrainFailure` (network errors, 429, 5xx),
+    retrying a permanent rejection can never succeed. Spool replay treats it
+    as a poison segment and quarantines it instead of blocking the head of
+    the spool forever.
+    """
+
+
 @runtime_checkable
 class Drain(Protocol):
     """Export destination for canonical events.

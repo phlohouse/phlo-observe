@@ -1,0 +1,306 @@
+[
+  {
+    "attributes": {
+      "dagster_event_type": "STARTED",
+      "job_name": "nightly_etl",
+      "step_key": null
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "pipeline.run",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "STARTED",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "dagster_event_type": "STEP_START",
+      "job_name": "nightly_etl",
+      "step_key": "extract_orders"
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "pipeline.step",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "STEP_START",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "asset_key": "mart.fct_orders",
+      "dagster_event_type": "ASSET_MATERIALIZATION"
+    },
+    "category": "data",
+    "correlation": {
+      "asset_key": "mart.fct_orders",
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "asset.materialize",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "ASSET_MATERIALIZATION",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "check_name": "order_id_not_null",
+      "passed": true
+    },
+    "category": "quality",
+    "correlation": {
+      "asset_key": "mart.fct_orders",
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "quality.check",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "ASSET_CHECK_EVALUATION",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "dagster_event_type": "STEP_SUCCESS",
+      "job_name": "nightly_etl",
+      "step_key": "extract_orders"
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "pipeline.step",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "STEP_SUCCESS",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "dagster_event_type": "SUCCESS",
+      "job_name": "nightly_etl",
+      "step_key": null
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": "nightly_etl",
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": "nightly_etl",
+      "request_id": null,
+      "run_id": "7f3a9b21d0c44f2c",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "pipeline.run",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dagster",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dagster.1.0",
+      "ingested_at": null,
+      "kind": "SUCCESS",
+      "producer": "dagster",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  }
+]

@@ -1,0 +1,29 @@
+[
+  {
+    "schema_version": "1.0",
+    "event_id": "018f3a5e-7c2b-7d1a-9f4e-2a1b3c4d5e6f",
+    "event": "pipeline.run",
+    "category": "pipeline",
+    "outcome": "success",
+    "severity": "info",
+    "delivery": "telemetry",
+    "observed_at": "2025-01-01T00:00:00Z",
+    "service": {"name": "etl-worker", "version": "2.1.0", "environment": "prod"},
+    "correlation": {"run_id": "run-42", "job_id": "nightly_etl"},
+    "attributes": {"assets": 3}
+  },
+  {
+    "schema_version": "1.0",
+    "event_id": "018f3a5e-8c2b-7d1a-9f4e-2a1b3c4d5e70",
+    "event": "quality.validate",
+    "category": "quality",
+    "outcome": "failure",
+    "severity": "error",
+    "delivery": "critical",
+    "observed_at": "2025-01-01T00:00:05Z",
+    "service": {"name": "etl-worker"},
+    "correlation": {"run_id": "run-42"},
+    "attributes": {"suite": "mart", "checks_total": 12, "checks_passed": 11},
+    "error": {"message": "1 check failed", "code": "QUALITY_CHECK_FAILED"}
+  }
+]

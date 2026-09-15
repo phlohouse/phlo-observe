@@ -27,6 +27,7 @@ class DbtAdapter:
 
     name = "dbt"
     version = "1.0"
+    keep_payload = True
 
     def can_handle(self, payload: RawPayload) -> bool:
         """Accept documents with a dbt-ish ``results``/``metadata`` shape."""

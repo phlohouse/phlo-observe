@@ -63,6 +63,27 @@ class TestReplay:
         ids = [json.loads(p)["event_id"] for p in drain.raw_payloads]
         assert ids == [json.loads(_payload(i))["event_id"] for i in range(6)]
 
+    def test_replay_replays_open_segment_same_instance(self, tmp_path):
+        """Regression: replay must not skip the still-open segment.
+
+        Previously ``self._current`` was skipped, so events appended by this
+        instance were stranded until a size rotation sealed the segment.
+        """
+        spool = Spool(tmp_path)
+        assert spool.append(_payload(1))
+        assert spool.append(_payload(2))
+        drain = MemoryDrain()
+        assert spool.replay(drain) == 2
+        assert len(drain.raw_payloads) == 2
+        assert sorted(tmp_path.glob("seg-*.jsonl")) == []
+
+    def test_replay_then_append_opens_fresh_segment(self, tmp_path):
+        spool = Spool(tmp_path)
+        spool.append(_payload(1))
+        assert spool.replay(MemoryDrain()) == 1
+        assert spool.append(_payload(2))  # next append must not fail
+        assert spool.replay(MemoryDrain()) == 1
+
     def test_replay_removes_segments(self, tmp_path):
         Spool(tmp_path).append(_payload(1))
         Spool(tmp_path).replay(MemoryDrain())
@@ -77,6 +98,60 @@ class TestReplay:
         replayed = Spool(tmp_path).replay(FailingDrain())
         assert replayed == 0
         assert len(sorted(tmp_path.glob("seg-*.jsonl"))) == 1
+
+    def test_transient_failure_stops_replay(self, tmp_path):
+        """A transient failure keeps remaining segments for the next cycle."""
+        from observe_core.drains.base import DrainFailure
+
+        calls: list[list[bytes]] = []
+
+        class FlakyDrain(MemoryDrain):
+            def emit_raw(self, payloads):
+                calls.append(list(payloads))
+                raise DrainFailure("503 Service Unavailable")
+
+        spool = Spool(tmp_path, segment_max_bytes=80)
+        spool.append(_payload(1))
+        spool.append(_payload(2))
+        replayed = spool.replay(FlakyDrain())
+        assert replayed == 0
+        assert len(calls) == 1  # did not keep hammering later segments
+        assert len(sorted(tmp_path.glob("seg-*.jsonl"))) == 2
+
+    def test_permanent_rejection_quarantines_to_dead(self, tmp_path):
+        """A permanently rejected segment is quarantined, not retried forever."""
+        from observe_core.drains.base import PermanentDrainFailure
+
+        class RejectingDrain(MemoryDrain):
+            def emit_raw(self, payloads):
+                raise PermanentDrainFailure("422 rejected")
+
+        stats = TelemetryStats()
+        spool = Spool(tmp_path, stats=stats)
+        spool.append(_payload(1))
+        assert spool.replay(RejectingDrain()) == 0
+        assert sorted(tmp_path.glob("seg-*.jsonl")) == []
+        assert sorted(tmp_path.glob("*.dead"))
+        assert stats.snapshot()["spool_quarantined"] == 1
+
+    def test_poison_segment_does_not_block_later_segments(self, tmp_path):
+        """Regression: a rejected head segment must not wedge the whole spool."""
+        from observe_core.drains.base import PermanentDrainFailure
+
+        class SelectiveDrain(MemoryDrain):
+            def emit_raw(self, payloads):
+                if payloads == [_payload(1)]:
+                    raise PermanentDrainFailure("rejected")
+                super().emit_raw(payloads)
+
+        spool = Spool(tmp_path, segment_max_bytes=80)
+        spool.append(_payload(1))  # poison segment
+        spool.append(_payload(2))
+        drain = SelectiveDrain()
+        assert spool.replay(drain) == 1
+        assert drain.raw_payloads == [_payload(2)]
+        assert sorted(tmp_path.glob("*.dead"))
+        assert sorted(tmp_path.glob("seg-*.jsonl")) == []
 
     def test_corrupt_segment_quarantined(self, tmp_path):
         bad = tmp_path / "seg-9999999999-0.jsonl"

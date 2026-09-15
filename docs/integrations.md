@@ -5,28 +5,27 @@
 ```python
 from phlo_observe import pipeline_run, asset_materialize, quality_validate
 
-with pipeline_run(run_id="dagster:abc123", job_name="nightly_etl"):
+with pipeline_run(job="nightly_etl", run_id="dagster:abc123"):
     with asset_materialize(asset_key="mart.fct_orders"):
         ...
-    with quality_validate(asset_key="mart.fct_orders", check_name="not_null"):
+    with quality_validate(suite="mart", checks_total=12, checks_passed=12):
         ...
 ```
 
 Or emit canonical events straight to the observer over HTTP:
 
 ```python
-from observe_core.config import ObserveConfig
+from observe_core.config import HttpDrainConfig, ObserveSettings
 from observe_core.runtime import configure
 
 configure(
-    ObserveConfig(
+    ObserveSettings(
         service_name="my-service",
         drains=[
-            {
-                "type": "http",
-                "endpoint": "http://observer:8080/v1/events",
-                "api_key": "<ingest-token>",
-            }
+            HttpDrainConfig(
+                endpoint="http://observer:8080/v1/events",
+                api_key="<ingest-token>",
+            )
         ],
     )
 )
@@ -34,8 +33,10 @@ configure(
 
 ## Dagster
 
-- Client-side: `phlo_observe.integrations.dagster.observe_dagster_run()`
-  attaches Phlo run/asset context to a Dagster run.
+- Client-side: `phlo_observe.integrations.dagster.dagster_run_scope()`
+  attaches Phlo run/asset context to a Dagster run; `dagster_step()`,
+  `emit_materialization()` and `emit_asset_check()` cover steps, assets and
+  checks.
 - Server-side: POST Dagster event records to `/v1/ingest/dagster`. Run start/
   success/failure/cancel, step start/success/failure, asset materializations
   and asset check results are normalized; other engine events are skipped.
@@ -56,16 +57,28 @@ only; the observer receives the resulting canonical events.
 
 ## Iceberg / Nessie / WAP
 
-`phlo_observe.integrations.wap` + `iceberg` emit `wap.create`, `wap.merge`,
-`wap.promote`, and `table.commit` events correlated on `branch` and
-`snapshot_id`.
+`phlo_observe.integrations.wap` + `iceberg` emit `wap.branch.create`,
+`wap.promote`, `wap.reject`, and `iceberg.commit` / `nessie.commit` events
+correlated on `branch` and `snapshot_id`.
 
 ## DLT / Pandera
 
 `integrations.dlt` wraps pipeline run events; `integrations.pandera` maps
-schema-validation failures to `quality.check` events with structured errors.
+schema-validation failures to `quality.validate` events with structured
+errors.
 
 ## OTel Collector
 
 Enable the `otel` compose profile to run a collector that forwards to
-`POST /v1/ingest/otlp`. See `examples/otel-collector-config.yaml`.
+`POST /v1/ingest/otlp` (OTLP/HTTP JSON; each log record normalizes to one
+canonical event). See `examples/otel-collector-config.yaml`.
+
+## Ingestion headers
+
+All `POST /v1/ingest/*` endpoints accept:
+
+- `X-Source-Version` — producer version, stored on `raw_events.source_version`
+  (defaults to the adapter's own version when absent);
+- `X-Run-Id`, `X-Trace-Id`, `X-Request-Id`, `X-Asset-Key` — transport-level
+  correlation passed to adapters via `RawPayload.metadata`; the generic
+  adapter merges them over body-level keys so generic events still join runs.

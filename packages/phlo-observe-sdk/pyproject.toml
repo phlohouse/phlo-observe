@@ -13,10 +13,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dagster = ["dagster>=1.8"]
+dbt = []  # artifact parsing is pure Python; the extra exists for spec §21 parity
 dlt = ["dlt>=1.0"]
 pandera = ["pandera>=0.20"]
 trino = ["trino>=0.330"]
-all = ["phlo-observe[dagster,dlt,pandera,trino]"]
+all = ["phlo-observe[dagster,dbt,dlt,pandera,trino]"]
 
 [build-system]
 requires = ["uv_build>=0.8,<0.13"]

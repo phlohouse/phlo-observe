@@ -1,0 +1,61 @@
+[
+  {
+    "attributes": {
+      "payload": {
+        "detail": {
+          "phase": "extract",
+          "rows": 5
+        },
+        "run_id": "legacy-run-42",
+        "system": "legacy-etl",
+        "trace_id": "0af7651916cd43dd8448eb211c80319c"
+      },
+      "producer": "generic",
+      "source_kind": "generic"
+    },
+    "category": "other",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": "legacy-run-42",
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": "0af7651916cd43dd8448eb211c80319c"
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "external.source_event",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "external",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "generic.1.0",
+      "ingested_at": null,
+      "kind": "generic",
+      "producer": "external",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  }
+]

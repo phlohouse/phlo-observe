@@ -17,12 +17,30 @@ from phlo_observer.adapters.base import (
     envelope_for,
 )
 
+_CORRELATION_KEYS = (
+    "trace_id",
+    "span_id",
+    "parent_span_id",
+    "run_id",
+    "job_id",
+    "invocation_id",
+    "asset_key",
+    "partition_key",
+    "branch",
+    "table",
+    "snapshot_id",
+    "pipeline",
+    "experiment_id",
+    "request_id",
+)
+
 
 class GenericAdapter:
     """Wraps arbitrary JSON payloads into ``external.<kind>`` events."""
 
     name = "generic"
     version = "1.0"
+    keep_payload = True
 
     def can_handle(self, payload: RawPayload) -> bool:
         """Accept any JSON object/array payload."""
@@ -39,16 +57,21 @@ class GenericAdapter:
         except Exception as exc:
             raise AdapterError(f"payload is not valid JSON: {exc}") from exc
         producer = payload.producer if payload.producer != "generic" else "external"
+        # Correlation: canonical keys found at the payload's top level, with
+        # explicit request metadata winning, so generic events still join runs.
+        correlation = {
+            key: body.get(key)
+            for key in _CORRELATION_KEYS
+            if isinstance(body, dict) and body.get(key) is not None
+        }
+        correlation.update({k: v for k, v in payload.metadata.items() if v is not None})
         return NormalizedBatch(
             events=[
                 envelope_for(
                     event="external.source_event",
                     category="other",
                     outcome="unknown",
-                    correlation={
-                        "run_id": payload.metadata.get("run_id"),
-                        "trace_id": payload.metadata.get("trace_id"),
-                    },
+                    correlation=correlation,
                     attributes={
                         "producer": payload.producer,
                         "source_kind": payload.source_kind,

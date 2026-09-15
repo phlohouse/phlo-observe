@@ -28,6 +28,7 @@ class TelemetryStats:
         "spooled_events",
         "spool_dropped_oldest",
         "spool_errors",
+        "spool_quarantined",
         "spool_replayed_events",
         "drain_errors",
         "worker_errors",

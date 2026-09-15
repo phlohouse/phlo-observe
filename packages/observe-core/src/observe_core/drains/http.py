@@ -19,7 +19,7 @@ from collections.abc import Sequence
 
 import httpx
 
-from observe_core.drains.base import CanonicalEvent, DrainFailure
+from observe_core.drains.base import CanonicalEvent, DrainFailure, PermanentDrainFailure
 
 _RETRYABLE_STATUSES = frozenset({408, 429}) | frozenset(range(500, 600))
 _MAX_RETRY_AFTER_S = 30.0
@@ -45,8 +45,10 @@ class HttpDrain:
         backoff_base_ms: float = 250.0,
         backoff_cap_ms: float = 10_000.0,
         gzip_threshold_bytes: int = 64 * 1024,
+        spool_on_failure: bool = True,
     ) -> None:
         self.endpoint = endpoint
+        self.spool_on_failure = spool_on_failure
         self.max_attempts = max(1, max_attempts)
         self.backoff_base_s = backoff_base_ms / 1000.0
         self.backoff_cap_s = backoff_cap_ms / 1000.0
@@ -109,7 +111,9 @@ class HttpDrain:
                 self._sleep(attempt, retry_after=_retry_after(response))
                 continue
             if response.status_code >= 400:
-                raise DrainFailure(
+                # Non-retryable 4xx: the payload itself was rejected; replaying
+                # it later would fail identically, so mark it permanent.
+                raise PermanentDrainFailure(
                     f"observer rejected batch: {response.status_code} {response.text[:200]}"
                 )
             return

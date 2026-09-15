@@ -118,19 +118,29 @@ def _event_summary(row: Event) -> dict[str, Any]:
     }
 
 
+# Spec §84's latency target covers runs up to 10,000 events; the cap is set
+# there so the tested bound still returns a complete timeline.
+_MAX_TIMELINE_EVENTS = 10_000
+
+
 async def run_timeline(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
     """Return the run projection plus its events grouped into phases.
 
     Ordering is deterministic: producer ``observed_at`` first, ``event_id``
     (UUIDv7) as the stable tie-breaker. ``None`` when the run is unknown.
+    The event list is bounded; ``truncated`` flags runs with more than
+    ``_MAX_TIMELINE_EVENTS`` events.
     """
     run = await session.get(Run, run_id)
     stmt = (
         select(Event)
         .where(Event.run_id == run_id)
         .order_by(asc(Event.observed_at), asc(Event.event_id))
+        .limit(_MAX_TIMELINE_EVENTS + 1)
     )
     events = list((await session.execute(stmt)).scalars())
+    truncated = len(events) > _MAX_TIMELINE_EVENTS
+    events = events[:_MAX_TIMELINE_EVENTS]
     if run is None and not events:
         return None
     phases: dict[str, list[dict[str, Any]]] = {}
@@ -158,6 +168,7 @@ async def run_timeline(session: AsyncSession, run_id: str) -> dict[str, Any] | N
         "phases": phases,
         "steps": steps,
         "events": steps,
+        "truncated": truncated,
     }
 
 

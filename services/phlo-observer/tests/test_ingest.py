@@ -177,6 +177,137 @@ async def test_ingest_dagster_endpoint(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_raw_source_version_from_header(client: AsyncClient, session_factory: Any) -> None:
+    """X-Source-Version lands on raw_events.source_version."""
+    from phlo_observer.models import RawEvent
+    from sqlalchemy import select
+
+    record = {
+        "run_id": "r1",
+        "job_name": "j",
+        "event_type": "SUCCESS",
+        "timestamp": "2025-01-01T00:00:00Z",
+    }
+    resp = await client.post(
+        "/v1/ingest/dagster", json=record, headers={"X-Source-Version": "1.9.2"}
+    )
+    assert resp.status_code == 202
+    async with session_factory() as session:
+        raw = (await session.execute(select(RawEvent))).scalars().one()
+    assert raw.source_version == "1.9.2"
+
+
+@pytest.mark.asyncio
+async def test_raw_source_version_defaults_to_adapter(
+    client: AsyncClient, session_factory: Any
+) -> None:
+    """Without the header, the adapter's own version is recorded."""
+    from phlo_observer.models import RawEvent
+    from sqlalchemy import select
+
+    await client.post("/v1/ingest/generic", json={"a": 1})
+    async with session_factory() as session:
+        raw = (await session.execute(select(RawEvent))).scalars().one()
+    assert raw.source_version == "1.0"
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_disabled_by_adapter(
+    client: AsyncClient, session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """keep_payload=False stores only the digest, never the body (spec §36)."""
+    from phlo_observer.adapters import ADAPTERS
+    from phlo_observer.models import RawEvent
+    from sqlalchemy import select
+
+    monkeypatch.setattr(ADAPTERS["generic"], "keep_payload", False)
+    secret = {"ssn": "123-45-6789"}
+    resp = await client.post("/v1/ingest/generic", json=secret)
+    assert resp.status_code == 202
+    async with session_factory() as session:
+        raw = (await session.execute(select(RawEvent))).scalars().one()
+    assert raw.payload.get("_encoding") == "sha256"
+    assert "123-45-6789" not in json.dumps(raw.payload)
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_size_cap(database_url: str, session_factory: Any) -> None:
+    """Bodies over max_raw_payload_bytes store a digest (spec §34.3)."""
+    from httpx import ASGITransport
+    from phlo_observer.app import create_app
+    from phlo_observer.models import RawEvent
+    from phlo_observer.settings import ObserverSettings
+    from sqlalchemy import select
+
+    settings = ObserverSettings(
+        database_url=database_url, max_raw_payload_bytes=64, ingest_tokens="", read_tokens=""
+    )
+    app = create_app(settings)
+    app.state.session_factory = session_factory
+    big = {"data": "x" * 512}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post("/v1/ingest/generic", json=big)
+        assert resp.status_code == 202
+    async with session_factory() as session:
+        raw = (await session.execute(select(RawEvent))).scalars().one()
+    assert raw.payload.get("_encoding") == "sha256"
+
+
+@pytest.mark.asyncio
+async def test_ingest_otlp_endpoint(client: AsyncClient) -> None:
+    """Each OTLP logRecord becomes one canonical event with trace linkage."""
+    otlp = {
+        "resourceLogs": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": "loader"}},
+                    ]
+                },
+                "scopeLogs": [
+                    {
+                        "logRecords": [
+                            {
+                                "timeUnixNano": "1735689600000000000",
+                                "severityNumber": 9,
+                                "body": {"stringValue": "started"},
+                                "traceId": "aa" * 16,
+                            },
+                            {
+                                "timeUnixNano": "1735689601000000000",
+                                "severityNumber": 17,
+                                "body": {"stringValue": "failed"},
+                            },
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    resp = await client.post("/v1/ingest/otlp", json=otlp)
+    assert resp.status_code == 202
+    assert resp.json()["accepted"] == 2
+    stored = await client.get("/v1/events", params={"service": "loader"})
+    items = stored.json()["items"]
+    assert len(items) == 2
+    severities = {item["severity"] for item in items}
+    assert severities == {"info", "error"}
+    traced = [i for i in items if i["correlation"]["trace_id"]]
+    assert traced[0]["correlation"]["trace_id"] == "aa" * 16
+
+
+@pytest.mark.asyncio
+async def test_generic_run_id_correlation(client: AsyncClient) -> None:
+    """Generic events carrying run_id join the run projection."""
+    run_id = f"generic-run-{uuid.uuid4().hex[:8]}"
+    resp = await client.post("/v1/ingest/generic", json={"run_id": run_id, "n": 1})
+    assert resp.status_code == 202
+    run = await client.get(f"/v1/runs/{run_id}")
+    assert run.status_code == 200
+    assert run.json()["run_id"] == run_id
+
+
+@pytest.mark.asyncio
 async def test_ingest_generic_endpoint(client: AsyncClient) -> None:
     resp = await client.post("/v1/ingest/generic", json={"custom": "payload", "n": 1})
     assert resp.status_code == 202

@@ -61,10 +61,16 @@ class NormalizedBatch:
 
 
 class SourceAdapter(Protocol):
-    """Normalizes one producer's payloads into canonical events."""
+    """Normalizes one producer's payloads into canonical events.
+
+    ``keep_payload`` controls whether the raw request body is retained in
+    ``raw_events`` for this adapter (spec §36): sensitive sources set it to
+    False so only the SHA-256 digest is stored.
+    """
 
     name: str
     version: str
+    keep_payload: bool = True
 
     def can_handle(self, payload: RawPayload) -> bool:
         """Return True when this adapter accepts the payload."""

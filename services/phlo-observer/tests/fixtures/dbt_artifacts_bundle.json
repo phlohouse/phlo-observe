@@ -1,0 +1,27 @@
+{
+  "run_results": {
+    "metadata": {
+      "dbt_version": "1.7.4",
+      "invocation_id": "9c1d8e2f-3333-4444-5555-666666666666",
+      "generated_at": "2025-01-02T00:00:00Z"
+    },
+    "results": [
+      {
+        "unique_id": "model.staging.stg_orders",
+        "status": "success",
+        "execution_time": 0.9,
+        "timing": []
+      }
+    ],
+    "elapsed_time": 1.1
+  },
+  "manifest": {
+    "metadata": {
+      "dbt_version": "1.7.4",
+      "project_name": "staging",
+      "adapter_type": "trino",
+      "generated_at": "2025-01-02T00:00:00Z",
+      "invocation_id": "9c1d8e2f-3333-4444-5555-666666666666"
+    }
+  }
+}

@@ -5,7 +5,7 @@ Routes:
 - ``POST /v1/events``                 canonical ingestion (single or array, gzip ok)
 - ``POST /v1/ingest/{dagster,dbt,generic}``  source-specific ingestion
 - ``POST /v1/ingest/dbt/artifacts``   run_results + manifest document
-- ``POST /v1/ingest/otlp``            minimal OTLP/HTTP JSON logs ingestion
+- ``POST /v1/ingest/otlp``            OTLP/HTTP JSON logs -> one canonical event per logRecord
 - ``GET  /v1/events``                 filtered, cursor-paginated query
 - ``GET  /v1/events/{event_id}``      single event
 - ``GET  /v1/runs`` / ``/v1/runs/{id}`` / ``/v1/runs/{id}/timeline``
@@ -45,6 +45,7 @@ from phlo_observer.metrics import (
     INGEST_EVENTS,
     NORMALIZATION_DURATION,
     PERSIST_DURATION,
+    QUEUE_DEPTH,
 )
 from phlo_observer.retention import retention_loop
 from phlo_observer.settings import ObserverSettings, load_settings
@@ -212,6 +213,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     ) -> JSONResponse:
         """Shared ingestion pipeline: read -> raw store -> normalize -> persist."""
         body = await _body(request)
+        adapter = ADAPTERS[adapter_name or "canonical"]
+        source_version = request.headers.get("x-source-version") or adapter.version
         async with app.state.session_factory() as session, session.begin():
             raw = await store_raw(
                 session,
@@ -220,9 +223,12 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 body=body,
                 content_type=request.headers.get("content-type", "application/json"),
                 adapter=adapter_name,
+                source_version=source_version,
+                keep_payload=adapter.keep_payload,
+                max_payload_bytes=settings.max_raw_payload_bytes,
                 retention_days=settings.raw_retention_days,
             )
-            events, errors = _normalize(adapter_name, body)
+            events, errors = _normalize(adapter_name, body, source_version, request)
             if len(events) > settings.max_batch_events:
                 raw.normalization_status = "rejected"
                 raw.normalization_error = "batch too large"
@@ -287,14 +293,38 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         )
 
     def _normalize(
-        adapter_name: str | None, body: bytes
+        adapter_name: str | None,
+        body: bytes,
+        source_version: str | None = None,
+        request: Request | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Run the adapter; collect per-item failures as structured errors."""
         adapter = ADAPTERS[adapter_name or "canonical"]
+        metadata: dict[str, Any] = {}
+        if request is not None:
+            # Transport-level correlation headers flow into RawPayload.metadata
+            # so adapters (e.g. generic) can join events to runs/traces even
+            # when the producer body lacks the keys.
+            for header, key in (
+                ("x-run-id", "run_id"),
+                ("x-trace-id", "trace_id"),
+                ("x-request-id", "request_id"),
+                ("x-asset-key", "asset_key"),
+            ):
+                value = request.headers.get(header)
+                if value:
+                    metadata[key] = value
         try:
             start = time.perf_counter()
             batch = adapter.normalize(
-                RawPayload(producer=adapter.name, source_kind=adapter.name, body=body)
+                RawPayload(
+                    producer=adapter.name,
+                    source_kind=adapter.name,
+                    body=body,
+                    source_version=source_version,
+                    keep_payload=adapter.keep_payload,
+                    metadata=metadata,
+                )
             )
             NORMALIZATION_DURATION.observe(time.perf_counter() - start)
             record_normalization(adapter.name, "success" if not batch.errors else "partial")
@@ -373,8 +403,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         dependencies=[Depends(require_ingest_token)],
     )
     async def ingest_otlp(request: Request) -> Response:
-        """Minimal OTLP/HTTP JSON ingestion (collector-forwarded logs)."""
-        return await _ingest(request, producer="otlp", source_kind="logs", adapter_name="generic")
+        """OTLP/HTTP JSON ingestion (collector-forwarded logs)."""
+        return await _ingest(request, producer="otlp", source_kind="logs", adapter_name="otlp")
 
     # -- queries -------------------------------------------------------------
 
@@ -574,10 +604,14 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     metrics_deps = [] if settings.metrics_public else [Depends(require_read_token)]
 
     @app.get("/metrics", dependencies=metrics_deps)
-    async def metrics_endpoint() -> Response:
+    async def metrics_endpoint(request: Request) -> Response:
         """Prometheus exposition."""
         if not settings.metrics_enabled:
             raise _http_error(404, "metrics disabled")
+        # The observer's internal queue is the observe-core emission queue
+        # used for self-observation; report its depth (0 when disabled).
+        runtime = getattr(request.app.state, "observe_runtime", None)
+        QUEUE_DEPTH.set(runtime.queue_depth() if runtime is not None else 0)
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app

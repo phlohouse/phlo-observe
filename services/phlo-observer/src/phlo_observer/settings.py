@@ -52,6 +52,9 @@ class ObserverSettings(BaseSettings):
 
     max_body_bytes: int = 10 * 1024 * 1024
     max_batch_events: int = 1000
+    max_raw_payload_bytes: int = 256 * 1024
+    """Bodies larger than this are stored in raw_events as a SHA-256 digest
+    only, so very large artifacts are not duplicated (spec §34.3)."""
 
     metrics_enabled: bool = True
     metrics_public: bool = False
@@ -85,8 +88,19 @@ class ObserverSettings(BaseSettings):
     @field_validator("database_url", mode="before")
     @classmethod
     def _resolve_db_url(cls, value: object) -> object:
-        resolved = _file_or_value("PHLO_OBSERVER_DATABASE_URL")
-        return resolved if resolved is not None else value
+        # Only the _FILE variant is resolved here: the plain env var already
+        # arrives as ``value`` through pydantic-settings' env source, and
+        # constructor arguments must keep precedence over it. A mounted secret
+        # file is deliberate operator config, so it wins over both.
+        file_path = os.environ.get("PHLO_OBSERVER_DATABASE_URL_FILE")
+        if file_path:
+            try:
+                return Path(file_path).read_text().strip()
+            except OSError as exc:
+                raise ValueError(
+                    f"PHLO_OBSERVER_DATABASE_URL_FILE={file_path!r} is not readable: {exc}"
+                ) from exc
+        return value
 
     @property
     def ingest_token_set(self) -> frozenset[str]:

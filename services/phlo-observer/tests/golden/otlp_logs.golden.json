@@ -1,0 +1,106 @@
+[
+  {
+    "attributes": {
+      "body": "loaded batch",
+      "otel.scope": "ingest.loader",
+      "resource.service.instance.id": "worker-7",
+      "resource.service.name": "ingest-worker",
+      "resource.service.version": "1.4.2",
+      "rows": "14291"
+    },
+    "category": "other",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": "00f067aa0ba902b7",
+      "table": null,
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736"
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "ingestion.load",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "instance_id": "worker-7",
+      "name": "ingest-worker",
+      "version": "1.4.2"
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "otlp.1.0",
+      "ingested_at": null,
+      "kind": "logs",
+      "producer": "otlp",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "body": "validation failed",
+      "check": "not_null",
+      "otel.scope": "ingest.loader",
+      "resource.service.instance.id": "worker-7",
+      "resource.service.name": "ingest-worker",
+      "resource.service.version": "1.4.2"
+    },
+    "category": "other",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": null,
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "otlp.log",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "instance_id": "worker-7",
+      "name": "ingest-worker",
+      "version": "1.4.2"
+    },
+    "severity": "error",
+    "source": {
+      "adapter": "otlp.1.0",
+      "ingested_at": null,
+      "kind": "logs",
+      "producer": "otlp",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  }
+]

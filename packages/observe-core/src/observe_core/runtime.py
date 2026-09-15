@@ -157,6 +157,7 @@ class Runtime:
                 backoff_base_ms=cfg.backoff_base_ms,
                 backoff_cap_ms=cfg.backoff_cap_ms,
                 gzip_threshold_bytes=cfg.gzip_threshold_bytes,
+                spool_on_failure=cfg.spool_on_failure,
             )
         if isinstance(cfg, OtlpDrainConfig):
             from observe_core.drains.otlp import OtlpDrain  # noqa: PLC0415 - optional deps
@@ -210,10 +211,12 @@ class Runtime:
             if not builder._explicit_severity:
                 builder.severity = Severity.ERROR
             if builder.error is None:
+                capture = builder.capture_stacktrace
+                if capture is None:
+                    capture = self.settings.capture_stacktrace
                 builder.error = error_info_from_exception(
                     exc,
-                    include_traceback=self.settings.capture_stacktrace
-                    and not isinstance(exc, ObservedError),
+                    include_traceback=capture and not isinstance(exc, ObservedError),
                 )
         elif builder.outcome == Outcome.UNKNOWN:
             builder.outcome = Outcome.SUCCESS
@@ -312,34 +315,80 @@ class Runtime:
             self._spool(event)
             return
         if self.settings.drop_policy == "drop_oldest":
-            # Evict the oldest *event*, but never control sentinels: dropping a
-            # _FlushRequest would hang flush() and dropping _STOP would hang
-            # shutdown(). Sentinels pulled while scanning are re-queued.
-            held: list[Any] = []
-            evicted: Any = None
-            try:
-                while True:
-                    item = self._queue.get_nowait()
-                    if isinstance(item, CanonicalEvent):
-                        evicted = item
-                        break
-                    held.append(item)
-            except queue.Empty:
-                pass
-            for item in held:
-                with contextlib.suppress(queue.Full):
-                    self._queue.put_nowait(item)
+            evicted = self._evict_oldest_event()
             if evicted is not None:
-                self.stats.incr(
-                    "dropped_debug" if evicted.delivery == Delivery.DEBUG else "dropped_telemetry"
-                )
+                if evicted.delivery == Delivery.CRITICAL:
+                    # Critical events are never silently dropped: an evicted
+                    # one goes to the spool instead (spec §12.1).
+                    self._spool(evicted)
+                else:
+                    self.stats.incr(
+                        "dropped_debug"
+                        if evicted.delivery == Delivery.DEBUG
+                        else "dropped_telemetry"
+                    )
             try:
                 self._queue.put_nowait(event)
                 self.stats.incr("enqueued")
             except queue.Full:
-                self._drop_noncritical(event.delivery)
+                if event.delivery == Delivery.CRITICAL:
+                    self._spool(event)
+                else:
+                    self._drop_noncritical(event.delivery)
         else:
             self._drop_noncritical(event.delivery)
+
+    def _evict_oldest_event(self) -> CanonicalEvent | None:
+        """Remove one queued event to make room, preferring non-critical ones.
+
+        Control sentinels (``_FlushRequest``/``_STOP``) are never evicted:
+        dropping one would hang ``flush()``/``shutdown()``. Critical events
+        are evicted only when the queue holds nothing else; the caller spools
+        them rather than counting a drop. Items pulled during the scan are
+        re-queued in their original order.
+        """
+        held: list[Any] = []
+        evicted: CanonicalEvent | None = None
+        oldest_critical: CanonicalEvent | None = None
+        try:
+            while True:
+                item = self._queue.get_nowait()
+                if isinstance(item, CanonicalEvent):
+                    if item.delivery == Delivery.CRITICAL:
+                        if oldest_critical is None:
+                            oldest_critical = item
+                        held.append(item)
+                        continue
+                    evicted = item
+                    break
+                held.append(item)
+        except queue.Empty:
+            pass
+        if evicted is None and oldest_critical is not None:
+            # Queue holds only criticals/sentinels: the oldest critical makes
+            # room and is spooled by the caller.
+            held.remove(oldest_critical)
+            evicted = oldest_critical
+        for item in held:
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                # A racing producer refilled the slot between the scan and the
+                # re-put. Sentinels must never be lost; criticals go to the
+                # spool; anything else counts as a normal drop.
+                if isinstance(item, CanonicalEvent):
+                    if item.delivery == Delivery.CRITICAL:
+                        self._spool(item)
+                    else:
+                        self.stats.incr(
+                            "dropped_debug"
+                            if item.delivery == Delivery.DEBUG
+                            else "dropped_telemetry"
+                        )
+                else:
+                    with contextlib.suppress(queue.Full):
+                        self._queue.put(item, timeout=0.5)
+        return evicted
 
     def _drop_noncritical(self, delivery: Delivery) -> None:
         field = "dropped_debug" if delivery == Delivery.DEBUG else "dropped_telemetry"
@@ -397,12 +446,20 @@ class Runtime:
             try:
                 drain.emit_batch(batch)
                 self.stats.incr("emitted_events", len(batch))
-            except Exception as error:  # drain isolation
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as error:  # drain isolation
                 self.stats.incr("drain_errors")
                 _diag(f"drain {getattr(drain, 'name', '?')} failed: {error}")
-                for event in batch:
-                    if event.delivery == Delivery.CRITICAL:
-                        self._spool(event)
+                # Spool criticals when a remote drain rejects them and that
+                # drain opted in (HttpDrainConfig.spool_on_failure). Local
+                # drain failures are counted but never spooled: the spool
+                # replays to remote drains only.
+                wants_spool = getattr(drain, "spool_on_failure", True)
+                if getattr(drain, "is_remote", False) and wants_spool:
+                    for event in batch:
+                        if event.delivery == Delivery.CRITICAL:
+                            self._spool(event)
         self.stats.incr("emitted_batches")
 
     def _flush_drains(self) -> None:
@@ -423,7 +480,9 @@ class Runtime:
             if getattr(drain, "is_remote", False):
                 try:
                     self.spool.replay(drain)
-                except Exception as error:
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException as error:
                     _diag(f"spool replay via {drain.name} failed: {error}")
 
     # -- lifecycle ----------------------------------------------------------------

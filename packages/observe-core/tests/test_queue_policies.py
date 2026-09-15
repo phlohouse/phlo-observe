@@ -108,6 +108,113 @@ def test_critical_event_spooled_when_queue_full(make_runtime, tmp_path):
         shutdown(2.0)
 
 
+def test_drop_oldest_prefers_evicting_telemetry(make_runtime, tmp_path):
+    """Under drop_oldest, a queued critical event survives telemetry pressure."""
+    gate = threading.Event()
+    rt = _stall_runtime(
+        make_runtime,
+        gate,
+        drop_policy="drop_oldest",
+        queue_capacity=3,
+        spool_enabled=True,
+        spool_dir=tmp_path / "spool",
+    )
+    try:
+        event("wap.promote", delivery="critical")  # queued first, has room
+        for _ in range(5):
+            event("application.log")
+        queued = [item.event for item in rt._queue.queue if isinstance(item, CanonicalEvent)]
+        assert "wap.promote" in queued, "critical event was evicted over telemetry"
+        stats = rt.stats.snapshot()
+        assert stats["spooled_events"] == 0
+        assert stats["dropped_telemetry"] >= 3
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
+def test_drop_oldest_spools_evicted_critical(make_runtime, tmp_path):
+    """Regression: evicting a queued critical event must spool it, not drop it.
+
+    Previously an evicted critical was counted as dropped_telemetry and lost.
+    """
+    gate = threading.Event()
+    rt = _stall_runtime(
+        make_runtime,
+        gate,
+        drop_policy="drop_oldest",
+        queue_capacity=3,
+        spool_enabled=True,
+        spool_dir=tmp_path / "spool",
+    )
+    try:
+        for i in range(3):
+            event("wap.promote", delivery="critical", attributes={"i": i})
+        # Queue now holds only criticals; one more event evicts the oldest.
+        event("application.log")
+        stats = rt.stats.snapshot()
+        assert stats["spooled_events"] == 1
+        assert rt.spool is not None
+        bodies = b"\n".join(
+            line for seg in rt.spool._segments() for line in seg.read_bytes().splitlines()
+        )
+        assert b"wap.promote" in bodies
+        assert stats["dropped_telemetry"] == 0
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
+def test_remote_drain_failure_spools_criticals(make_runtime, tmp_path):
+    """A failing remote drain spools criticals (spool_on_failure default on)."""
+    gate = threading.Event()
+    rt = _stall_runtime(make_runtime, gate, spool_enabled=True, spool_dir=tmp_path / "spool")
+    gate.set()
+
+    class FailingRemote(MemoryDrain):
+        is_remote = True
+
+        def emit_batch(self, events):
+            raise RuntimeError("observer down")
+
+    rt.drains.clear()
+    rt.drains.append(FailingRemote())
+    try:
+        event("wap.promote", delivery="critical")
+        event("application.log")
+        flush(3.0)
+        stats = rt.stats.snapshot()
+        assert stats["drain_errors"] >= 1
+        assert stats["spooled_events"] == 1
+    finally:
+        shutdown(2.0)
+
+
+def test_spool_on_failure_disabled_skips_spooling(make_runtime, tmp_path):
+    """HttpDrainConfig.spool_on_failure=False must not spool on drain failure."""
+    gate = threading.Event()
+    rt = _stall_runtime(make_runtime, gate, spool_enabled=True, spool_dir=tmp_path / "spool")
+    gate.set()
+
+    class FailingRemote(MemoryDrain):
+        is_remote = True
+        spool_on_failure = False
+
+        def emit_batch(self, events):
+            raise RuntimeError("observer down")
+
+    rt.drains.clear()
+    rt.drains.append(FailingRemote())
+    try:
+        event("wap.promote", delivery="critical")
+        flush(3.0)
+        stats = rt.stats.snapshot()
+        assert stats["drain_errors"] >= 1
+        assert stats["spooled_events"] == 0
+    finally:
+        shutdown(2.0)
+
+
 def test_oversized_event_truncated(make_runtime):
     rt = make_runtime(max_event_bytes=4_096)
     drain = rt.drains[0]

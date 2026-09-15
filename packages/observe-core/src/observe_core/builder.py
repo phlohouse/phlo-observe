@@ -31,6 +31,7 @@ class EventBuilder:
     __slots__ = (
         "_explicit_severity",
         "attributes",
+        "capture_stacktrace",
         "category",
         "correlation",
         "delivery",
@@ -52,6 +53,7 @@ class EventBuilder:
         delivery: Delivery = Delivery.TELEMETRY,
         severity: Severity | None = None,
         attributes: dict[str, Any] | None = None,
+        capture_stacktrace: bool | None = None,
     ) -> None:
         self.event = event
         self.category = category
@@ -66,6 +68,8 @@ class EventBuilder:
         self.started_at: dt.datetime | None = None
         self.ended_at: dt.datetime | None = None
         self.duration_ms: float | None = None
+        self.capture_stacktrace = capture_stacktrace
+        """Per-operation stacktrace override; None defers to settings."""
 
     def set(self, **attributes: Any) -> None:
         """Set multiple attribute values at once."""

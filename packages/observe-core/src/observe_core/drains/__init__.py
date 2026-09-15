@@ -1,6 +1,11 @@
 """Drain implementations and the shared drain protocol."""
 
-from observe_core.drains.base import CanonicalEvent, Drain, DrainFailure
+from observe_core.drains.base import (
+    CanonicalEvent,
+    Drain,
+    DrainFailure,
+    PermanentDrainFailure,
+)
 from observe_core.drains.console import ConsoleDrain
 from observe_core.drains.http import HttpDrain
 from observe_core.drains.jsonl import JsonlDrain
@@ -14,4 +19,5 @@ __all__ = [
     "HttpDrain",
     "JsonlDrain",
     "OtlpDrain",
+    "PermanentDrainFailure",
 ]

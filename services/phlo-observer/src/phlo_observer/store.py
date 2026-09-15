@@ -27,6 +27,7 @@ logger = logging.getLogger("phlo_observer.store")
 
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 1000
+DEFAULT_MAX_RAW_PAYLOAD_BYTES = 256 * 1024
 
 
 class InvalidQuery(ValueError):
@@ -57,9 +58,16 @@ async def store_raw(
     content_type: str = "application/json",
     adapter: str | None = None,
     source_version: str | None = None,
+    keep_payload: bool = True,
+    max_payload_bytes: int = DEFAULT_MAX_RAW_PAYLOAD_BYTES,
     retention_days: int = 14,
 ) -> RawEvent:
-    """Preserve the incoming payload for debugging normalization."""
+    """Preserve the incoming payload for debugging normalization.
+
+    ``keep_payload=False`` (per-adapter opt-out, spec §36) retains only the
+    SHA-256 digest; payloads over ``max_payload_bytes`` are likewise reduced
+    to a digest rather than duplicating very large artifacts (spec §34.3).
+    """
     now = utcnow()
     raw = RawEvent(
         received_at=now,
@@ -67,7 +75,11 @@ async def store_raw(
         source_kind=source_kind,
         source_version=source_version,
         content_type=content_type,
-        payload=_stored_payload(body),
+        payload=(
+            _stored_payload(body, max_bytes=max_payload_bytes)
+            if keep_payload
+            else _payload_digest(body)
+        ),
         payload_sha256=hashlib.sha256(body).hexdigest(),
         adapter=adapter,
         expires_at=now + dt.timedelta(days=retention_days),
@@ -77,10 +89,16 @@ async def store_raw(
     return raw
 
 
-def _stored_payload(body: bytes) -> dict[str, Any] | list[Any]:
+def _payload_digest(body: bytes) -> dict[str, Any]:
+    return {"_encoding": "sha256", "sha256": hashlib.sha256(body).hexdigest()}
+
+
+def _stored_payload(
+    body: bytes, *, max_bytes: int = DEFAULT_MAX_RAW_PAYLOAD_BYTES
+) -> dict[str, Any] | list[Any]:
     """Best-effort payload retention: JSON if parseable, else bounded text."""
-    if len(body) > 64 * 1024:
-        return {"_encoding": "sha256", "sha256": hashlib.sha256(body).hexdigest()}
+    if len(body) > max_bytes:
+        return _payload_digest(body)
     try:
         parsed = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):

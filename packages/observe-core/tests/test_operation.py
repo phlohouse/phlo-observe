@@ -67,6 +67,41 @@ def test_observed_error_fields_propagate(captured: tuple[Runtime, MemoryDrain]):
     assert ev["outcome"] == "failure"
 
 
+def test_capture_stacktrace_off_per_operation(captured: tuple[Runtime, MemoryDrain]):
+    """observe(capture_stacktrace=False) overrides the enabled global default."""
+    _, drain = captured
+    with pytest.raises(ValueError), observe("transform.execute", capture_stacktrace=False):
+        raise ValueError("boom")
+    (ev,) = _data(drain)
+    assert ev["error"]["exception_type"] == "ValueError"
+    assert ev["error"]["stacktrace"] is None
+
+
+def test_capture_stacktrace_on_per_operation(make_runtime):
+    """observe(capture_stacktrace=True) overrides a disabled global default."""
+    rt = make_runtime(capture_stacktrace=False)
+    drain = rt.drains[0]
+    with pytest.raises(ValueError), observe("transform.execute", capture_stacktrace=True):
+        raise ValueError("boom")
+    (ev,) = _data(drain)
+    assert ev["error"]["stacktrace"] is not None
+
+
+def test_duration_matches_wall_timestamps(captured: tuple[Runtime, MemoryDrain]):
+    """duration_ms must satisfy the envelope invariant (ended - started)."""
+    from observe_core.models import DURATION_TOLERANCE_MS
+    from observe_core.timestamps import parse_rfc3339
+
+    _, drain = captured
+    with observe("ingestion.load"):
+        pass
+    (ev,) = _data(drain)
+    wall_ms = (
+        parse_rfc3339(ev["ended_at"]) - parse_rfc3339(ev["started_at"])
+    ).total_seconds() * 1000.0
+    assert abs(wall_ms - ev["duration_ms"]) <= DURATION_TOLERANCE_MS
+
+
 def test_overrides(captured: tuple[Runtime, MemoryDrain]):
     _, drain = captured
     with observe("ingestion.load", delivery="critical", severity="warn") as evt:

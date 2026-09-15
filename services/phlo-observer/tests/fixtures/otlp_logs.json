@@ -1,0 +1,41 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "ingest-worker"}},
+          {"key": "service.version", "value": {"stringValue": "1.4.2"}},
+          {"key": "service.instance.id", "value": {"stringValue": "worker-7"}}
+        ]
+      },
+      "scopeLogs": [
+        {
+          "scope": {"name": "ingest.loader"},
+          "logRecords": [
+            {
+              "timeUnixNano": "1735689600000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "body": {"stringValue": "loaded batch"},
+              "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+              "spanId": "00f067aa0ba902b7",
+              "attributes": [
+                {"key": "event.name", "value": {"stringValue": "ingestion.load"}},
+                {"key": "rows", "value": {"intValue": "14291"}}
+              ]
+            },
+            {
+              "timeUnixNano": "1735689601000000000",
+              "severityNumber": 17,
+              "severityText": "ERROR",
+              "body": {"stringValue": "validation failed"},
+              "attributes": [
+                {"key": "check", "value": {"stringValue": "not_null"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

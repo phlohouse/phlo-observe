@@ -1,0 +1,56 @@
+[
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "STARTED",
+    "timestamp": "2025-01-01T00:00:00Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "STEP_START",
+    "step_key": "extract_orders",
+    "timestamp": "2025-01-01T00:00:01Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "ASSET_MATERIALIZATION",
+    "asset_key": "mart.fct_orders",
+    "timestamp": "2025-01-01T00:00:02Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "ASSET_CHECK_EVALUATION",
+    "asset_key": "mart.fct_orders",
+    "check_name": "order_id_not_null",
+    "passed": true,
+    "timestamp": "2025-01-01T00:00:03Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "STEP_SUCCESS",
+    "step_key": "extract_orders",
+    "timestamp": "2025-01-01T00:00:04Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "SUCCESS",
+    "timestamp": "2025-01-01T00:00:05Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "ENGINE_EVENT",
+    "timestamp": "2025-01-01T00:00:06Z"
+  },
+  {
+    "run_id": "7f3a9b21d0c44f2c",
+    "job_name": "nightly_etl",
+    "event_type": "LOGS_CAPTURED",
+    "timestamp": "2025-01-01T00:00:07Z"
+  }
+]

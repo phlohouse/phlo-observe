@@ -1,0 +1,216 @@
+[
+  {
+    "attributes": {
+      "args": null,
+      "dbt_version": "1.7.4",
+      "elapsed_time_s": 4.8,
+      "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+      "results_count": 3
+    },
+    "category": "pipeline",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.invocation",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "unknown",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "adapter_code": "OK",
+      "execution_time_s": 1.25,
+      "name": "fct_orders",
+      "rows_affected": 14291,
+      "status": "success",
+      "unique_id": "model.mart.fct_orders"
+    },
+    "category": "data",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.model.execute",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "execution_time_s": 0.31,
+      "failures": 0,
+      "name": "fct_orders__order_id_not_null",
+      "status": "pass",
+      "unique_id": "test.mart.fct_orders__order_id_not_null"
+    },
+    "category": "quality",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.test.execute",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "success",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "info",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  },
+  {
+    "attributes": {
+      "adapter_code": "QUERY_FAILED",
+      "adapter_message": "relation does not exist",
+      "execution_time_s": 0.02,
+      "name": "dim_customers",
+      "status": "error",
+      "unique_id": "model.mart.dim_customers"
+    },
+    "category": "data",
+    "correlation": {
+      "asset_key": null,
+      "branch": null,
+      "experiment_id": null,
+      "extra": {},
+      "invocation_id": "5f3f2f10-aaaa-bbbb-cccc-111111111111",
+      "job_id": null,
+      "parent_span_id": null,
+      "partition_key": null,
+      "pipeline": null,
+      "request_id": null,
+      "run_id": null,
+      "snapshot_id": null,
+      "span_id": null,
+      "table": null,
+      "trace_id": null
+    },
+    "delivery": "telemetry",
+    "duration_ms": null,
+    "ended_at": null,
+    "error": null,
+    "event": "dbt.model.execute",
+    "event_id": "<event-id>",
+    "observed_at": "<observed-at>",
+    "outcome": "failure",
+    "schema_version": "1.0",
+    "service": {
+      "environment": null,
+      "host": null,
+      "instance_id": null,
+      "name": "dbt",
+      "version": null
+    },
+    "severity": "error",
+    "source": {
+      "adapter": "dbt.1.0",
+      "ingested_at": null,
+      "kind": "run_results",
+      "producer": "dbt",
+      "producer_version": null,
+      "raw_ref": null
+    },
+    "started_at": null
+  }
+]

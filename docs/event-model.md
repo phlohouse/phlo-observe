@@ -38,8 +38,9 @@ Every event is a canonical envelope (`schemas/event-envelope-v1.schema.json`):
 ## Naming
 
 `domain.action` — `pipeline.run`, `pipeline.step`, `asset.materialize`,
-`asset.check`, `quality.check`, `table.commit`, `wap.create`, `wap.merge`,
-`wap.promote`, `dbt.model`, `dbt.test`, `external.source_event`.
+`quality.validate`, `quality.check`, `wap.branch.create`, `wap.validate`,
+`wap.promote`, `wap.reject`, `dbt.model.execute`, `dbt.test.execute`,
+`iceberg.commit`, `nessie.commit`, `external.source_event`.
 
 ## Errors
 

@@ -44,6 +44,7 @@ async def test_metrics_endpoint(client: AsyncClient, make_event: Any) -> None:
     assert "phlo_observer_ingest_events_total" in text_body
     assert "phlo_observer_events_stored_total" in text_body
     assert "phlo_observer_http_requests_total" in text_body
+    assert "phlo_observer_queue_depth" in text_body
 
 
 @pytest.mark.asyncio

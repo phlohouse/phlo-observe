@@ -13,12 +13,14 @@ from phlo_observer.adapters.canonical import CanonicalAdapter
 from phlo_observer.adapters.dagster import DagsterAdapter
 from phlo_observer.adapters.dbt import DbtAdapter
 from phlo_observer.adapters.generic import GenericAdapter
+from phlo_observer.adapters.otlp import OtlpAdapter
 
 ADAPTERS: dict[str, SourceAdapter] = {
     "canonical": CanonicalAdapter(),
     "dagster": DagsterAdapter(),
     "dbt": DbtAdapter(),
     "generic": GenericAdapter(),
+    "otlp": OtlpAdapter(),
 }
 """Adapters keyed by the ``/v1/ingest/{name}`` route segment."""
 
@@ -30,6 +32,7 @@ __all__ = [
     "DbtAdapter",
     "GenericAdapter",
     "NormalizedBatch",
+    "OtlpAdapter",
     "RawPayload",
     "SourceAdapter",
     "envelope_for",
