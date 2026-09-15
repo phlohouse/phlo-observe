@@ -16,14 +16,14 @@ secret file, e.g. `PHLO_OBSERVER_INGEST_TOKENS_FILE=/run/secrets/tokens`.
 | `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` | `10` / `10` | Connection pool |
 | `INGEST_TOKENS` | — | Comma-separated write tokens; empty = dev mode; `_FILE` supported |
 | `READ_TOKENS` | — | Comma-separated query tokens; empty = dev mode; `_FILE` supported |
-| `AUTH_OPTIONAL_DEV` | `true` | `false` hard-fails startup without tokens |
+| `AUTH_OPTIONAL_DEV` | `true` | `false` hard-fails startup unless both token sets are configured |
 | `RAW_RETENTION_DAYS` | `14` | `raw_events.expires_at` sweep |
 | `EVENT_RETENTION_DAYS` | `90` | normalized event TTL |
 | `RUN_RETENTION_DAYS` | `365` | run projection TTL |
 | `RETENTION_INTERVAL_S` | `3600` | in-process sweep cadence |
 | `MAX_BODY_BYTES` | `10485760` | request limit, wire and decompressed size |
 | `MAX_BATCH_EVENTS` | `1000` | events per request |
-| `OTLP_ENDPOINT` | — | optional HTTP endpoint to forward normalized events |
+| `OTLP_ENDPOINT` | — | optional OTLP/HTTP logs destination for accepted events; a bare collector base (`http://host:4318`) gets `/v1/logs` appended |
 | `METRICS_ENABLED` | `true` | expose `/metrics` |
 | `METRICS_PUBLIC` | `false` | `true` skips the read-token check on `/metrics` |
 | `DOCS_ENABLED` | `true` | serve `/docs` + `/openapi.json`; disable for hardened deployments |

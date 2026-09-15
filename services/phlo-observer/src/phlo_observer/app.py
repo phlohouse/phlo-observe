@@ -86,7 +86,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if self_observe_configs:
-            observe_core.configure(
+            app.state.observe_runtime = observe_core.configure(
                 service_name="phlo-observer",
                 service_version=__version__,
                 drains=self_observe_configs,
@@ -121,6 +121,12 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             retention_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await retention_task
+            # Bound in-flight OTLP forwards: give them a moment, then cancel.
+            pending = [t for t in app.state.forward_tasks if not t.done()]
+            if pending:
+                _, still_pending = await asyncio.wait(pending, timeout=2.0)
+                for task in still_pending:
+                    task.cancel()
             await engine.dispose()
             if app.state.self_observe:
                 observe_core.shutdown()
@@ -136,6 +142,8 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     # Lifespan flips this on when internal drains are configured; tests and
     # embedders that bypass lifespan still get a defined value.
     app.state.self_observe = False
+    app.state.observe_runtime = None
+    app.state.forward_tasks = set()
 
     @app.exception_handler(InvalidQuery)
     async def invalid_query_handler(request: Request, exc: InvalidQuery) -> JSONResponse:
@@ -236,8 +244,14 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             start = time.perf_counter()
             result = await persist_events(session, events, raw_event_id=raw.id)
             PERSIST_DURATION.observe(time.perf_counter() - start)
-            if settings.otlp_endpoint and result.accepted:
-                await forward_events(events, settings.otlp_endpoint)
+            if settings.otlp_endpoint and result.event_ids:
+                accepted_ids = set(result.event_ids)
+                forwarded = [e for e in events if e.get("event_id") in accepted_ids]
+                if forwarded:
+                    # Fire-and-forget: forwarding must never delay ingestion.
+                    task = asyncio.create_task(forward_events(forwarded, settings.otlp_endpoint))
+                    app.state.forward_tasks.add(task)
+                    task.add_done_callback(app.state.forward_tasks.discard)
             result.errors = errors + result.errors
             result.rejected += len(errors)
             raw.normalization_status = "ok" if not errors else "partial"
@@ -534,6 +548,11 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             return JSONResponse(
                 {"status": "not_ready", "retention_worker": "stopped"}, status_code=503
             )
+        observe_runtime = getattr(request.app.state, "observe_runtime", None)
+        if observe_runtime is not None and not observe_runtime.workers_alive():
+            return JSONResponse(
+                {"status": "not_ready", "observe_worker": "stopped"}, status_code=503
+            )
         async with request.app.state.session_factory() as session:
             try:
                 version = (
@@ -615,6 +634,9 @@ def _event_json(row: Any) -> dict[str, Any]:
         "attributes": row.attributes,
         "error": row.error,
         "source": row.source,
+        # The canonical envelope as received: correlation.extra and any other
+        # envelope extensions live only here.
+        "payload": row.payload,
     }
 
 

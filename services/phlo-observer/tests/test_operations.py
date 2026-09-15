@@ -55,9 +55,12 @@ async def test_retention_cleanup(session_factory: Any, database_url: str, make_e
         run_retention_days=365,
     )
     old = utcnow() - dt.timedelta(days=400)
+    raw_id = uuid.uuid4()
+    linked_event_id = uuid.uuid4()
     async with session_factory() as session, session.begin():
         session.add(
             RawEvent(
+                id=raw_id,
                 received_at=old,
                 producer="p",
                 source_kind="k",
@@ -82,11 +85,37 @@ async def test_retention_cleanup(session_factory: Any, database_url: str, make_e
                 source={},
             )
         )
+        # A fresh event still referencing the expired raw row — the realistic
+        # case: raw retention (14d) expires before event retention (90d).
+        # Flush the parent first, mirroring store_raw() -> persist_events().
+        await session.flush()
+        session.add(
+            Event(
+                event_id=linked_event_id,
+                schema_version="1.0",
+                event="pipeline.step",
+                category="pipeline",
+                outcome="success",
+                severity="info",
+                delivery="telemetry",
+                observed_at=utcnow(),
+                received_at=utcnow(),
+                attributes={},
+                source={},
+                payload={},
+                raw_event_id=raw_id,
+            )
+        )
         session.add(Run(run_id="old-run", status="success", updated_at=old, summary={}))
     report = await run_retention_once(session_factory, settings)
     assert report.raw_events == 1
     assert report.events == 1
     assert report.runs == 1
+    # The linked event survives; ON DELETE SET NULL clears its reference.
+    async with session_factory() as session:
+        surviving = await session.get(Event, linked_event_id)
+        assert surviving is not None
+        assert surviving.raw_event_id is None
 
 
 @pytest.mark.asyncio

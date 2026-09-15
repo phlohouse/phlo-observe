@@ -75,6 +75,8 @@ def check() -> None:
         raise typer.Exit(code=1) from exc
     if not settings.ingest_token_set:
         typer.echo("warning: no ingest tokens configured (dev mode)")
+    if not settings.read_token_set:
+        typer.echo("warning: no read tokens configured (dev mode)")
 
     async def _check() -> bool:
         engine = make_engine(settings)

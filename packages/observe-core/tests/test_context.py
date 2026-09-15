@@ -171,6 +171,13 @@ def test_shutdown_idempotent(make_runtime):
     shutdown(1.0)
 
 
+def test_workers_alive_reports_thread_state(make_runtime):
+    rt = make_runtime()
+    assert rt.workers_alive()
+    rt.shutdown(timeout=2.0)
+    assert not rt.workers_alive()
+
+
 def test_configure_with_kwargs():
     rt = configure(service_name="kwarg-service", drains=[{"type": "memory"}])
     try:

@@ -47,4 +47,4 @@ normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
 ## Status
 
 V1 implemented: core pipeline, SDK integrations, and the observer service are
-tested (202 tests incl. real-Postgres + live-HTTP end-to-end) and CI-gated.
+tested (250+ tests incl. real-Postgres + live-HTTP end-to-end) and CI-gated.

@@ -329,6 +329,28 @@ def test_require_tokens_hard_fails_app_creation(database_url: str) -> None:
         create_app(ObserverSettings(database_url=database_url, auth_optional_dev=False))
 
 
+def test_require_tokens_needs_read_tokens_too(database_url: str) -> None:
+    """Ingest-only tokens leave queries open — not a hardened deployment."""
+    from phlo_observer.settings import ObserverSettings
+
+    settings = ObserverSettings(
+        database_url=database_url, ingest_tokens="t1", auth_optional_dev=False
+    )
+    with pytest.raises(ValueError, match="read tokens"):
+        settings.require_tokens()
+
+
+def test_require_tokens_passes_with_both(database_url: str) -> None:
+    from phlo_observer.settings import ObserverSettings
+
+    ObserverSettings(
+        database_url=database_url,
+        ingest_tokens="t1",
+        read_tokens="t2",
+        auth_optional_dev=False,
+    ).require_tokens()
+
+
 def test_self_observe_drains_reject_http(database_url: str) -> None:
     from phlo_observer.settings import ObserverSettings
 

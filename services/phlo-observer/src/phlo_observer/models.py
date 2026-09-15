@@ -82,7 +82,7 @@ class Event(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     """Full canonical envelope as received; basis for duplicate detection."""
     raw_event_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("raw_events.id"), nullable=True
+        Uuid, ForeignKey("raw_events.id", ondelete="SET NULL"), nullable=True
     )
 
     __table_args__ = (

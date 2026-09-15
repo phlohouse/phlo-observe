@@ -99,11 +99,23 @@ class ObserverSettings(BaseSettings):
         return frozenset(self.read_tokens)
 
     def require_tokens(self) -> None:
-        """Fail fast when auth is disabled outside a dev deployment."""
-        if not self.ingest_tokens and not self.auth_optional_dev:
+        """Fail fast when auth is disabled outside a dev deployment.
+
+        With ``auth_optional_dev=false`` both surfaces must be locked down:
+        missing ingest tokens leave writes open and missing read tokens leave
+        queries open — a partially configured token set is not "hardened".
+        """
+        if self.auth_optional_dev:
+            return
+        missing = []
+        if not self.ingest_tokens:
+            missing.append("ingest tokens (PHLO_OBSERVER_INGEST_TOKENS)")
+        if not self.read_tokens:
+            missing.append("read tokens (PHLO_OBSERVER_READ_TOKENS)")
+        if missing:
             raise ValueError(
-                "No ingest tokens configured and PHLO_OBSERVER_AUTH_OPTIONAL_DEV=false. "
-                "Set PHLO_OBSERVER_INGEST_TOKENS (or *_FILE) before serving."
+                f"PHLO_OBSERVER_AUTH_OPTIONAL_DEV=false but {' and '.join(missing)} "
+                "are missing. Configure them (or *_FILE variants) before serving."
             )
 
     def self_observe_drain_configs(self) -> list[dict[str, Any]]:

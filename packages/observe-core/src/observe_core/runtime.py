@@ -432,6 +432,10 @@ class Runtime:
         """Current number of events waiting in the queue."""
         return self._queue.qsize()
 
+    def workers_alive(self) -> bool:
+        """True while every worker thread is running its drain loop."""
+        return all(worker.is_alive() for worker in self._workers)
+
     def flush(self, timeout: float = 5.0) -> bool:
         """Wait until queued events have been handed to drains. Bounded."""
         if self._closed:
