@@ -10,6 +10,30 @@ V1 is intentionally split into three components:
 
 The implementation contract is in [`docs/V1_SPEC.md`](docs/V1_SPEC.md).
 
+## First event in under five minutes
+
+`observe-core` needs nothing but Python 3.12+ — no database, no server:
+
+```bash
+pip install observe-core
+```
+
+```python
+from observe_core import configure, observe
+
+configure(service_name="demo")
+
+with observe("demo.work") as evt:
+    evt.set(rows_loaded=1000)
+```
+
+```text
+2025-01-01T00:00:00.000Z INFO     demo.work                        success 0ms service=demo
+```
+
+One wide event per operation, printed by the console drain by default. Add an
+`HttpDrainConfig` to point the same call at the observer below.
+
 ## Quickstart
 
 ```bash
@@ -48,3 +72,13 @@ normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
 
 V1 implemented: core pipeline, SDK integrations, and the observer service are
 tested (250+ tests incl. real-Postgres + live-HTTP end-to-end) and CI-gated.
+
+## Audit versus observability
+
+`phlo-observe` is an operational observability system. It may record decisions
+such as WAP promotion for visibility, but V1 is not by itself a validated
+authoritative electronic audit trail for GxP records.
+
+If regulated workflows later depend on it as a system of record, separate
+requirements for immutability, identity, validation, retention, review,
+electronic signatures and change control are required.

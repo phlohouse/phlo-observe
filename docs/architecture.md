@@ -24,7 +24,7 @@ other sources ─────┘   POST /v1/ingest/generic
 
 ```text
 observe()/event() call
-  -> EventBuilder merges ambient context
+  -> EventBuilder merges operation + ambient context
   -> normalize attribute values
   -> enrichers
   -> redact sensitive keys
@@ -47,7 +47,24 @@ source payload
   -> optional OTLP forward (fire-and-forget)
 ```
 
-## Correlation precedence
+## Run correlation flow
+
+```text
+event arrives
+   │ correlation.run_id present?
+   ├─ yes ─> correlate to run (method: explicit_run_id, confidence 1.0)
+   └─ no
+      │ trace_id already carries a run_id on an earlier sibling event?
+      ├─ yes ─> inherit that run_id (method: trace_id)
+      └─ no  ─> stays uncorrelated
+                 (invocation_id is recorded for observability but never
+                  joins a run on its own — no proximity guessing)
+
+correlated events -> upsert run projection row
+                     (first seen_at / last seen_at / counts / outcome rollup)
+```
+
+Correlation precedence:
 
 1. explicit `correlation.run_id` (confidence 1.0)
 2. `trace_id` — inherits `run_id` from a sibling event already correlated
@@ -65,3 +82,13 @@ internet -> LB -> phlo-observer (n>=1, stateless) -> PostgreSQL
 
 Each replica runs an hourly retention sweep; sweeps are idempotent deletes so
 overlapping runs are safe.
+
+## Audit versus observability
+
+`phlo-observe` is an operational observability system. It may record decisions
+such as WAP promotion for visibility, but V1 is not by itself a validated
+authoritative electronic audit trail for GxP records.
+
+If regulated workflows later depend on it as a system of record, separate
+requirements for immutability, identity, validation, retention, review,
+electronic signatures and change control are required.

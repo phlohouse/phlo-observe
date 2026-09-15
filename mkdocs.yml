@@ -33,6 +33,7 @@ nav:
   - Configuration: configuration.md
   - Integrations: integrations.md
   - Deployment: deployment.md
+  - Performance: performance.md
   - Troubleshooting: troubleshooting.md
   - Examples: examples.md
 

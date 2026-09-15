@@ -28,13 +28,18 @@ uv run pytest              # full test suite
 uv build --all-packages    # build wheels
 ```
 
-Observer integration tests need PostgreSQL. The fastest local option:
+Observer integration tests need PostgreSQL. `docker compose up -d postgres`
+provisions `phlo_observer_test` alongside the dev database (via
+`docker/postgres/initdb`, first init only — `docker compose down -v` recreates
+it). Tests target it by default:
 
 ```bash
 docker compose up -d postgres
-export PHLO_OBSERVER_TEST_DATABASE_URL=postgresql+asyncpg://phlo:phlo@localhost:5432/phlo_observer_test
 uv run pytest services/phlo-observer/tests tests/integration
 ```
+
+Point `PHLO_OBSERVER_TEST_DATABASE_URL` elsewhere to use a different instance.
+Tests skip cleanly when Postgres is unreachable.
 
 ## Code standards
 
@@ -49,11 +54,13 @@ uv run pytest services/phlo-observer/tests tests/integration
 - **New drain**: implement `observe_core.drains.base.Drain` (`emit_batch`, `flush`,
   `close`), register a `DrainConfig` variant, add tests for failure behaviour.
 - **New adapter**: implement `phlo_observer.adapters.base.SourceAdapter`
-  (`can_handle`, `normalize`), add fixture payloads + golden event tests, wire it
-  into `adapters/registry.py`.
-- **New event name**: add it to `phlo_observe.events.PhloEvents` (SDK) or emit a
-  `application.*`/`other` category event from core directly. Names are
-  lowercase, dot-delimited, never carry IDs or status suffixes.
+  (`can_handle`, `normalize`), register it in the `ADAPTERS` dict in
+  `phlo_observer/adapters/__init__.py`, add fixture payloads + golden event
+  tests.
+- **New event name**: add a constant to `phlo_observe/events.py` (SDK) and to
+  `EVENT_NAMES`, or emit an `application.*`/`other` category event from core
+  directly. Names are lowercase, dot-delimited, never carry IDs or status
+  suffixes.
 
 ## Commits
 
