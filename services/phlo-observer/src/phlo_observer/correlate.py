@@ -16,17 +16,10 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import metrics
-from phlo_observer.models import Event, Run
-from phlo_observer.projections import (
-    _event_view,
-    apply_run_state,
-    run_state_from_row,
-)
-from phlo_observer.state_engine import apply_run_event
+from phlo_observer.models import Event
 
 
 def correlation_method(event: dict[str, Any]) -> str | None:
@@ -48,44 +41,6 @@ def correlation_method(event: dict[str, Any]) -> str | None:
 def _resolve_run_id(event: dict[str, Any]) -> str | None:
     corr = event.get("correlation") or {}
     return corr.get("run_id") or None
-
-
-async def update_run_projection(session: AsyncSession, event: Event) -> None:
-    """Upsert the ``runs`` row for an event's run_id.
-
-    Safe for late-arriving events: counters increment, status upgrades to a
-    terminal state when an explicit ``pipeline.run`` outcome arrives. The
-    fold itself is ``state_engine.apply_run_event`` — the same reducer the
-    rebuild path uses — so incremental and rebuilt state agree (spec §12.4).
-    """
-    run_id = event.run_id
-    if not run_id:
-        return
-    now = event.received_at
-    # Lock the projection row: counter increments below are read-modify-write,
-    # so concurrent events for one run must serialize to avoid lost updates.
-    run = await session.get(Run, run_id, with_for_update=True)
-    if run is None:
-        try:
-            async with session.begin_nested():
-                run = Run(
-                    run_id=run_id,
-                    status="unknown",
-                    updated_at=now,
-                    summary={},
-                    provenance={},
-                )
-                session.add(run)
-        except IntegrityError:
-            # A concurrent request inserted the same run_id between the SELECT
-            # and this INSERT; its row is now committed, so re-read it under
-            # the row lock.
-            run = await session.get(Run, run_id, with_for_update=True, populate_existing=True)
-    if run is None:  # pragma: no cover - defensive; the inserter committed
-        return
-    state = run_state_from_row(run)
-    apply_run_event(state, _event_view(event))
-    apply_run_state(run, state, now)
 
 
 async def link_trace_to_run(session: AsyncSession, event: Event) -> None:

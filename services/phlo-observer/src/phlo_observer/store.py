@@ -20,7 +20,7 @@ from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import alerts, baselines, incidents, insights, metrics, projections
-from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
+from phlo_observer.correlate import correlation_method, link_trace_to_run
 from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
@@ -236,10 +236,9 @@ async def persist_events(
                         )
                         .on_conflict_do_nothing(index_elements=["run_id"])
                     )
-                for row in correlated:
-                    await update_run_projection(session, row)
+                await projections.update_run_projections(session, correlated)
+                await projections.apply_events_batch(session, accepted_rows)
                 for row in accepted_rows:
-                    await projections.apply_event(session, row)
                     event = projections._event_view(row)
                     # Insights evaluate against baselines BEFORE this event's
                     # sample joins them — an observation must not judge itself.

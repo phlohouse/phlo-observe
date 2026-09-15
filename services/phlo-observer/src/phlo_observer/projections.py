@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,92 +61,6 @@ def _event_view(row: Event) -> dict[str, Any]:
     }
 
 
-async def _upsert_entities(
-    session: AsyncSession, batch: se.DerivedBatch, now: Any, event_id: str
-) -> None:
-    """Insert new entities, refresh ``last_seen_at`` on known ones."""
-    for eid, state in batch.entities.items():
-        try:
-            async with session.begin_nested():
-                await session.execute(
-                    pg_insert(Entity)
-                    .values(
-                        entity_id=eid,
-                        kind=state["kind"],
-                        display_name=state["display_name"],
-                        first_seen_at=now,
-                        last_seen_at=now,
-                        attributes=state.get("attributes") or {},
-                        provenance={
-                            "derived_from": [event_id],
-                            "rule": se.ENTITY_RULE,
-                            "rule_version": se.ENTITY_RULE_VERSION,
-                            "derived_at": now.isoformat() if hasattr(now, "isoformat") else now,
-                        },
-                    )
-                    .on_conflict_do_nothing(index_elements=["entity_id"])
-                )
-        except IntegrityError:  # pragma: no cover - defensive
-            pass
-        existing = await session.get(Entity, eid)
-        if existing is not None:
-            if now > (existing.last_seen_at or now):
-                existing.last_seen_at = now
-            updates = state.get("attributes")
-            if updates:
-                existing.attributes = {**(existing.attributes or {}), **updates}
-            refs = (existing.provenance or {}).get("derived_from") or []
-            if event_id not in refs and len(refs) < se._MAX_DERIVED_FROM:
-                existing.provenance = {
-                    **(existing.provenance or {}),
-                    "derived_from": [*refs, event_id],
-                }
-
-
-async def _upsert_edges(
-    session: AsyncSession, batch: se.DerivedBatch, now: Any, event_id: str
-) -> None:
-    for edge in batch.edges:
-        stmt = (
-            pg_insert(Relationship)
-            .values(
-                from_entity=edge.from_entity,
-                to_entity=edge.to_entity,
-                relationship_type=edge.relationship_type,
-                method=edge.method,
-                confidence=edge.confidence,
-                first_seen_at=now,
-                last_seen_at=now,
-                source_event_ids=[event_id],
-                provenance={
-                    "rule": se.EDGE_RULE,
-                    "rule_version": se.EDGE_RULE_VERSION,
-                    "derived_at": now.isoformat() if hasattr(now, "isoformat") else now,
-                },
-            )
-            .on_conflict_do_nothing(
-                index_elements=["from_entity", "to_entity", "relationship_type"]
-            )
-        )
-        async with session.begin_nested():
-            await session.execute(stmt)
-        row = (
-            await session.execute(
-                select(Relationship).where(
-                    Relationship.from_entity == edge.from_entity,
-                    Relationship.to_entity == edge.to_entity,
-                    Relationship.relationship_type == edge.relationship_type,
-                )
-            )
-        ).scalar_one_or_none()
-        if row is not None:
-            if now > (row.last_seen_at or now):
-                row.last_seen_at = now
-            merged = se.merge_edge_sources(list(row.source_event_ids or []), event_id)
-            if merged != row.source_event_ids:
-                row.source_event_ids = merged
-
-
 async def _apply_asset(
     session: AsyncSession, event: dict[str, Any], entity_id: str, now: Any
 ) -> None:
@@ -188,21 +102,235 @@ async def _apply_asset(
     row.provenance = se.provenance(state, se.ASSET_RULE, se.ASSET_RULE_VERSION, now)
 
 
+def _accumulate(
+    entity_states: dict[str, dict[str, Any]],
+    edge_states: dict[tuple[str, str, str], dict[str, Any]],
+    batch: se.DerivedBatch,
+    event: dict[str, Any],
+    event_id: str,
+) -> None:
+    """Fold one derived batch into per-entity/per-edge accumulator state.
+
+    Shared by the incremental (batched) path and rebuild, so both produce
+    identical projections from the same events.
+    """
+    observed = event.get("observed_at")
+    for eid, est in batch.entities.items():
+        target = entity_states.setdefault(
+            eid,
+            {
+                **est,
+                "first_seen_at": None,
+                "last_seen_at": None,
+            },
+        )
+        se._record(target, event)
+        if est.get("attributes"):
+            target["attributes"] = {
+                **(target.get("attributes") or {}),
+                **est["attributes"],
+            }
+        if observed:
+            if target["first_seen_at"] is None or observed < target["first_seen_at"]:
+                target["first_seen_at"] = observed
+            if target["last_seen_at"] is None or observed > target["last_seen_at"]:
+                target["last_seen_at"] = observed
+    for edge in batch.edges:
+        key = (edge.from_entity, edge.to_entity, edge.relationship_type)
+        estate = edge_states.setdefault(
+            key,
+            {
+                "from_entity": edge.from_entity,
+                "to_entity": edge.to_entity,
+                "relationship_type": edge.relationship_type,
+                "method": edge.method,
+                "confidence": edge.confidence,
+                "source_event_ids": [],
+            },
+        )
+        estate["confidence"] = max(estate["confidence"], edge.confidence)
+        estate["source_event_ids"] = se.merge_edge_sources(estate["source_event_ids"], event_id)
+
+
+async def _flush_entities(
+    session: AsyncSession,
+    entity_states: dict[str, dict[str, Any]],
+    now: Any,
+) -> None:
+    """Bulk-write accumulated entity state: 2 queries regardless of size."""
+    if not entity_states:
+        return
+    eids = list(entity_states)
+    await session.execute(
+        pg_insert(Entity)
+        .values(
+            [
+                {
+                    "entity_id": eid,
+                    "kind": st["kind"],
+                    "display_name": st["display_name"],
+                    "first_seen_at": st["first_seen_at"] or now,
+                    "last_seen_at": st["last_seen_at"] or now,
+                    "attributes": st.get("attributes") or {},
+                    "provenance": {
+                        "derived_from": [st["derived_from"][0]] if st.get("derived_from") else [],
+                        "rule": se.ENTITY_RULE,
+                        "rule_version": se.ENTITY_RULE_VERSION,
+                        "derived_at": now.isoformat(),
+                    },
+                }
+                for eid, st in entity_states.items()
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["entity_id"])
+    )
+    existing = {
+        r.entity_id: r
+        for r in (await session.execute(select(Entity).where(Entity.entity_id.in_(eids)))).scalars()
+    }
+    for eid, state in entity_states.items():
+        row = existing.get(eid)
+        if row is None:
+            continue
+        first = state["first_seen_at"]
+        last = state["last_seen_at"]
+        if first and (row.first_seen_at is None or first < row.first_seen_at):
+            row.first_seen_at = first
+        if last and (row.last_seen_at is None or last > row.last_seen_at):
+            row.last_seen_at = last
+        if state.get("attributes"):
+            row.attributes = {**(row.attributes or {}), **state["attributes"]}
+        refs = (row.provenance or {}).get("derived_from") or []
+        merged_refs = list(refs)
+        for eid_ref in state.get("derived_from") or []:
+            merged_refs = se.merge_edge_sources(merged_refs, eid_ref)
+        if merged_refs != refs:
+            row.provenance = {
+                **(row.provenance or {}),
+                "derived_from": merged_refs,
+            }
+
+
+async def _flush_edges(
+    session: AsyncSession,
+    edge_states: dict[tuple[str, str, str], dict[str, Any]],
+    now: Any,
+) -> None:
+    """Bulk-write accumulated edges: insert-new + merge-existing, 2 queries."""
+    if not edge_states:
+        return
+    keys = list(edge_states)
+    await session.execute(
+        pg_insert(Relationship)
+        .values(
+            [
+                {
+                    "from_entity": st["from_entity"],
+                    "to_entity": st["to_entity"],
+                    "relationship_type": st["relationship_type"],
+                    "method": st["method"],
+                    "confidence": st["confidence"],
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                    "source_event_ids": st["source_event_ids"],
+                    "provenance": {
+                        "rule": se.EDGE_RULE,
+                        "rule_version": se.EDGE_RULE_VERSION,
+                        "derived_at": now.isoformat(),
+                    },
+                }
+                for st in edge_states.values()
+            ]
+        )
+        .on_conflict_do_nothing(index_elements=["from_entity", "to_entity", "relationship_type"])
+    )
+    existing = (
+        await session.execute(
+            select(Relationship).where(
+                tuple_(
+                    Relationship.from_entity,
+                    Relationship.to_entity,
+                    Relationship.relationship_type,
+                ).in_(keys)
+            )
+        )
+    ).scalars()
+    for row in existing:
+        key = (row.from_entity, row.to_entity, row.relationship_type)
+        state = edge_states.get(key)
+        if state is None:
+            continue
+        if now > (row.last_seen_at or now):
+            row.last_seen_at = now
+        if state["confidence"] > (row.confidence or 0):
+            row.confidence = state["confidence"]
+        merged = list(row.source_event_ids or [])
+        for eid in state["source_event_ids"]:
+            merged = se.merge_edge_sources(merged, eid)
+        if merged != row.source_event_ids:
+            row.source_event_ids = merged
+
+
+async def apply_events_batch(session: AsyncSession, rows: list[Event]) -> None:
+    """Update all projections for a batch of accepted event rows.
+
+    One accumulation pass + bulk flushes per table, so an N-event ingest
+    batch costs O(1) round trips for entities/edges instead of O(entities).
+    Runs inside the caller's transaction so a projection failure cannot
+    reject durable events (spec §12.4).
+    """
+    entity_states: dict[str, dict[str, Any]] = {}
+    edge_states: dict[tuple[str, str, str], dict[str, Any]] = {}
+    pending_assets: list[tuple[dict[str, Any], str, Any]] = []
+    for row in rows:
+        event = _event_view(row)
+        batch = se.derive(event)
+        now = row.received_at or utcnow()
+        _accumulate(entity_states, edge_states, batch, event, str(row.event_id))
+        if batch.asset_entity_id:
+            pending_assets.append((event, batch.asset_entity_id, now))
+    await _flush_entities(session, entity_states, utcnow())
+    await _flush_edges(session, edge_states, utcnow())
+    for event, eid, now in pending_assets:
+        await _apply_asset(session, event, eid, now)
+
+
 async def apply_event(session: AsyncSession, row: Event) -> None:
     """Update all projections for one accepted event row.
 
-    Runs inside the caller's savepoint so a projection failure cannot reject
-    a durable event (spec §12.4: projections are derived, never the only
-    copy).
+    Thin wrapper over :func:`apply_events_batch` for single-event callers.
     """
-    event = _event_view(row)
-    batch = se.derive(event)
-    now = row.received_at or utcnow()
-    event_id = str(row.event_id)
-    await _upsert_entities(session, batch, now, event_id)
-    await _upsert_edges(session, batch, now, event_id)
-    if batch.asset_entity_id:
-        await _apply_asset(session, event, batch.asset_entity_id, now)
+    await apply_events_batch(session, [row])
+
+
+async def update_run_projections(session: AsyncSession, rows: list[Event]) -> None:
+    """Fold a batch of correlated events into ``runs`` rows, one get per run.
+
+    Equivalent to calling the per-event fold for every row, but each run is
+    fetched/locked once and its events folded in order — a 1,000-event batch
+    for one run is one SELECT FOR UPDATE, not a thousand.
+    """
+    by_run: dict[str, list[Event]] = {}
+    for row in rows:
+        if row.run_id:
+            by_run.setdefault(row.run_id, []).append(row)
+    if not by_run:
+        return
+    existing = {
+        r.run_id: r
+        for r in (
+            await session.execute(select(Run).where(Run.run_id.in_(by_run)).with_for_update())
+        ).scalars()
+    }
+    for run_id, events in by_run.items():
+        run = existing.get(run_id)
+        if run is None:  # pragma: no cover - bulk insert above guarantees it
+            continue
+        state = run_state_from_row(run)
+        for row in events:
+            se.apply_run_event(state, _event_view(row))
+        last = max((e.received_at for e in events if e.received_at), default=None)
+        apply_run_state(run, state, last or utcnow())
 
 
 def run_state_from_row(run: Run) -> dict[str, Any]:
