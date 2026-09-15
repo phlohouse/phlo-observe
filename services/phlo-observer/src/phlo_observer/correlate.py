@@ -15,11 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from phlo_observer import metrics
-from phlo_observer.models import Event
 
 
 def correlation_method(event: dict[str, Any]) -> str | None:
@@ -41,20 +37,3 @@ def correlation_method(event: dict[str, Any]) -> str | None:
 def _resolve_run_id(event: dict[str, Any]) -> str | None:
     corr = event.get("correlation") or {}
     return corr.get("run_id") or None
-
-
-async def link_trace_to_run(session: AsyncSession, event: Event) -> None:
-    """When an event has a trace_id but no run_id, reuse an existing run's."""
-    if event.run_id or not event.trace_id:
-        return
-    result = await session.execute(
-        select(Event.run_id)
-        .where(Event.trace_id == event.trace_id, Event.run_id.is_not(None))
-        .limit(1)
-    )
-    run_id = result.scalar_one_or_none()
-    if run_id:
-        # No metric increment here: correlation_method() already counted this
-        # event once under "trace_id" at staging time.
-        event.run_id = run_id
-        event.correlation_method = "trace_id"

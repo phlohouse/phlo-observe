@@ -20,7 +20,7 @@ from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import alerts, insights, metrics, notify, projections
-from phlo_observer.correlate import correlation_method, link_trace_to_run
+from phlo_observer.correlate import correlation_method
 from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
@@ -154,6 +154,36 @@ def _parse_dt(value: Any) -> Any:
     return value
 
 
+async def _link_traces(session: AsyncSession, correlated: list[Event]) -> None:
+    """Resolve run_ids for trace-only events in one query, not one per row."""
+    unresolved = [row for row in correlated if not row.run_id and row.trace_id]
+    if not unresolved:
+        return
+    trace_ids = {row.trace_id for row in unresolved}
+    # Same-batch rows that already carry a run_id for this trace are valid
+    # bindings — the old per-row SELECT saw them via autoflush.
+    known: dict[str, str] = {}
+    for row in correlated:
+        if row.run_id and row.trace_id and row.trace_id not in known:
+            known[row.trace_id] = row.run_id
+    missing = trace_ids - known.keys()
+    if missing:
+        rows = await session.execute(
+            select(Event.trace_id, Event.run_id)
+            .where(Event.trace_id.in_(missing), Event.run_id.is_not(None))
+            .distinct()
+        )
+        for trace_id, run_id in rows:
+            known.setdefault(trace_id, run_id)
+    for row in unresolved:
+        run_id = known.get(row.trace_id or "")
+        if run_id:
+            # correlation_method() already counted this event under
+            # "trace_id" at staging time — just fill the link.
+            row.run_id = run_id
+            row.correlation_method = "trace_id"
+
+
 async def persist_events(
     session: AsyncSession,
     event_dicts: list[dict[str, Any]],
@@ -235,8 +265,11 @@ async def persist_events(
         # anything. Projections are derived state and can be rebuilt.
         try:
             async with session.begin_nested():
-                for row in correlated:
-                    await link_trace_to_run(session, row)
+                # One preload of existing trace->run bindings for every
+                # trace-only event in the batch, plus a batch-local map so a
+                # trace linked by an earlier row in this same batch is reused
+                # (the per-row query saw flushed same-batch rows identically).
+                await _link_traces(session, correlated)
                 # Pre-create missing run projections in one statement so the
                 # per-event update below is a single locked read, not a
                 # savepoint-guarded insert per run_id.
