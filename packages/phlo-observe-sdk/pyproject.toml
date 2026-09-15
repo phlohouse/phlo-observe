@@ -1,31 +1,35 @@
+[build-system]
+build-backend = "uv_build"
+requires = ["uv_build>=0.8,<0.13"]
+
 [project]
-name = "phlo-observe"
-version = "0.0.0"
-description = "Phlo-specific observability SDK: domain contexts, typed event attributes and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino."
-readme = "README.md"
-requires-python = ">=3.12"
-license = { text = "Apache-2.0" }
-authors = [{ name = "Phlo" }]
 dependencies = [
     "observe-core",
     "pydantic>=2.8",
 ]
+description = "Phlo-specific observability SDK: domain contexts, typed event attributes and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino."
+name = "phlo-observe"
+readme = "README.md"
+requires-python = ">=3.12"
+version = "0.1.0"
+
+[[project.authors]]
+name = "Phlo"
+
+[project.license]
+text = "Apache-2.0"
 
 [project.optional-dependencies]
+all = ["phlo-observe[dagster,dbt,dlt,pandera,trino]"]
 dagster = ["dagster>=1.8"]
-dbt = []  # artifact parsing is pure Python; the extra exists for spec §21 parity
+dbt = []
 dlt = ["dlt>=1.0"]
 pandera = ["pandera>=0.20"]
 trino = ["trino>=0.330"]
-all = ["phlo-observe[dagster,dbt,dlt,pandera,trino]"]
-
-[build-system]
-requires = ["uv_build>=0.8,<0.13"]
-build-backend = "uv_build"
 
 [tool.uv.build-backend]
-module-root = "src"
 module-name = "phlo_observe"
+module-root = "src"
 
-[tool.uv.sources]
-observe-core = { workspace = true }
+[tool.uv.sources.observe-core]
+workspace = true

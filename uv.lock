@@ -981,7 +981,7 @@ wheels = [
 
 [[package]]
 name = "observe-core"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "packages/observe-core" }
 dependencies = [
     { name = "httpx" },
@@ -1010,7 +1010,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },
 ]
-provides-extras = ["otlp", "all"]
+provides-extras = ["all", "otlp"]
 
 [[package]]
 name = "opentelemetry-api"
@@ -1233,7 +1233,7 @@ wheels = [
 
 [[package]]
 name = "phlo-observe"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "packages/phlo-observe-sdk" }
 dependencies = [
     { name = "observe-core" },
@@ -1270,7 +1270,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.330" },
 ]
-provides-extras = ["dagster", "dbt", "dlt", "pandera", "trino", "all"]
+provides-extras = ["all", "dagster", "dbt", "dlt", "pandera", "trino"]
 
 [[package]]
 name = "phlo-observe-dev"
@@ -1311,7 +1311,7 @@ dev = [
 
 [[package]]
 name = "phlo-observer"
-version = "0.0.0"
+version = "0.1.0"
 source = { editable = "services/phlo-observer" }
 dependencies = [
     { name = "alembic" },

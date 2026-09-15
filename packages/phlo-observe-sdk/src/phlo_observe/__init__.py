@@ -46,7 +46,7 @@ from phlo_observe.helpers import (
 )
 from phlo_observe.logging_bridge import configure_logging
 
-__version__ = "0.0.0"
+__version__ = "0.1.0"
 
 __all__ = [
     "AssetMaterializeAttributes",
