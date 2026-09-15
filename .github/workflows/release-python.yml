@@ -13,6 +13,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write # dispatch release-observer for image builds
   contents: write
   pull-requests: write
 
@@ -63,6 +64,21 @@ jobs:
           command: release tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # relx pushes tags with GITHUB_TOKEN, which cannot trigger the
+      # release-observer tag workflow — dispatch it explicitly instead.
+      - name: Dispatch observer image release
+        if: steps.check.outputs.mode == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="$(jq -r '.packages[]? | select(.name == "phlo-observer") | .release_tag' .relx/release-manifest.json)"
+          if [ -n "$tag" ]; then
+            gh workflow run release-observer.yml -f "tag=$tag"
+            echo "Dispatched release-observer for $tag"
+          else
+            echo "No phlo-observer release in manifest; skipping image build."
+          fi
 
       - name: Create or update release PRs
         if: steps.check.outputs.mode == 'pr'
