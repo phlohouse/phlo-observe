@@ -25,7 +25,9 @@ LABEL org.opencontainers.image.title="phlo-observer" \
       org.opencontainers.image.version="${VERSION:-dev}"
 
 RUN groupadd --system --gid 1000 observer && \
-    useradd --system --uid 1000 --gid observer --no-create-home observer
+    useradd --system --uid 1000 --gid observer --no-create-home observer && \
+    mkdir -p /var/lib/phlo-observe && \
+    chown observer:observer /var/lib/phlo-observe
 
 WORKDIR /app
 COPY --from=build --chown=observer:observer /workspace/.venv /app/.venv
@@ -36,7 +38,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PHLO_OBSERVER_HOST=0.0.0.0 \
     PHLO_OBSERVER_PORT=8080 \
-    PHLO_OBSERVER_MIGRATIONS_DIR=/app/migrations
+    PHLO_OBSERVER_MIGRATIONS_DIR=/app/migrations \
+    OBSERVE_SPOOL_DIR=/var/lib/phlo-observe/spool
 
 USER observer
 EXPOSE 8080

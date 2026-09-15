@@ -110,17 +110,24 @@ class Runtime:
             debug_rate=settings.resolved_debug_rate(),
             telemetry_rate=settings.sampling_telemetry_rate,
         )
-        self.spool = (
-            Spool(
-                settings.resolved_spool_dir(),
-                max_bytes=settings.spool_max_bytes,
-                segment_max_bytes=settings.spool_segment_max_bytes,
-                on_full=settings.spool_on_full,
-                stats=self.stats,
-            )
-            if settings.spool_enabled
-            else None
-        )
+        self.spool: Spool | None = None
+        if settings.spool_enabled:
+            try:
+                self.spool = Spool(
+                    settings.resolved_spool_dir(),
+                    max_bytes=settings.spool_max_bytes,
+                    segment_max_bytes=settings.spool_segment_max_bytes,
+                    on_full=settings.spool_on_full,
+                    stats=self.stats,
+                )
+            except OSError as exc:
+                # A spool that cannot be created (read-only filesystem, no
+                # writable home) must degrade, not crash the host application:
+                # critical events then count as spool_errors like any other
+                # spool write failure.
+                self.stats.incr("spool_errors")
+                _log.warning("critical-event spool unavailable: %s", exc)
+                _diag(f"critical-event spool unavailable: {exc}")
         self.drains: list[Drain] = [self._build_drain(cfg) for cfg in settings.drains]
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=settings.queue_capacity)
         self._stop = threading.Event()

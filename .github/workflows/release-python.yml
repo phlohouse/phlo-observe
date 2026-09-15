@@ -55,7 +55,7 @@ jobs:
 
       - name: Tag merged release PR
         if: steps.check.outputs.mode == 'tag'
-        uses: iamgp/ReleaseX@v1
+        uses: iamgp/ReleaseX@v1.9.4
         with:
           command: release tag
         env:
@@ -63,7 +63,7 @@ jobs:
 
       - name: Create or update release PRs
         if: steps.check.outputs.mode == 'pr'
-        uses: iamgp/ReleaseX@v1
+        uses: iamgp/ReleaseX@v1.9.4
         with:
           command: release pr
         env:
