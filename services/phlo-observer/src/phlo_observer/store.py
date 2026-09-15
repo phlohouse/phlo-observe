@@ -16,7 +16,7 @@ from observe_core.models import EventEnvelope
 from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import asc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import alerts, insights, metrics, projections
@@ -343,7 +343,9 @@ async def persist_events(
                         .on_conflict_do_nothing(index_elements=["schema_id"])
                     )
                 await session.flush()
-        except SQLAlchemyError:
+        except Exception:
+            # Fail-open covers code bugs too, not just DB errors: derived
+            # state is rebuildable, durable events must not be lost.
             logger.warning(
                 "correlation/projection update failed for %d events",
                 len(accepted_rows),
