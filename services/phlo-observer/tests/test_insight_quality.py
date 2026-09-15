@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import workloads as wl
 from httpx import AsyncClient
-from phlo_observer.models import Incident, Insight
+from phlo_observer.models import Baseline, Incident, Insight
 from sqlalchemy import select
 
 pytestmark = pytest.mark.asyncio
@@ -96,11 +96,19 @@ async def test_partition_baselines_isolated(client: AsyncClient, session_factory
     rows = await _db_insights(session_factory)
     spikes = [i for i in rows if i.rule_id == "volume-spike"]
     assert len(spikes) == 1
-    assert (
-        "2026-01-01" in spikes[0].title
-        or "rows|2026-01-01" in spikes[0].attributes["summary"]
-        or True
-    )
+    # The insight names the partitioned baseline that fired.
+    assert "2026-01-01" in spikes[0].title
+    assert spikes[0].entity_id == entity
+    # Partition B's own baseline stayed short — it was judged only on its
+    # own history and never inherited partition A's samples.
+    async with session_factory() as session:
+        part_b = await session.scalar(
+            select(Baseline).where(
+                Baseline.entity_id == entity, Baseline.metric == "rows|2026-01-02"
+            )
+        )
+    assert part_b is not None
+    assert part_b.count == 3
 
 
 async def test_quality_failure_then_resolve(client: AsyncClient, session_factory: Any) -> None:
@@ -292,3 +300,135 @@ async def test_insight_lifecycle_transition(client: AsyncClient, session_factory
     assert resp.status_code == 200
     rows = await _db_insights(session_factory)
     assert rows[0].state == "resolved"
+
+
+async def test_stale_signal_never_joins_or_rewinds_incident(
+    client: AsyncClient, session_factory: Any
+) -> None:
+    """An insight signaled >30min before an incident's last signal is not
+    related to it — the one-sided window let it attach and rewind the
+    incident's freshness anchor backwards."""
+    from phlo_observer import incidents as inc_mod
+
+    last = wl.T0 + dt.timedelta(hours=5)
+    incident = Incident(
+        incident_id=uuid.uuid4(),
+        title="prior incident",
+        state="open",
+        severity="critical",
+        entities=["run://phlo/stale"],
+        insight_ids=[],
+        timeline={},
+        impact={},
+        attributes={"last_signal_at": last.isoformat()},
+        updated_at=wl.T0,
+    )
+    stale = Insight(
+        insight_id=uuid.uuid4(),
+        rule_id="run-failure",
+        rule_version=1,
+        title="stale failure",
+        severity="critical",
+        state="open",
+        entity_id="run://phlo/stale",
+        evidence_event_ids=[],
+        dedupe_key="k-stale",
+        attributes={"observed_at": (last - dt.timedelta(hours=2)).isoformat()},
+        created_at=wl.T0,
+        updated_at=wl.T0,
+    )
+    async with session_factory() as session:
+        result = await inc_mod.group_insight(session, stale, open_incidents=[incident])
+    # The stale insight may open its own incident (critical), but the
+    # existing incident is untouched: no attach, no rewound anchor.
+    assert result is not incident
+    assert incident.attributes["last_signal_at"] == last.isoformat()
+    assert str(stale.insight_id) not in (incident.insight_ids or [])
+    if result is not None:
+        assert result.attributes["last_signal_at"] == (last - dt.timedelta(hours=2)).isoformat()
+
+
+async def test_attach_never_rewinds_last_signal(session_factory: Any) -> None:
+    """An in-window insight whose signal predates the incident's last
+    signal attaches without moving ``last_signal_at`` backwards."""
+    from phlo_observer import incidents as inc_mod
+
+    last = wl.T0 + dt.timedelta(hours=5)
+    incident = Incident(
+        incident_id=uuid.uuid4(),
+        title="inc",
+        state="open",
+        severity="error",
+        entities=["asset://a"],
+        insight_ids=[],
+        timeline={},
+        impact={},
+        attributes={"last_signal_at": last.isoformat()},
+        updated_at=wl.T0,
+    )
+    older = Insight(
+        insight_id=uuid.uuid4(),
+        rule_id="quality-failure",
+        rule_version=1,
+        title="older",
+        severity="error",
+        state="open",
+        entity_id="asset://a",
+        evidence_event_ids=[],
+        dedupe_key="k-older",
+        attributes={"observed_at": (last - dt.timedelta(minutes=10)).isoformat()},
+        created_at=wl.T0,
+        updated_at=wl.T0,
+    )
+    async with session_factory() as session:
+        result = await inc_mod.group_insight(session, older, open_incidents=[incident])
+    assert result is incident
+    assert str(older.insight_id) in (incident.insight_ids or [])
+    # In-window but older: attached, anchor untouched.
+    assert incident.attributes["last_signal_at"] == last.isoformat()
+
+
+async def test_refresh_advances_last_observed_at(session_factory: Any) -> None:
+    """Repeat findings move ``last_observed_at`` forward — grouping keys on
+    the newest signal — and an out-of-order repeat cannot rewind it."""
+    from phlo_observer import insights as ins
+
+    entity = f"asset://analytics.touch_{_UID}"
+    finding = ins.Finding(
+        rule_id="quality-failure",
+        kind="quality_degradation",
+        severity="warning",
+        title="t",
+        summary="s",
+        entity_id=entity,
+        evidence_event_ids=["e1"],
+    )
+
+    def _check(at: dt.datetime) -> dict[str, Any]:
+        return wl._event(
+            "quality.check",
+            at,
+            category="quality",
+            outcome="failure",
+            entities={"asset": entity},
+            error={"exception_type": "CheckError", "message": "same"},
+        )
+
+    dedupe: dict[str, Any] = {}
+    async with session_factory() as session, session.begin():
+        created = await ins.record_findings(
+            session, _check(wl.T0), [finding], open_by_dedupe=dedupe
+        )
+        insight = created[0]
+        assert "last_observed_at" not in (insight.attributes or {})
+
+        later = wl.T0 + dt.timedelta(hours=2)
+        again = await ins.record_findings(session, _check(later), [finding], open_by_dedupe=dedupe)
+        assert again[0] is insight
+        assert insight.attributes["last_observed_at"] == later.isoformat()
+
+        # An older repeat finding must not move the anchor backwards.
+        await ins.record_findings(
+            session, _check(wl.T0 + dt.timedelta(hours=1)), [finding], open_by_dedupe=dedupe
+        )
+        assert insight.attributes["last_observed_at"] == later.isoformat()

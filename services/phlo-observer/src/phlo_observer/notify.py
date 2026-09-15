@@ -94,10 +94,30 @@ class NotifyBridge:
         while not self._stop.is_set():
             conn = None
             try:
-                conn = await asyncpg.connect(self._dsn)
+                conn = await asyncpg.connect(
+                    self._dsn,
+                    # Identifiable in pg_stat_activity so operators (and
+                    # tests) can see/terminate the LISTEN backend directly.
+                    server_settings={
+                        "application_name": f"phlo-observer-notify-{self._instance_id}"
+                    },
+                )
+                # A dropped connection cannot raise through a parked wait —
+                # the termination listener converts it into an event we race
+                # against shutdown, so the backoff path below is reachable.
+                dropped = asyncio.Event()
+                conn.add_termination_listener(lambda _conn, d=dropped: d.set())
                 await conn.add_listener(CHANNEL, self._on_notify)
                 backoff = 0.5
-                await self._stop.wait()  # parked until shutdown or error
+                stop_wait = asyncio.create_task(self._stop.wait())
+                drop_wait = asyncio.create_task(dropped.wait())
+                try:
+                    await asyncio.wait({stop_wait, drop_wait}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    stop_wait.cancel()
+                    drop_wait.cancel()
+                if dropped.is_set() and not self._stop.is_set():
+                    raise ConnectionError("notify listener connection terminated")
             except asyncio.CancelledError:
                 raise
             except Exception:

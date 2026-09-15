@@ -291,22 +291,19 @@ def dbt_invocation(
     test_failures: set[str] | None = None,
     outcome: str = "success",
 ) -> list[dict[str, Any]]:
-    """One dbt run: invocation + model.execute + test.execute events."""
+    """One dbt run: model.execute + test.execute events, then the pushed
+    run_results doc as the terminal ``dbt.invocation``.
+
+    Mirrors the SDK's ``emit_run_results`` shape: ``run_id`` is the bare
+    invocation id (so the derived ``run://dbt/<id>`` entity joins the run
+    row), the invocation lands last with the worst-result outcome and the
+    elapsed duration.
+    """
     models = models or ["stg_orders", "fct_revenue"]
     test_failures = test_failures or set()
     run_ent = f"run://dbt/{invocation_id}"
-    corr = {"invocation_id": invocation_id, "run_id": f"dbt-{invocation_id}"}
-    events = [
-        _event(
-            "dbt.invocation",
-            t0,
-            outcome="unknown",
-            producer="dbt",
-            correlation=corr,
-            entities={"run": run_ent, "service": "service://dbt-runner"},
-            attributes={"dbt_version": "1.9.0", "command": "build"},
-        )
-    ]
+    corr = {"invocation_id": invocation_id, "run_id": invocation_id}
+    events: list[dict[str, Any]] = []
     t = t0
     for model in models:
         t += dt.timedelta(seconds=20)
@@ -351,7 +348,7 @@ def dbt_invocation(
     t += dt.timedelta(seconds=4)
     events.append(
         _event(
-            "pipeline.run",
+            "dbt.invocation",
             t,
             outcome="failure" if test_failures else outcome,
             producer="dbt",
@@ -360,6 +357,7 @@ def dbt_invocation(
             started_at=t0,
             ended_at=t,
             duration_ms=(t - t0).total_seconds() * 1000,
+            attributes={"dbt_version": "1.9.0", "command": "build"},
         )
     )
     return events

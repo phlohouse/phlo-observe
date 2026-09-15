@@ -132,7 +132,9 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
         for i in (await session.execute(select(Insight))).scalars()
     }
     snap["incidents"] = {
-        tuple(sorted(c.entities or [])): {
+        # Entity-set alone is not unique: two incidents can legitimately
+        # share it, and keying on it alone would silently merge them.
+        (tuple(sorted(c.entities or [])), c.title, c.state): {
             "state": c.state,
             "severity": c.severity,
             "title": c.title,

@@ -20,15 +20,18 @@ when Postgres is unreachable.
 
 | Benchmark | Spec target | Measured |
 |---|---|---|
-| `observe()` bookkeeping (empty block) | median < 100µs | median ~51µs, p95 ~71µs |
-| Event emit, 10 scalar attributes | median < 100µs | median ~45µs |
-| Event emit, nested attributes | median < 100µs | median ~61µs |
+| `observe()` bookkeeping (empty block) | median < 100µs | median ~57µs, p95 ~72µs |
+| Event emit, 10 scalar attributes | median < 100µs | median ~52µs |
+| Event emit, nested attributes | median < 100µs | median ~68µs |
 | Enqueue, normal event | p95 < 1ms; sustain >= 10,000/s | p95 ~50µs, ~22,500/s |
-| Finalize + serialize | regression floor >= 2,000/s | ~26,300 events/s |
-| Batch HTTP drain (mocked transport) | regression floor >= 1,000/s | ~1.6M events/s |
-| Observer canonical ingest | sustain >= 1,000/s to PostgreSQL | ~9,270 events/s |
-| Observer ingest, one shared run | regression floor >= 500/s | ~1,430 events/s |
-| Run timeline query, 10,000 events | p95 < 500ms | p50 ~352ms, p95 ~379ms |
+| Enqueue under queue pressure | bounded, never blocks | median ~41µs |
+| Emit with dead exporter | bounded, isolated to worker | median ~46µs |
+| Finalize + serialize | regression floor >= 2,000/s | ~23,000 events/s |
+| Batch HTTP drain (mocked transport) | regression floor >= 1,000/s | ~1.67M events/s |
+| Observer canonical ingest | sustain >= 1,000/s to PostgreSQL | ~7,640 events/s |
+| Observer ingest, one shared run | regression floor >= 500/s | ~6,040 events/s |
+| Realistic mixed workload ingest | — | ~692 events/s, p50 ~703ms / 500-batch |
+| Run timeline query, 10,000 events | p95 < 500ms | p50 ~348ms, p95 ~362ms |
 
 Numbers vary with hardware, Postgres placement, and batch shape — treat them
 as baselines, not guarantees. The asserts encode the spec targets (plus a
@@ -39,8 +42,11 @@ fails CI; the printed values exist so the table can be refreshed per release.
 
 - The application path performs no remote I/O: `observe()` overhead covers
   build/normalize/redact/enqueue only; drain I/O happens on worker threads.
-- "One shared run" ingest is slower because every event takes the run-row
-  lock — that is the intended cost of correct projection counters, and the
-  floor guards it rather than the 1,000/s spec target.
+- "One shared run" ingest takes the run-row lock once per batch (not per
+  event) since the projection fold was batched — it now sits within ~20%
+  of varied-run ingest instead of ~6x slower.
+- The realistic mixed workload (insight evaluation, baselines, incident
+  grouping, asset folds) costs ~1.4 ms/event — ~11x the trivial-envelope
+  path. See `docs/V2_HARDENING.md` for the full breakdown.
 - If a target is missed, profile before reaching for Rust (spec §84): the
   expected culprits are database/network configuration, not Python CPU.

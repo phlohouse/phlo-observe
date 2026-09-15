@@ -82,16 +82,21 @@ async def test_explicit_run_id_wins_over_trace(client: AsyncClient, session_fact
     assert row.correlation_method == "explicit_run_id"
 
 
-async def test_ambiguous_trace_first_owner_wins(client: AsyncClient, session_factory: Any) -> None:
-    """Two runs claiming one trace: the orphan binds deterministically."""
-    a = _corr_event(run_id="run-a", trace_id="tr-dupe")
-    b = _corr_event(run_id="run-b", trace_id="tr-dupe")
-    orphan = _corr_event(trace_id="tr-dupe")
-    await client.post("/v1/events", json=[a, b, orphan])
-    row = await _stored(session_factory, orphan["event_id"])
-    assert row is not None
-    # Deterministic by run_id ordering — the answer must not depend on plan.
-    assert row.run_id == "run-a"
+async def test_ambiguous_trace_smallest_run_wins(client: AsyncClient, session_factory: Any) -> None:
+    """Two runs claiming one trace: the orphan binds to the smallest
+    run_id, and payload order must not change the answer — two replicas
+    receiving differently ordered batches converge on the same owner."""
+    for label, order in (("ab", ("a", "b", "o")), ("ba", ("b", "a", "o"))):
+        trace = f"tr-dupe-{label}"
+        ev = {
+            "a": _corr_event(run_id="run-a", trace_id=trace),
+            "b": _corr_event(run_id="run-b", trace_id=trace),
+            "o": _corr_event(trace_id=trace),
+        }
+        await client.post("/v1/events", json=[ev[k] for k in order])
+        row = await _stored(session_factory, ev["o"]["event_id"])
+        assert row is not None
+        assert row.run_id == "run-a", f"payload order {order} changed the binding"
 
 
 async def test_ambiguous_trace_stable_across_batches(

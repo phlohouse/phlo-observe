@@ -25,12 +25,15 @@ _SEVERITY_RANK = {"info": 30, "warn": 40, "warning": 40, "error": 50, "critical"
 
 
 def _signal_time(insight: Insight) -> dt.datetime:
-    """Event-time anchor: the producing event's observed_at.
+    """Event-time anchor: the newest producing event's observed_at.
 
-    Grouping windows on event time (not the wall clock) so a projection
-    rebuild replaying old history groups identically to live ingest.
+    ``last_observed_at`` advances on each repeat finding; ``observed_at``
+    stays at first detection. Grouping windows on event time (not the wall
+    clock) so a projection rebuild replaying old history groups identically
+    to live ingest.
     """
-    raw = (insight.attributes or {}).get("observed_at")
+    attrs = insight.attributes or {}
+    raw = attrs.get("last_observed_at") or attrs.get("observed_at")
     if raw:
         try:
             parsed = parse_rfc3339(raw)
@@ -83,7 +86,10 @@ async def group_insight(
     else:
         candidates = [c for c in open_incidents if c.state == "open"]
     for incident in candidates:
-        if signal - _last_signal(incident) > GROUPING_WINDOW:
+        # Symmetric window: a signal far OLDER than the incident's last
+        # signal is just as unrelated as one far newer — late or replayed
+        # findings must not attach to a current incident.
+        if abs(signal - _last_signal(incident)) > GROUPING_WINDOW:
             continue
         if insight.entity_id and insight.entity_id in (incident.entities or []):
             _attach(incident, insight, now, signal)
@@ -134,8 +140,11 @@ def _attach(incident: Incident, insight: Insight, now: Any, signal: dt.datetime)
         incident.entities = entities
     if _SEVERITY_RANK.get(insight.severity, 0) > _SEVERITY_RANK.get(incident.severity, 0):
         incident.severity = insight.severity
+    # The freshness anchor only ever advances: an attached insight whose
+    # signal predates the last one must not rewind the incident's window.
+    last_signal = max(signal, _last_signal(incident))
     incident.attributes = {
         **(incident.attributes or {}),
-        "last_signal_at": signal.isoformat(),
+        "last_signal_at": last_signal.isoformat(),
     }
     incident.updated_at = now

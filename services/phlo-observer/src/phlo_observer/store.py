@@ -161,24 +161,29 @@ async def _link_traces(session: AsyncSession, correlated: list[Event]) -> None:
         return
     trace_ids = {row.trace_id for row in unresolved}
     # Same-batch rows that already carry a run_id for this trace are valid
-    # bindings — the old per-row SELECT saw them via autoflush.
+    # bindings — the old per-row SELECT saw them via autoflush. Ambiguous
+    # traces resolve to the smallest run_id, the same rule the committed-rows
+    # query below applies: payload order must not change the answer, or two
+    # replicas receiving differently ordered batches would bind the same
+    # orphan differently.
     known: dict[str, str] = {}
     for row in correlated:
-        if row.run_id and row.trace_id and row.trace_id not in known:
-            known[row.trace_id] = row.run_id
+        if row.run_id and row.trace_id:
+            prev = known.get(row.trace_id)
+            if prev is None or row.run_id < prev:
+                known[row.trace_id] = row.run_id
     missing = trace_ids - known.keys()
     if missing:
         rows = await session.execute(
             select(Event.trace_id, Event.run_id)
             .where(Event.trace_id.in_(missing), Event.run_id.is_not(None))
             .distinct()
-            # Ambiguous traces (shared across runs) resolve to the smallest
-            # run_id: deterministic across replicas rather than whatever the
-            # DISTINCT scan happens to return first.
             .order_by(Event.trace_id, Event.run_id)
         )
         for trace_id, run_id in rows:
-            known.setdefault(trace_id, run_id)
+            prev = known.get(trace_id)
+            if prev is None or run_id < prev:
+                known[trace_id] = run_id
     for row in unresolved:
         run_id = known.get(row.trace_id or "")
         if run_id:

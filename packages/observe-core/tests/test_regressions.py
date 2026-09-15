@@ -280,19 +280,21 @@ def test_eviction_scan_is_bounded(make_runtime):
 
 
 def test_eviction_never_takes_sentinels(make_runtime):
-    """_FlushRequest sentinels survive eviction inside the scan window."""
+    """_FlushRequest sentinels survive eviction inside the scan window, and
+    survivors keep queue order — eviction must not rotate the stream."""
     gate = threading.Event()
     backend = _stalled_backend(make_runtime, gate, queue_capacity=4, drop_policy="drop_oldest")
     try:
         sentinel = _FlushRequest()
-        backend._queue.put_nowait(sentinel)
-        backend._queue.put_nowait(_canonical({"event": "t1"}))
-        backend._queue.put_nowait(_canonical({"event": "t2"}))
-        backend._queue.put_nowait(_canonical({"event": "t3"}))
+        t1 = _canonical({"event": "t1"})
+        t2 = _canonical({"event": "t2"})
+        t3 = _canonical({"event": "t3"})
+        for item in (sentinel, t1, t2, t3):
+            backend._queue.put_nowait(item)
         evicted = backend._evict_oldest_event()
-        assert evicted is not None and evicted.data["event"] == "t1"
+        assert evicted is t1
         remaining = [backend._queue.get_nowait() for _ in range(3)]
-        assert sentinel in remaining
+        assert remaining == [sentinel, t2, t3]
     finally:
         gate.set()
         backend.close(2.0)

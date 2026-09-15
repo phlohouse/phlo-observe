@@ -87,6 +87,7 @@ drain worker. No Python bottleneck justifies a Rust path at these numbers.
 | Duplicate event ids | Identical payloads counted `duplicate`; conflicting payloads rejected as conflicts |
 | Exporter down (SDK side) | Emit stays ~46 µs; failures isolated to drain worker |
 | Cross-instance SSE | Subscriber on replica B sees events committed via replica A (`test_notify_reaches_other_replica`) |
+| LISTEN backend killed server-side | Bridge detects the termination, backs off, re-listens; subsequent notifications still fan out (`test_notify_reconnects_after_connection_drop`) |
 
 ## 5. Correctness findings
 
@@ -152,7 +153,7 @@ was reproduced before fixing and now has a regression test.
 | `run_failures` ANDed a JSON-null check onto the outcome branch, dropping `outcome=failure` events with no error payload | correctness | `outcome == 'failure' OR error is a real object` — error-less failures are returned; JSON-null errors on successes stay excluded | `test_v2_failures_includes_errorless_failures`, `test_v2_failures_excludes_json_null_error` |
 | `run_impact`/`get_run_v2`/`query_events` interpolated caller input into `LIKE` patterns unescaped | security / correctness | `_like_escape` escapes `\`, `%`, `_`; escaped `escape="\\"` on every caller-driven LIKE | `test_v2_impact_like_metachars_escaped`, `test_q_like_metachars_match_literally` |
 | `run_changes` scanned a 30-day window into memory with no LIMIT | resource bound | Change-event filter moved into SQL; `_MAX_CHANGES` cap with a `truncated` flag | `test_v2_changes_reports_truncation_flag` |
-| Ambiguous trace→run binding resolved nondeterministically (DISTINCT, no ORDER BY) | correctness | Ordered by `(trace_id, run_id)`; smallest run_id wins deterministically across replicas | `test_ambiguous_trace_first_owner_wins`, `test_ambiguous_trace_stable_across_batches` |
+| Ambiguous trace→run binding resolved nondeterministically (DISTINCT, no ORDER BY) | correctness | Ordered by `(trace_id, run_id)`; smallest run_id wins deterministically across replicas | `test_ambiguous_trace_smallest_run_wins`, `test_ambiguous_trace_stable_across_batches` |
 | `rebuild_projections(batch_size)` was a dead parameter — one unbounded SELECT over all events | resource bound | Real keyset pagination on `(observed_at, event_id)` matching incremental fold order | `test_equivalence` suite |
 | Scoped `--run` rebuild deleted and rewrote shared `Asset` rows from only the selected run's events, regressing `last_materialized_at` | data loss | Touched assets are re-derived from all events referencing them; edges merge `source_event_ids`/max confidence instead of deleting other runs' contributions | `test_scoped_rebuild_preserves_shared_asset`, `test_scoped_rebuild_merges_shared_edges` |
 | `envelope_for` dropped `entities`/`tags`/`contract` — pushed source telemetry could not express V2 sections | data loss | All three pass through envelope construction; dbt adapter wires them | golden `dbt_run_results`/`dbt_artifacts_bundle` |
@@ -172,6 +173,20 @@ was reproduced before fixing and now has a regression test.
 | `emit_run_results` set `invocation_id` but no `run_id` — pushed dbt telemetry produced no run row | data correctness | Invocation carries `run_id` + `run://dbt/<invocation_id>` entity, worst-result outcome, `elapsed_time` → `duration_ms`; per-result `execution_time` → `duration_ms`; tests link to models via `depends_on.nodes`; failing tests get error severity | `test_dbt_run_results_events`, `test_dbt_invocation_success_when_all_pass` |
 | Integrations never stamped producer — derived run/branch entity ids fell back to `service.name` namespaces | correctness | dagster/dlt/trino/wap/iceberg/nessie scopes and emit calls pass `producer=`; generic helpers accept `run_id`/`asset_key`/`producer` | `test_integrations` producer assertions |
 
+## 6b. Third-pass review: findings and fixes
+
+A further review pass found six defects the second-pass suite still
+missed; each now has a regression test or strengthened assertion.
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `NotifyBridge` parked on `stop.wait()` after LISTEN was established — a dropped asyncpg connection never woke it, so the documented reconnect-on-drop path was unreachable and cross-instance SSE silently stayed dead until process restart | correctness / HA | The connection's termination listener races the stop event; a drop raises into the existing bounded-backoff loop. The bridge also names its backend `phlo-observer-notify-*` so it is visible/killable in `pg_stat_activity` | `test_notify_reconnects_after_connection_drop` |
+| Incident grouping window was one-sided (`signal - last > 30min`): a stale insight (late event, replay) always attached to a current same-entity incident, and `_attach` rewound `last_signal_at` backwards — made worse because a dedupe-refreshed insight's `observed_at` stayed frozen at first detection | correctness | Symmetric `abs()` window; attach takes `max(signal, last_signal)`; refresh records `last_observed_at` (newest producing event, never rewound) so repeat findings carry a live signal | `test_stale_signal_never_joins_or_rewinds_incident`, `test_attach_never_rewinds_last_signal`, `test_refresh_advances_last_observed_at` |
+| `_link_traces` in-batch resolution kept the *first* payload-order claimant while the DB path deliberately picks the smallest run_id — the same canonical events could bind differently by batch composition | correctness | Smallest run_id wins across in-batch claimants and is merged with committed rows — payload order no longer matters | `test_ambiguous_trace_smallest_run_wins` (both orders) |
+| `test_partition_baselines_isolated` ended `assert (... or True)` — the partition-attribution check could never fail | test quality | Volume-spike insights now name the partitioned metric key in the title; the test asserts it and that partition B's baseline stayed untouched | `test_partition_baselines_isolated` |
+| `workloads.dbt_invocation` diverged from the real SDK shape (`run_id` prefixed `dbt-`, invocation first with `outcome="unknown"`, synthetic `pipeline.run`) — every workload-driven dbt run produced a `runs` row no entity/edge could join back to | test fidelity | `run_id` is the bare invocation id and the terminal `dbt.invocation` lands last with the worst-result outcome and elapsed duration — the same shape `emit_run_results` emits | exercised by every `mixed_history` consumer |
+| `WorkerBackend` eviction scanned via get/re-put, rotating the first 256 queued items to the tail on every eviction and racing a sentinel loss under concurrent producers | correctness | The scan runs in place on the queue's deque under its own mutex — survivors keep position, no pull/re-put race | `test_eviction_never_takes_sentinels` (order asserted), `test_eviction_scan_is_bounded` |
+
 ## 7. Insight quality
 
 On controlled histories (`test_insight_quality.py`, 10 tests): each rule
@@ -189,12 +204,14 @@ seeded healthy segments.
   (`%`, `_`, `\`) match literally. Adequate per spec §23 until volume
   thresholds in §24.4 force tsvector.
 - **LISTEN/NOTIFY is at-most-once**: a replica disconnected during a
-  commit misses that notification. SSE is explicitly a hint channel —
+  commit misses that notification — the bridge detects the drop and
+  re-listens (bounded backoff, proven via `pg_terminate_backend`), but
+  nothing replays what was missed. SSE is explicitly a hint channel —
   clients must re-fetch on reconnect (documented contract).
-- **Notification payload cap**: batches producing > 8 KB of stream
-  messages have the notify packed to the largest fitting prefix; local
-  delivery is unaffected, remote replicas may drop the tail of very
-  insight-heavy batches.
+- **Notification payload cap**: batches producing > 7 KB of stream
+  messages collapse to a single `refresh` hint; local delivery is
+  unaffected, remote replicas get a refetch signal instead of the
+  message list.
 - **Timeline cap**: runs over 10k events return `truncated: true`; the
   full history remains in canonical events and paged queries.
 - **Rebuild is offline for insights/incidents** — a full rebuild deletes

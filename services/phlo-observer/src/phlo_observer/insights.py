@@ -8,11 +8,12 @@ a subsequent success event auto-resolves matching open insights.
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from observe_core.timestamps import utcnow
+from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -127,11 +128,11 @@ class BatchState:
                 ).scalars()
             }
         insight_stmt = select(Insight).where(Insight.state == "open")
-        incident_stmt = select(incidents.Incident).where(incidents.Incident.state == "open")
         if entity_ids:
             insight_stmt = insight_stmt.where(
                 or_(Insight.entity_id.in_(entity_ids), Insight.entity_id.is_(None))
             )
+            incident_stmt = select(incidents.Incident).where(incidents.Incident.state == "open")
             dialect = getattr(getattr(session, "bind", None), "dialect", None)
             if dialect is not None and dialect.name == "postgresql":
                 # jsonb ?| — incidents whose entity array overlaps the batch.
@@ -140,8 +141,13 @@ class BatchState:
                 )
             # Non-Postgres dialects (dev/test SQLite) keep the full open
             # scan: correct, just not bounded — datasets there stay small.
+            open_incidents = list((await session.execute(incident_stmt)).scalars())
+        else:
+            # A batch with no entities can only dedupe entity-less open
+            # insights; nothing it produces can join an existing incident.
+            insight_stmt = insight_stmt.where(Insight.entity_id.is_(None))
+            open_incidents = []
         open_insights = list((await session.execute(insight_stmt)).scalars())
-        open_incidents = list((await session.execute(incident_stmt)).scalars())
         return cls(
             baselines=baseline_rows,
             open_by_dedupe={i.dedupe_key: i for i in open_insights if i.dedupe_key},
@@ -336,7 +342,9 @@ async def evaluate(
                     rule_id="volume-spike",
                     kind="anomaly",
                     severity="warning",
-                    title=f"Volume spike on {ent}",
+                    # The metric key carries the partition suffix — the title
+                    # names which partitioned baseline actually fired.
+                    title=f"Volume spike on {ent} ({metric})",
                     summary=(
                         f"observed {value:.0f} rows vs rolling median "
                         f"{base.median:.0f} ({value / base.median:.1f}x)"
@@ -383,6 +391,37 @@ async def evaluate(
     return findings
 
 
+def _touch_signal(insight: Insight, event: dict[str, Any]) -> None:
+    """Advance the insight's event-time anchor on a repeat finding.
+
+    ``last_observed_at`` tracks the newest producing event's time so
+    incident grouping windows on the latest signal rather than the first —
+    and an out-of-order repeat can never move it backwards.
+    """
+    raw = event.get("observed_at")
+    if raw is None:
+        return
+    try:
+        new = raw if isinstance(raw, dt.datetime) else parse_rfc3339(str(raw))
+        if new.tzinfo is None:
+            new = new.replace(tzinfo=dt.UTC)
+    except (ValueError, TypeError):
+        return
+    attrs = dict(insight.attributes or {})
+    old_raw = attrs.get("last_observed_at") or attrs.get("observed_at")
+    if old_raw:
+        try:
+            old = parse_rfc3339(str(old_raw))
+            if old.tzinfo is None:
+                old = old.replace(tzinfo=dt.UTC)
+            if new <= old:
+                return
+        except (ValueError, TypeError):
+            pass
+    attrs["last_observed_at"] = new.isoformat()
+    insight.attributes = attrs
+
+
 async def record_findings(
     session: AsyncSession,
     event: dict[str, Any],
@@ -426,6 +465,7 @@ async def record_findings(
                 if eid not in merged and len(merged) < 64:
                     merged.append(eid)
             existing.evidence_event_ids = merged
+            _touch_signal(existing, event)
             touched.append(existing)
             continue
         row = Insight(

@@ -325,54 +325,34 @@ class WorkerBackend:
         Control sentinels (``_FlushRequest``/``_STOP``) are never evicted:
         dropping one would hang ``flush()``/``close()``. Critical events
         are evicted only when the scanned window holds nothing else; the
-        caller spools them rather than counting a drop. Items pulled during
-        the scan are re-queued in their original order.
+        caller spools them rather than counting a drop.
+
+        The scan runs in place on the queue's own deque under its mutex:
+        survivors keep their positions, so eviction never reorders the
+        stream, and a racing producer cannot interleave between a pull and
+        a re-put (the get/re-put dance could drop a sentinel).
         """
-        held: list[Any] = []
-        evicted: CanonicalEvent | None = None
-        oldest_critical: CanonicalEvent | None = None
-        for _ in range(self._EVICT_SCAN_LIMIT):
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(item, CanonicalEvent):
-                if item.delivery == Delivery.CRITICAL:
-                    if oldest_critical is None:
-                        oldest_critical = item
-                elif evicted is None:
-                    evicted = item
+        with self._queue.mutex:
+            items = self._queue.queue
+            evicted_index: int | None = None
+            critical_index: int | None = None
+            for i in range(min(len(items), self._EVICT_SCAN_LIMIT)):
+                item = items[i]
+                if not isinstance(item, CanonicalEvent):
                     continue
-            held.append(item)
-        if evicted is None and oldest_critical is not None:
-            # Queue holds only criticals/sentinels: the oldest critical makes
-            # room and is spooled by the caller. Compare by identity — two
-            # canonical events may be equal by value.
-            for i, item in enumerate(held):
-                if item is oldest_critical:
-                    del held[i]
-                    break
-            evicted = oldest_critical
-        for item in held:
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                # A racing producer refilled the slot between the scan and the
-                # re-put. Sentinels must never be lost; criticals go to the
-                # spool; anything else counts as a normal drop.
-                if isinstance(item, CanonicalEvent):
-                    if item.delivery == Delivery.CRITICAL:
-                        self.delivery.spool_event(item)
-                    else:
-                        self.stats.incr(
-                            "dropped_debug"
-                            if item.delivery == Delivery.DEBUG
-                            else "dropped_telemetry"
-                        )
+                if item.delivery == Delivery.CRITICAL:
+                    if critical_index is None:
+                        critical_index = i
                 else:
-                    with contextlib.suppress(queue.Full):
-                        self._queue.put(item, timeout=0.5)
-        return evicted
+                    evicted_index = i
+                    break
+            index = evicted_index if evicted_index is not None else critical_index
+            if index is None:
+                return None
+            evicted = items[index]
+            del items[index]
+            self._queue.not_full.notify()
+            return evicted
 
     # -- worker ------------------------------------------------------------------
 

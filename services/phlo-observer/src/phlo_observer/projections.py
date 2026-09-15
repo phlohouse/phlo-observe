@@ -414,42 +414,6 @@ def apply_run_state(run: Run, state: dict[str, Any], now: Any) -> None:
     run.provenance = se.provenance(state, se.RUN_RULE, se.RUN_RULE_VERSION, now)
 
 
-def _fold_derived(
-    entity_states: dict[str, dict[str, Any]],
-    edge_states: dict[tuple[str, str, str], dict[str, Any]],
-    batch: se.DerivedBatch,
-    event: dict[str, Any],
-    event_id: str,
-) -> None:
-    """Fold one event's derived batch into rebuild accumulators."""
-    observed = event.get("observed_at")
-    for eid, est in batch.entities.items():
-        target = entity_states.setdefault(eid, {**est, "first_seen_at": None, "last_seen_at": None})
-        se._record(target, event)
-        if est.get("attributes"):
-            target["attributes"] = {**(target.get("attributes") or {}), **est["attributes"]}
-        if observed:
-            if target["first_seen_at"] is None or observed < target["first_seen_at"]:
-                target["first_seen_at"] = observed
-            if target["last_seen_at"] is None or observed > target["last_seen_at"]:
-                target["last_seen_at"] = observed
-    for edge in batch.edges:
-        key = (edge.from_entity, edge.to_entity, edge.relationship_type)
-        estate = edge_states.setdefault(
-            key,
-            {
-                "from_entity": edge.from_entity,
-                "to_entity": edge.to_entity,
-                "relationship_type": edge.relationship_type,
-                "method": edge.method,
-                "confidence": edge.confidence,
-                "source_event_ids": [],
-            },
-        )
-        estate["confidence"] = max(estate["confidence"], edge.confidence)
-        estate["source_event_ids"] = se.merge_edge_sources(estate["source_event_ids"], event_id)
-
-
 async def _paged_events(
     session: AsyncSession,
     stmt: Any,
@@ -536,7 +500,7 @@ async def rebuild_projections(
         if rid:
             state = run_states.setdefault(rid, se.new_run_state(rid))
             se.apply_run_event(state, event)
-        _fold_derived(entity_states, edge_states, batch, event, str(row.event_id))
+        _accumulate(entity_states, edge_states, batch, event, str(row.event_id))
         if not run_id:
             # The shared insight pass: evaluate -> record -> group -> resolve
             # -> baselines -> asset fold, identical to incremental ingest.
