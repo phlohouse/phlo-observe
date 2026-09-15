@@ -91,6 +91,13 @@ def observations_of(event: dict[str, Any]) -> list[tuple[str, str, float]]:
         if entity:
             out.append((entity, _key(str(attrs["metric"])), value))
     elif name in ("pipeline.run", "dlt.pipeline.run") and event.get("duration_ms"):
+        # Run durations belong to the pipeline's history, not the one-off
+        # run entity: a per-run baseline can never reach the warm-up
+        # threshold, so duration-regression could never fire.
+        job = corr.get("job_id") or corr.get("pipeline")
+        if job:
+            producer = (event.get("source") or {}).get("producer") or "phlo"
+            entity = f"job://{producer}/{job}"
         if entity:
             out.append((entity, _key("run.duration_ms"), float(event["duration_ms"])))
     elif attrs.get("rows_written") is not None or attrs.get("row_count") is not None:
