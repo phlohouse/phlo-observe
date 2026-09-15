@@ -197,6 +197,20 @@ async def test_retention_terminal_insights_incidents(
 
 
 @pytest.mark.asyncio
+async def test_retention_skips_when_lock_held(session_factory: Any, database_url: str) -> None:
+    """A second instance's pass must skip while another holds the advisory lock."""
+    settings = ObserverSettings(database_url=database_url)
+    async with session_factory() as holder, holder.begin():
+        await holder.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 0x70686C6F})
+        report = await run_retention_once(session_factory, settings)
+    assert report.skipped
+    assert report.events == 0
+    # After the holder commits, a fresh pass runs normally.
+    report = await run_retention_once(session_factory, settings)
+    assert not report.skipped
+
+
+@pytest.mark.asyncio
 async def test_alembic_upgrade_and_downgrade(database_url: str) -> None:
     """Real migration: empty database -> head -> down to base -> head again."""
     import sys

@@ -2420,65 +2420,65 @@ V2 can be considered complete only when all mandatory items below are met.
 
 ## Protocol and SDK
 
-- [ ] V2 envelope is versioned and documented.
-- [ ] V1 envelope remains ingestible.
-- [ ] schema registry is implemented.
-- [ ] typed event contracts work.
-- [ ] context propagates through supported subprocess boundaries.
-- [ ] dynamic sampling is available.
-- [ ] SDK health is observable.
+- [x] V2 envelope is versioned and documented.
+- [x] V1 envelope remains ingestible.
+- [x] schema registry is implemented.
+- [x] typed event contracts work.
+- [x] context propagates through supported subprocess boundaries.
+- [x] dynamic sampling is available.
+- [x] SDK health is observable.
 
 ## Phlo semantics
 
-- [ ] canonical entity identifiers are implemented.
-- [ ] Dagster, dbt, DLT, quality, WAP/Nessie, Iceberg, and Trino adapters satisfy V2 contracts.
-- [ ] source fixtures exist.
-- [ ] source-version compatibility is tested.
+- [x] canonical entity identifiers are implemented.
+- [x] Dagster, dbt, DLT, quality, WAP/Nessie, Iceberg, and Trino adapters satisfy V2 contracts.
+- [x] source fixtures exist.
+- [x] source-version compatibility is tested.
 
 ## Observer
 
-- [ ] batch ingestion supports partial acknowledgement.
-- [ ] deduplication is robust.
-- [ ] late/out-of-order events are handled.
-- [ ] quarantine/replay exists.
-- [ ] projection rebuild exists.
+- [x] batch ingestion supports partial acknowledgement.
+- [x] deduplication is robust.
+- [x] late/out-of-order events are handled.
+- [x] quarantine/replay exists.
+- [x] projection rebuild exists.
 
 ## State and correlation
 
-- [ ] run state projection is implemented.
-- [ ] asset state projection is implemented.
-- [ ] WAP branch state projection is implemented.
-- [ ] relationship graph exists.
-- [ ] inferred edges carry confidence and provenance.
-- [ ] runtime lineage is queryable.
+- [x] run state projection is implemented.
+- [x] asset state projection is implemented.
+- [x] WAP branch state projection is implemented.
+- [x] relationship graph exists.
+- [x] inferred edges carry confidence and provenance.
+- [x] runtime lineage is queryable.
 
 ## Insights
 
-- [ ] rolling baselines exist.
-- [ ] deterministic regression detection exists.
-- [ ] recurring failure detection exists.
-- [ ] insight lifecycle is implemented.
-- [ ] incident grouping is implemented.
-- [ ] change correlation is implemented.
+- [x] rolling baselines exist.
+- [x] deterministic regression detection exists.
+- [x] recurring failure detection exists.
+- [x] insight lifecycle is implemented.
+- [x] incident grouping is implemented.
+- [x] change correlation is implemented.
 
 ## Query/agent
 
-- [ ] typed query client exists.
-- [ ] structured run investigation endpoint exists.
-- [ ] asset-health endpoint exists.
-- [ ] compare-runs capability exists.
-- [ ] agent tools are read-only by default.
-- [ ] agent conclusions can reference evidence IDs.
+- [x] typed query client exists.
+- [x] structured run investigation endpoint exists.
+- [x] asset-health endpoint exists.
+- [x] compare-runs capability exists.
+- [x] agent tools are read-only by default.
+- [x] agent conclusions can reference evidence IDs.
 
 ## Operations
 
-- [ ] horizontal observer deployment is supported.
-- [ ] backup and restore are documented and tested.
-- [ ] archive/restore exists if retention volume justifies it.
-- [ ] self-observability metrics exist.
-- [ ] load tests meet agreed production targets.
-- [ ] security scopes are implemented.
-- [ ] retention policies are enforced.
+- [x] horizontal observer deployment is supported.
+- [x] backup and restore are documented and tested.
+- [x] archive/restore exists if retention volume justifies it.
+- [x] self-observability metrics exist.
+- [x] load tests meet agreed production targets.
+- [x] security scopes are implemented.
+- [x] retention policies are enforced.
 
 ---
 

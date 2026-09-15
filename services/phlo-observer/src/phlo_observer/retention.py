@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -27,6 +27,10 @@ from phlo_observer.settings import ObserverSettings
 _TERMINAL_INSIGHT_STATES = ("resolved", "suppressed", "expired")
 _TERMINAL_INCIDENT_STATES = ("resolved", "suppressed")
 
+# Session-level advisory lock so only one observer instance runs a retention
+# pass at a time (spec §38). Chosen arbitrarily; must match across instances.
+_RETENTION_LOCK_KEY = 0x70686C6F
+
 
 @dataclass
 class RetentionReport:
@@ -39,6 +43,7 @@ class RetentionReport:
     incidents: int = 0
     ingest_failures: int = 0
     analyses: int = 0
+    skipped: bool = False
 
 
 async def run_retention_once(
@@ -48,6 +53,14 @@ async def run_retention_once(
     report = RetentionReport()
     now = utcnow()
     async with factory() as session, session.begin():
+        held = await session.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:key)"),
+            {"key": _RETENTION_LOCK_KEY},
+        )
+        if not held:
+            # Another instance holds the retention lock; it releases on commit.
+            report.skipped = True
+            return report
         raw_cutoff = now  # expires_at was stamped at insert
         result = await session.execute(delete(RawEvent).where(RawEvent.expires_at <= raw_cutoff))
         report.raw_events = _rowcount(result)
