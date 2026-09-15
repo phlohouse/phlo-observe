@@ -51,7 +51,15 @@ from phlo_observer.metrics import (
     PERSIST_DURATION,
     QUEUE_DEPTH,
 )
-from phlo_observer.models import Entity, IngestFailure, Run
+from phlo_observer.models import (
+    AgentAnalysis,
+    Entity,
+    Incident,
+    IngestFailure,
+    Insight,
+    Run,
+    SchemaRecord,
+)
 from phlo_observer.retention import retention_loop
 from phlo_observer.settings import ObserverSettings, load_settings
 from phlo_observer.store import (
@@ -750,6 +758,83 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(404, "incident not found")
             return result
 
+    _INSIGHT_STATES = {"open", "acknowledged", "resolved", "suppressed", "expired"}
+    _INCIDENT_STATES = {"open", "acknowledged", "resolved", "suppressed"}
+
+    @app.post(
+        "/v2/insights/{insight_id}/transition",
+        dependencies=[Depends(require_admin_token)],
+    )
+    async def v2_transition_insight(insight_id: str, request: Request) -> dict[str, Any]:
+        """Move an insight through its lifecycle (spec §15.3)."""
+        body = await request.json()
+        target = body.get("state")
+        if target not in _INSIGHT_STATES:
+            raise _http_error(400, f"state must be one of {sorted(_INSIGHT_STATES)}")
+        async with request.app.state.session_factory() as session, session.begin():
+            try:
+                iid = uuid.UUID(insight_id)
+            except ValueError:
+                raise _http_error(404, "insight not found") from None
+            row = await session.get(Insight, iid)
+            if row is None:
+                raise _http_error(404, "insight not found")
+            row.state = target
+            row.updated_at = utcnow()
+            if target == "resolved":
+                row.attributes = {**(row.attributes or {}), "resolved_manually": True}
+            return {"insight_id": insight_id, "state": target}
+
+    @app.post(
+        "/v2/incidents/{incident_id}/transition",
+        dependencies=[Depends(require_admin_token)],
+    )
+    async def v2_transition_incident(incident_id: str, request: Request) -> dict[str, Any]:
+        """Move an incident through its lifecycle."""
+        body = await request.json()
+        target = body.get("state")
+        if target not in _INCIDENT_STATES:
+            raise _http_error(400, f"state must be one of {sorted(_INCIDENT_STATES)}")
+        async with request.app.state.session_factory() as session, session.begin():
+            try:
+                iid = uuid.UUID(incident_id)
+            except ValueError:
+                raise _http_error(404, "incident not found") from None
+            row = await session.get(Incident, iid)
+            if row is None:
+                raise _http_error(404, "incident not found")
+            row.state = target
+            row.updated_at = utcnow()
+            if target == "resolved":
+                row.resolved_at = utcnow()
+            return {"incident_id": incident_id, "state": target}
+
+    @app.get("/v2/entities", dependencies=[Depends(require_read_token)])
+    async def v2_list_entities(
+        request: Request,
+        entity_type: str | None = Query(None, alias="type"),
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        """Entity registry listing with optional type filter."""
+        async with request.app.state.session_factory() as session:
+            stmt = select(Entity).order_by(Entity.entity_id).limit(limit)
+            if entity_type:
+                stmt = stmt.where(Entity.kind == entity_type)
+            rows = (await session.execute(stmt)).scalars()
+            return {
+                "items": [
+                    {
+                        "entity_id": r.entity_id,
+                        "entity_type": r.kind,
+                        "name": r.display_name,
+                        "first_seen": _fmt(r.first_seen_at),
+                        "last_seen": _fmt(r.last_seen_at),
+                        "attributes": r.attributes or {},
+                    }
+                    for r in rows
+                ]
+            }
+
     @app.get("/v2/events/{event_id}/provenance", dependencies=[Depends(require_read_token)])
     async def v2_event_provenance(event_id: str, request: Request) -> dict[str, Any]:
         """Which projections this event contributed to (spec §12.3)."""
@@ -924,6 +1009,101 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 "accepted": result.accepted,
                 "rejected": result.rejected,
                 "errors": result.errors,
+            }
+
+    @app.get("/v2/schemas", dependencies=[Depends(require_read_token)])
+    async def v2_list_schemas(request: Request) -> dict[str, Any]:
+        """Registered contract schemas (spec §8.3)."""
+        async with request.app.state.session_factory() as session:
+            rows = (
+                await session.execute(select(SchemaRecord).order_by(SchemaRecord.schema_id))
+            ).scalars()
+            return {
+                "items": [
+                    {
+                        "schema_id": r.schema_id,
+                        "version": r.version,
+                        "schema_hash": r.schema_hash,
+                        "registered_at": _fmt(r.registered_at),
+                    }
+                    for r in rows
+                ]
+            }
+
+    @app.post("/v2/schemas", dependencies=[Depends(require_ingest_token)])
+    async def v2_register_schema(request: Request) -> dict[str, Any]:
+        """Register or update a contract schema record."""
+        body = await request.json()
+        schema_id = body.get("schema_id")
+        if not schema_id:
+            raise _http_error(400, "schema_id is required")
+        import hashlib  # noqa: PLC0415
+        import json as _json  # noqa: PLC0415
+
+        schema_json = body.get("schema") or {}
+        digest = hashlib.sha256(_json.dumps(schema_json, sort_keys=True).encode()).hexdigest()
+        async with request.app.state.session_factory() as session, session.begin():
+            row = await session.get(SchemaRecord, schema_id)
+            if row is None:
+                row = SchemaRecord(
+                    schema_id=schema_id,
+                    version=str(body.get("version") or "1"),
+                    schema_hash=digest,
+                    schema_json=schema_json,
+                    registered_at=utcnow(),
+                )
+                session.add(row)
+            else:
+                row.version = str(body.get("version") or row.version)
+                row.schema_hash = digest
+                row.schema_json = schema_json
+            return {"schema_id": schema_id, "schema_hash": digest}
+
+    @app.post("/v2/analyses", dependencies=[Depends(require_ingest_token)])
+    async def v2_record_analysis(request: Request) -> dict[str, Any]:
+        """Persist an LLM analysis with its evidence IDs (spec §21.4)."""
+        body = await request.json()
+        for field in ("model", "prompt_template_version", "output"):
+            if not body.get(field):
+                raise _http_error(400, f"{field} is required")
+        async with request.app.state.session_factory() as session, session.begin():
+            row = AgentAnalysis(
+                created_at=utcnow(),
+                model=body["model"],
+                prompt_template_version=str(body["prompt_template_version"]),
+                evidence_event_ids=body.get("evidence_event_ids") or [],
+                output=body["output"],
+                feedback=body.get("feedback"),
+                subject=body.get("subject"),
+            )
+            session.add(row)
+            await session.flush()
+            return {"analysis_id": str(row.id)}
+
+    @app.get("/v2/analyses", dependencies=[Depends(require_read_token)])
+    async def v2_list_analyses(
+        request: Request, limit: int = Query(50, ge=1, le=500)
+    ) -> dict[str, Any]:
+        """Recorded agent analyses, newest first."""
+        async with request.app.state.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(AgentAnalysis).order_by(AgentAnalysis.created_at.desc()).limit(limit)
+                )
+            ).scalars()
+            return {
+                "items": [
+                    {
+                        "analysis_id": str(r.id),
+                        "created_at": _fmt(r.created_at),
+                        "model": r.model,
+                        "prompt_template_version": r.prompt_template_version,
+                        "evidence_event_ids": r.evidence_event_ids or [],
+                        "output": r.output,
+                        "subject": r.subject,
+                    }
+                    for r in rows
+                ]
             }
 
     # -- health / metrics ----------------------------------------------------

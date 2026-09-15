@@ -1253,6 +1253,7 @@ version = "0.1.0"
 source = { editable = "packages/phlo-observe-sdk" }
 dependencies = [
     { name = "observe-core" },
+    { name = "observe-query" },
     { name = "pydantic" },
 ]
 
@@ -1281,6 +1282,7 @@ requires-dist = [
     { name = "dagster", marker = "extra == 'dagster'", specifier = ">=1.8" },
     { name = "dlt", marker = "extra == 'dlt'", specifier = ">=1.0" },
     { name = "observe-core", editable = "packages/observe-core" },
+    { name = "observe-query", editable = "packages/observe-query" },
     { name = "pandera", marker = "extra == 'pandera'", specifier = ">=0.20" },
     { name = "phlo-observe", extras = ["dagster", "dbt", "dlt", "pandera", "trino"], marker = "extra == 'all'", editable = "packages/phlo-observe-sdk" },
     { name = "pydantic", specifier = ">=2.8" },

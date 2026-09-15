@@ -6,7 +6,7 @@ import uuid
 from typing import Any
 
 import pytest
-from phlo_observer.models import IngestFailure
+from phlo_observer.models import Incident, IngestFailure, Insight
 from phlo_observer.stream import StreamHub, sse_encode
 from sqlalchemy import select
 
@@ -140,3 +140,106 @@ class TestQuarantine:
         # Raw payload is stored as text-wrapped dict, not the original JSON —
         # digest/text encoding is not replayable.
         assert resp.status_code in (200, 422)
+
+
+def _insight() -> Insight:
+    from observe_core.timestamps import utcnow
+
+    return Insight(
+        insight_id=uuid.uuid4(),
+        rule_id="test.rule",
+        rule_version=1,
+        title="t",
+        severity="warn",
+        state="open",
+        entity_id="asset://x/y",
+        evidence_event_ids=[],
+        evidence_metric_ids=[],
+        created_at=utcnow(),
+        updated_at=utcnow(),
+        attributes={},
+    )
+
+
+@pytest.mark.asyncio
+class TestLifecycle:
+    async def test_insight_transition(self, client: Any, session_factory: Any) -> None:
+        async with session_factory() as session, session.begin():
+            row = _insight()
+            session.add(row)
+            iid = str(row.insight_id)
+        resp = await client.post(f"/v2/insights/{iid}/transition", json={"state": "acknowledged"})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "acknowledged"
+        bad = await client.post(f"/v2/insights/{iid}/transition", json={"state": "bogus"})
+        assert bad.status_code == 400
+        missing = await client.post(
+            f"/v2/insights/{uuid.uuid4()}/transition", json={"state": "resolved"}
+        )
+        assert missing.status_code == 404
+
+    async def test_incident_transition_resolved(self, client: Any, session_factory: Any) -> None:
+        from observe_core.timestamps import utcnow
+
+        async with session_factory() as session, session.begin():
+            row = Incident(
+                incident_id=uuid.uuid4(),
+                title="i",
+                state="open",
+                severity="warn",
+                entities=[],
+                insight_ids=[],
+                timeline={},
+                impact={},
+                attributes={},
+                updated_at=utcnow(),
+            )
+            session.add(row)
+            iid = str(row.incident_id)
+        resp = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "resolved"})
+        assert resp.status_code == 200
+        assert resp.json()["state"] == "resolved"
+
+
+@pytest.mark.asyncio
+class TestRegistryEndpoints:
+    async def test_entities_listing(self, client: Any) -> None:
+        await client.post(
+            "/v1/events",
+            json=[_event(asset_key="ent/a", run_id="er1")],
+        )
+        resp = await client.get("/v2/entities")
+        assert resp.status_code == 200
+        ids = [i["entity_id"] for i in resp.json()["items"]]
+        assert any("asset://ent/a" in i for i in ids)
+
+    async def test_schemas_register_and_list(self, client: Any) -> None:
+        resp = await client.post(
+            "/v2/schemas",
+            json={"schema_id": "contract://test/x", "version": "2", "schema": {"a": 1}},
+        )
+        assert resp.status_code == 200
+        digest = resp.json()["schema_hash"]
+        listed = await client.get("/v2/schemas")
+        ids = [i["schema_id"] for i in listed.json()["items"]]
+        assert "contract://test/x" in ids
+        assert any(i["schema_hash"] == digest for i in listed.json()["items"])
+        assert (await client.post("/v2/schemas", json={})).status_code == 400
+
+    async def test_analyses_record_and_list(self, client: Any) -> None:
+        resp = await client.post(
+            "/v2/analyses",
+            json={
+                "model": "test-model",
+                "prompt_template_version": "v1",
+                "evidence_event_ids": ["e1"],
+                "output": {"summary": "s"},
+                "subject": "run://r/1",
+            },
+        )
+        assert resp.status_code == 200
+        listed = await client.get("/v2/analyses")
+        assert len(listed.json()["items"]) == 1
+        assert listed.json()["items"][0]["model"] == "test-model"
+        missing = await client.post("/v2/analyses", json={"model": "m"})
+        assert missing.status_code == 400

@@ -298,6 +298,28 @@ class SchemaRecord(Base):
     registered_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class AgentAnalysis(Base):
+    """LLM-generated analysis provenance (spec §21.4, §24.2).
+
+    Stores which model produced which output from which evidence IDs so a
+    generated conclusion is always traceable to its inputs.
+    """
+
+    __tablename__ = "observe_agent_analyses"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    model: Mapped[str] = mapped_column(String(255), nullable=False)
+    prompt_template_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_event_ids: Mapped[list[str]] = mapped_column(JsonColumn, nullable=False, default=list)
+    output: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    feedback: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    subject: Mapped[str | None] = mapped_column(String(1024))
+    """Entity or run the analysis is about, when applicable."""
+
+    __table_args__ = (Index("ix_observe_agent_analyses_created", "created_at"),)
+
+
 class IngestFailure(Base):
     """Quarantined raw payload (spec §24.2 observe_ingest_failures).
 

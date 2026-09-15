@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import alerts, baselines, incidents, insights, metrics, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
-from phlo_observer.models import Event, RawEvent, Run
+from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
 
@@ -288,6 +288,28 @@ async def persist_events(
                                 "run.changed",
                                 {"run_id": row.run_id, "event": row.event},
                             )
+                # Register contract schemas seen on envelopes (spec §8.3):
+                # an event carrying contract.schema_id upserts the registry
+                # row so schemas stay queryable without a separate publish.
+                contract_refs = {
+                    (row.payload.get("contract") or {}).get("schema_id"): row.payload.get(
+                        "contract"
+                    )
+                    for row in accepted_rows
+                    if row.contract_id
+                }
+                for schema_id, ref in contract_refs.items():
+                    await session.execute(
+                        pg_insert(SchemaRecord)
+                        .values(
+                            schema_id=schema_id,
+                            version=str((ref or {}).get("version", "1")),
+                            schema_hash=(ref or {}).get("schema_hash") or "",
+                            schema_json={},
+                            registered_at=received_at,
+                        )
+                        .on_conflict_do_nothing(index_elements=["schema_id"])
+                    )
                 await session.flush()
         except SQLAlchemyError:
             logger.warning(

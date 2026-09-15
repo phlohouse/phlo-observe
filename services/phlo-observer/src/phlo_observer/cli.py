@@ -162,6 +162,161 @@ def rebuild_projections_cmd(
     )
 
 
+@app.command()
+def archive(
+    out: Annotated[Path, typer.Argument(help="Output file (JSONL of canonical events)")],
+    since: Annotated[
+        str | None, typer.Option(help="Only events received after this ISO timestamp")
+    ] = None,
+    until: Annotated[
+        str | None, typer.Option(help="Only events received before this ISO timestamp")
+    ] = None,
+    batch: Annotated[int, typer.Option(help="Read batch size")] = 1000,
+) -> None:
+    """Export canonical events to a JSONL archive (spec §24.3).
+
+    Events are the source of truth: the archive contains the normalized
+    envelope payload per row, so ``restore`` can re-ingest it losslessly
+    and ``rebuild-projections`` recomputes all derived state.
+    """
+    import asyncio
+    import json
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from phlo_observer.db import make_engine, make_sessionmaker
+    from phlo_observer.models import Event
+
+    settings = _settings()
+    lo = datetime.fromisoformat(since) if since else None
+    hi = datetime.fromisoformat(until) if until else None
+
+    async def _dump() -> int:
+        engine = make_engine(settings)
+        written = 0
+        try:
+            factory = make_sessionmaker(engine)
+            with out.open("w") as fh:
+                async with factory() as session:
+                    offset = 0
+                    while True:
+                        stmt = select(Event).order_by(Event.received_at, Event.event_id)
+                        if lo:
+                            stmt = stmt.where(Event.received_at >= lo)
+                        if hi:
+                            stmt = stmt.where(Event.received_at <= hi)
+                        rows = (
+                            (await session.execute(stmt.offset(offset).limit(batch)))
+                            .scalars()
+                            .all()
+                        )
+                        if not rows:
+                            break
+                        for row in rows:
+                            fh.write(json.dumps(row.payload) + "\n")
+                        written += len(rows)
+                        offset += len(rows)
+                        if len(rows) < batch:
+                            break
+            return written
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_dump())
+    typer.echo(f"archived {n} events to {out}")
+
+
+@app.command()
+def restore(
+    src: Annotated[Path, typer.Argument(help="JSONL archive written by `archive`")],
+    batch: Annotated[int, typer.Option(help="Insert batch size")] = 500,
+) -> None:
+    """Re-ingest an event archive through the canonical persist path."""
+    import asyncio
+    import json
+
+    from phlo_observer.db import make_engine, make_sessionmaker
+    from phlo_observer.store import persist_events
+
+    settings = _settings()
+
+    async def _load() -> dict[str, int]:
+        engine = make_engine(settings)
+        accepted = rejected = 0
+        try:
+            factory = make_sessionmaker(engine)
+            async with factory() as session:
+                with src.open() as fh:
+                    buf: list[dict] = []
+                    for line in fh:
+                        line = line.strip()
+                        if line:
+                            buf.append(json.loads(line))
+                        if len(buf) >= batch:
+                            async with session.begin():
+                                r = await persist_events(session, buf)
+                            accepted += r.accepted
+                            rejected += r.rejected
+                            buf.clear()
+                    if buf:
+                        async with session.begin():
+                            r = await persist_events(session, buf)
+                        accepted += r.accepted
+                        rejected += r.rejected
+            return {"accepted": accepted, "rejected": rejected}
+        finally:
+            await engine.dispose()
+
+    result = asyncio.run(_load())
+    typer.echo(f"restored {result['accepted']} events ({result['rejected']} rejected)")
+
+
+@app.command()
+def reprocess(
+    since: Annotated[str, typer.Option(help="Reprocess events received after this ISO timestamp")],
+    until: Annotated[
+        str | None, typer.Option(help="Reprocess events received before this ISO timestamp")
+    ] = None,
+) -> None:
+    """Rebuild projections for events in a received-at window (spec §24.3).
+
+    Unlike ``rebuild-projections`` this only replays the matching events
+    through the reducer, merging into existing projections — for surgical
+    reprocessing after a hotfix rather than a full rebuild.
+    """
+    import asyncio
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from phlo_observer.db import make_engine, make_sessionmaker
+    from phlo_observer.models import Event
+    from phlo_observer.projections import apply_event
+
+    settings = _settings()
+    lo = datetime.fromisoformat(since)
+    hi = datetime.fromisoformat(until) if until else None
+
+    async def _run() -> int:
+        engine = make_engine(settings)
+        try:
+            factory = make_sessionmaker(engine)
+            async with factory() as session, session.begin():
+                stmt = select(Event).where(Event.received_at >= lo).order_by(Event.received_at)
+                if hi:
+                    stmt = stmt.where(Event.received_at <= hi)
+                rows = (await session.execute(stmt)).scalars().all()
+                for row in rows:
+                    await apply_event(session, row)
+                return len(rows)
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"reprocessed {n} events")
+
+
 @app.command(name="replay-spool")
 def replay_spool(
     spool_dir: Annotated[Path, typer.Argument(help="Spool directory to replay")],
