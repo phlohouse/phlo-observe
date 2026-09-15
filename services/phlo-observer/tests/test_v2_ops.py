@@ -76,6 +76,19 @@ class TestStreamHub:
 
 
 @pytest.mark.asyncio
+class TestAlertCooldown:
+    async def test_cooldown_suppresses_repeat(self) -> None:
+        from phlo_observer import alerts
+
+        tasks: set[Any] = set()
+        assert await alerts.notify(["http://x"], "insight", {}, tasks=tasks, cooldown_key="k1")
+        assert not await alerts.notify(["http://x"], "insight", {}, tasks=tasks, cooldown_key="k1")
+        # A different key is not suppressed; a missing key always sends.
+        assert await alerts.notify(["http://x"], "insight", {}, tasks=tasks, cooldown_key="k2")
+        assert await alerts.notify(["http://x"], "insight", {}, tasks=tasks)
+
+
+@pytest.mark.asyncio
 class TestSearch:
     async def test_q_matches_event_name(self, client: Any) -> None:
         await client.post(

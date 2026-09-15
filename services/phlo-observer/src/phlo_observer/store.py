@@ -278,6 +278,7 @@ async def persist_events(
                                         "entity": insight.entity_id,
                                     },
                                     tasks=alert_tasks,
+                                    cooldown_key=insight.dedupe_key or str(insight.insight_id),
                                 )
                     await insights.resolve_for_event(session, event)
                     await baselines.update_baselines(session, event)
