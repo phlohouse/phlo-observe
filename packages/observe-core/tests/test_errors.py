@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
+from observe_core.drains.memory import MemoryDrain
 from observe_core.errors import ObservedError, error_info_from_exception
+from observe_core.runtime import Runtime
 
 
 def test_observed_error_fields():
@@ -78,3 +82,51 @@ def test_no_locals_leak():
         info = err.to_error_info()
     # cause captures type+message only, no locals
     assert info.details["cause"]["exception_type"] == "ValueError"
+
+
+def test_unserializable_error_details_do_not_drop_event(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """A non-JSON value in ``details`` is normalized, not a dropped event."""
+    from observe_core import flush, observe
+
+    class Opaque:
+        pass
+
+    _, drain = captured
+    try:
+        with observe("pipeline.run"):
+            raise ObservedError("boom", code="X", details={"obj": Opaque()})
+    except ObservedError:
+        pass
+    flush(2.0)
+    (ev,) = drain.events
+    assert ev.data["outcome"] == "failure"
+    assert ev.data["error"]["code"] == "X"
+    assert ev.data["error"]["details"]["obj"]["_observe_unserializable"].endswith("Opaque")
+
+
+def test_unserializable_details_on_critical_event(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """Critical events must survive bad detail values, not silently vanish."""
+    from observe_core import event, flush
+    from observe_core.models import ErrorInfo
+
+    class Opaque:
+        pass
+
+    _, drain = captured
+    event(
+        "wap.promote",
+        delivery="critical",
+        error=ErrorInfo(
+            message="m",
+            details={"obj": Opaque(), "when": dt.datetime(2025, 1, 1, tzinfo=dt.UTC)},
+        ),
+    )
+    flush(2.0)
+    (ev,) = drain.events
+    assert ev.data["delivery"] == "critical"
+    assert ev.data["error"]["details"]["obj"]["_observe_unserializable"].endswith("Opaque")
+    assert ev.data["error"]["details"]["when"] == "2025-01-01T00:00:00.000Z"

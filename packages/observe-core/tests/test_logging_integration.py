@@ -85,3 +85,27 @@ def test_correlation_filter_attaches_ids(captured: tuple[Runtime, MemoryDrain]):
     assert record.run_id == "R77"
     assert record.trace_id == "t9"
     assert record.span_id == "-"
+
+
+def test_correlation_filter_sees_operation_context(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """Log records inside an ``observe()`` block carry its correlation."""
+    from observe_core import observe
+
+    _, _ = captured
+    record = logging.LogRecord(
+        name="x",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="m",
+        args=(),
+        exc_info=None,
+    )
+    with observe("pipeline.run", correlation={"run_id": "R5"}) as evt:
+        CorrelationFilter().filter(record)
+        op_span = evt.correlation["span_id"]
+    assert record.run_id == "R5"
+    assert record.span_id == op_span
+    assert record.trace_id != "-"

@@ -5,6 +5,28 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from observe_core.config import ObserveSettings
+
+
+def _load_settings() -> ObserveSettings | None:
+    """Resolve ``ObserveSettings``, or print an error and return None.
+
+    Config errors get an operator-facing message instead of a traceback
+    (spec §73).
+    """
+    from pydantic import ValidationError
+    from pydantic_settings import SettingsError
+
+    from observe_core.config import ObserveSettings, format_settings_error
+
+    try:
+        return ObserveSettings()
+    except (ValidationError, SettingsError) as exc:
+        print(f"error: {format_settings_error(exc)}", file=sys.stderr)
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,9 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "config":
-        from observe_core.config import ObserveSettings
-
-        settings = ObserveSettings()
+        settings = _load_settings()
+        if settings is None:
+            return 1
         data = settings.model_dump(mode="json")
         # Never print configured secrets: drain credentials and headers are
         # masked before output.
@@ -44,14 +66,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "emit-test":
+        from pydantic import ValidationError
+        from pydantic_settings import SettingsError
+
         from observe_core import (
             configure,
             event,
             flush,
             shutdown,
         )
+        from observe_core.config import format_settings_error
 
-        configure()
+        try:
+            configure()
+        except (ValidationError, SettingsError) as exc:
+            print(f"error: {format_settings_error(exc)}", file=sys.stderr)
+            return 1
         event(args.event, attributes={"cli": "emit-test"})
         flush(timeout=args.wait)
         shutdown(timeout=2.0)
@@ -66,11 +96,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "replay-spool":
         from pathlib import Path
 
-        from observe_core.config import ObserveSettings
         from observe_core.runtime import Runtime
         from observe_core.spool import Spool
 
-        settings = ObserveSettings()
+        settings = _load_settings()
+        if settings is None:
+            return 1
         drains = [Runtime._build_drain(cfg) for cfg in settings.drains]
         # Spooled events exist to reach a remote observer: replaying to a
         # console/jsonl drain would print them locally and then delete the

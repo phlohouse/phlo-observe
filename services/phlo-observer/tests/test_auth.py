@@ -66,8 +66,8 @@ async def test_read_accepts_read_token(authed_client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_health_endpoints_unauthenticated(authed_client: AsyncClient) -> None:
-    assert (await authed_client.get("/healthz")).status_code == 200
-    assert (await authed_client.get("/readyz")).status_code == 200
+    assert (await authed_client.get("/health/live")).status_code == 200
+    assert (await authed_client.get("/health/ready")).status_code == 200
     # metrics stays private unless metrics_public=true
     assert (await authed_client.get("/metrics")).status_code == 401
     resp = await authed_client.get("/metrics", headers={"Authorization": "Bearer read-one"})

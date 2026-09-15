@@ -107,3 +107,37 @@ def test_positive_integer_validation():
         ObserveSettings(service_name="x", queue_capacity=0)
     with pytest.raises(ValidationError):
         ObserveSettings(service_name="x", max_event_bytes=-1)
+
+
+def test_env_redact_lists_comma_separated(monkeypatch):
+    """Spec §19: OBSERVE_REDACT_KEYS=password,token parses as a list."""
+    monkeypatch.setenv("OBSERVE_REDACT_KEYS", "password, token")
+    monkeypatch.setenv("OBSERVE_REDACT_PATHS", "attributes.conn.password")
+    monkeypatch.setenv("OBSERVE_REDACT_VALUE_PATTERNS", "secret-[0-9]+")
+    s = ObserveSettings(service_name="x")
+    assert s.redact_keys == ["password", "token"]
+    assert s.redact_paths == ["attributes.conn.password"]
+    assert s.redact_value_patterns == ["secret-[0-9]+"]
+
+
+def test_env_redact_lists_json(monkeypatch):
+    """JSON array syntax still works for operators who prefer it."""
+    monkeypatch.setenv("OBSERVE_REDACT_KEYS", '["a", "b"]')
+    s = ObserveSettings(service_name="x")
+    assert s.redact_keys == ["a", "b"]
+
+
+def test_env_redact_lists_empty(monkeypatch):
+    monkeypatch.setenv("OBSERVE_REDACT_KEYS", "")
+    assert ObserveSettings(service_name="x").redact_keys == []
+
+
+def test_cli_config_bad_env_is_clean_error(monkeypatch, capsys):
+    """A malformed OBSERVE_* var must not dump a raw traceback (spec §73)."""
+    from observe_core.cli import main
+
+    monkeypatch.setenv("OBSERVE_QUEUE_CAPACITY", "not-a-number")
+    assert main(["config"]) == 1
+    err = capsys.readouterr().err
+    assert "OBSERVE_QUEUE_CAPACITY" in err
+    assert "Traceback" not in err

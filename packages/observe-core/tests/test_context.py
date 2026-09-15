@@ -155,6 +155,93 @@ def test_multiple_producer_threads(captured: tuple[Runtime, MemoryDrain]):
     assert len(_data(drain)) == 50
 
 
+# -- active operation context (spec §10.5 precedence level 2) ----------------
+
+
+def test_event_inside_operation_inherits_correlation(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """``event()`` inside ``observe()`` inherits the operation's context."""
+    _, drain = captured
+    with observe("pipeline.run", correlation={"run_id": "R1"}) as evt:
+        evt.set_correlation(asset_key="a.b")
+        event("wap.promote", delivery="critical")
+    events = _data(drain)
+    promote = next(e for e in events if e["event"] == "wap.promote")
+    run = next(e for e in events if e["event"] == "pipeline.run")
+    assert promote["correlation"]["run_id"] == "R1"
+    assert promote["correlation"]["asset_key"] == "a.b"
+    assert promote["correlation"]["trace_id"] == run["correlation"]["trace_id"]
+    assert promote["correlation"]["span_id"] == run["correlation"]["span_id"]
+
+
+def test_event_explicit_correlation_beats_operation(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """Explicit event values still win over the active operation context."""
+    _, drain = captured
+    with observe("pipeline.run", correlation={"run_id": "R1"}):
+        event("pipeline.step", correlation={"run_id": "R2"})
+    (step,) = [e for e in _data(drain) if e["event"] == "pipeline.step"]
+    assert step["correlation"]["run_id"] == "R2"
+    # trace linkage still comes from the operation
+    assert step["correlation"]["trace_id"] is not None
+
+
+def test_operation_context_beats_ambient(captured: tuple[Runtime, MemoryDrain]):
+    """Operation context sits above ambient binding, below explicit values."""
+    _, drain = captured
+    with (
+        bind_context(run_id="ambient", branch="dev"),
+        observe("pipeline.run", correlation={"run_id": "R1"}),
+    ):
+        event("pipeline.step")
+    (step,) = [e for e in _data(drain) if e["event"] == "pipeline.step"]
+    assert step["correlation"]["run_id"] == "R1"
+    assert step["correlation"]["branch"] == "dev"  # ambient fills op gaps
+
+
+def test_event_after_operation_block_is_uncorrelated(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """The operation context ends with the block."""
+    _, drain = captured
+    with observe("pipeline.run", correlation={"run_id": "R1"}):
+        pass
+    event("pipeline.step")
+    (step,) = [e for e in _data(drain) if e["event"] == "pipeline.step"]
+    assert step["correlation"]["run_id"] is None
+    assert step["correlation"]["trace_id"] is None
+
+
+def test_event_inside_nested_operation_uses_inner(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    _, drain = captured
+    with (
+        observe("pipeline.run", correlation={"run_id": "outer"}),
+        observe("pipeline.step", correlation={"run_id": "inner"}),
+    ):
+        event("application.log")
+    (log,) = [e for e in _data(drain) if e["event"] == "application.log"]
+    assert log["correlation"]["run_id"] == "inner"
+
+
+async def test_event_in_spawned_task_inherits_operation(
+    captured: tuple[Runtime, MemoryDrain],
+):
+    """contextvars carry the operation context into tasks spawned inside it."""
+    _, drain = captured
+
+    async def child() -> None:
+        event("pipeline.step")
+
+    with observe("pipeline.run", correlation={"run_id": "R1"}):
+        await asyncio.create_task(child())
+    (step,) = [e for e in _data(drain) if e["event"] == "pipeline.step"]
+    assert step["correlation"]["run_id"] == "R1"
+
+
 def test_configure_resets_and_replaces(make_runtime):
     rt1 = make_runtime(service_name="one")
     rt2 = make_runtime(service_name="two")

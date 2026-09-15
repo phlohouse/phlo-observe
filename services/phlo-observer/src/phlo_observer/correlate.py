@@ -134,6 +134,7 @@ async def link_trace_to_run(session: AsyncSession, event: Event) -> None:
     )
     run_id = result.scalar_one_or_none()
     if run_id:
+        # No metric increment here: correlation_method() already counted this
+        # event once under "trace_id" at staging time.
         event.run_id = run_id
         event.correlation_method = "trace_id"
-        metrics.CORRELATION.labels(method="trace_id").inc()

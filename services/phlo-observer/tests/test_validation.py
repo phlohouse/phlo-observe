@@ -383,6 +383,71 @@ def test_load_settings_resolves_token_file(
     assert set(settings.ingest_tokens) == {"file-token-1", "file-token-2"}
 
 
+# -- configuration env parsing and §73 clean errors -----------------------------
+
+
+def test_tokens_from_comma_separated_env(database_url: str, monkeypatch: Any) -> None:
+    """``PHLO_OBSERVER_*_TOKENS=a,b`` — the documented form — must parse."""
+    from phlo_observer.settings import load_settings
+
+    monkeypatch.delenv("PHLO_OBSERVER_INGEST_TOKENS_FILE", raising=False)
+    monkeypatch.delenv("PHLO_OBSERVER_READ_TOKENS_FILE", raising=False)
+    monkeypatch.setenv("PHLO_OBSERVER_INGEST_TOKENS", "ing-a, ing-b")
+    monkeypatch.setenv("PHLO_OBSERVER_READ_TOKENS", "read-a")
+    monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+    settings = load_settings()
+    assert settings.ingest_tokens == ["ing-a", "ing-b"]
+    assert settings.read_tokens == ["read-a"]
+
+
+def test_tokens_from_json_env(database_url: str, monkeypatch: Any) -> None:
+    """JSON array syntax also works for operators who prefer it."""
+    from phlo_observer.settings import load_settings
+
+    monkeypatch.delenv("PHLO_OBSERVER_INGEST_TOKENS_FILE", raising=False)
+    monkeypatch.setenv("PHLO_OBSERVER_INGEST_TOKENS", '["x", "y"]')
+    monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+    assert load_settings().ingest_tokens == ["x", "y"]
+
+
+def test_load_settings_bad_env_is_operator_facing(database_url: str, monkeypatch: Any) -> None:
+    """A malformed env var surfaces as a readable ValueError, not a raw
+    ValidationError traceback (spec §73)."""
+    from phlo_observer.settings import load_settings
+
+    monkeypatch.delenv("PHLO_OBSERVER_DATABASE_URL_FILE", raising=False)
+    monkeypatch.setenv("PHLO_OBSERVER_PORT", "not-a-number")
+    monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+    with pytest.raises(ValueError, match="PHLO_OBSERVER_PORT") as exc:
+        load_settings()
+    assert "not-a-number" in str(exc.value)
+
+
+def test_load_settings_error_redacts_secret_inputs(database_url: str, monkeypatch: Any) -> None:
+    """Config error output must not echo secret-bearing env values."""
+    from phlo_observer.settings import load_settings
+
+    monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", "postgresql+asyncpg://u:s3cretpw@h/db")
+    monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL_FILE", "/nonexistent/secret")
+    with pytest.raises(ValueError) as exc:
+        load_settings()
+    message = str(exc.value)
+    assert "PHLO_OBSERVER_DATABASE_URL" in message
+    assert "s3cretpw" not in message
+
+
+def test_cli_config_invalid_env_exits_cleanly(monkeypatch: Any) -> None:
+    """``phlo-observer config`` with a bad env var exits 1, no traceback."""
+    from phlo_observer.cli import app as cli_app
+    from typer.testing import CliRunner
+
+    monkeypatch.setenv("PHLO_OBSERVER_PORT", "not-a-number")
+    result = CliRunner().invoke(cli_app, ["config"])
+    assert result.exit_code == 1
+    assert "PHLO_OBSERVER_PORT" in result.output
+    assert "Traceback" not in result.output
+
+
 @pytest.mark.asyncio
 async def test_docs_disabled_setting(database_url: str, session_factory: Any) -> None:
     from httpx import ASGITransport

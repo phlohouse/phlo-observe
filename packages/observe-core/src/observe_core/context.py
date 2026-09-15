@@ -110,6 +110,25 @@ def _operation_context() -> dict[str, Any] | None:
     return _operation.get()
 
 
+def operation_correlation() -> dict[str, Any]:
+    """Correlation carried by the enclosing ``observe()`` operation, if any.
+
+    The active operation context sits between explicit event values and bound
+    ambient context in the precedence order: instantaneous ``event()`` calls
+    inside an ``observe()`` block inherit the operation's ``run_id``,
+    ``trace_id`` and span coordinates rather than emitting uncorrelated.
+    """
+    op = _operation.get()
+    return dict((op or {}).get("correlation") or {})
+
+
+def effective_correlation() -> dict[str, str]:
+    """Ambient + active-operation canonical correlation, operation winning."""
+    merged: dict[str, Any] = {**ambient_correlation()}
+    merged.update(operation_correlation())
+    return {k: str(v) for k, v in merged.items() if k in CORRELATION_KEYS and v is not None}
+
+
 def _push_operation(ctx: dict[str, Any]) -> contextvars.Token[dict[str, Any] | None]:
     return _operation.set(ctx)
 

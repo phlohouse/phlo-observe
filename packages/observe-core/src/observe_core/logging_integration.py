@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from observe_core.context import ambient_correlation
+from observe_core.context import effective_correlation
 from observe_core.emit import event
 from observe_core.models import Category, Delivery, Severity
 
@@ -34,7 +34,7 @@ class CorrelationFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         """Attach ``run_id``/``trace_id``/``span_id``/``job_id`` to the record."""
-        corr = ambient_correlation()
+        corr = effective_correlation()
         for key in ("run_id", "trace_id", "span_id", "job_id", "asset_key"):
             setattr(record, key, corr.get(key) or "-")
         return True

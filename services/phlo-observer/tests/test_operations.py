@@ -22,17 +22,36 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 @pytest.mark.asyncio
 async def test_healthz(client: AsyncClient) -> None:
-    resp = await client.get("/healthz")
+    resp = await client.get("/health/live")
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
 
 
 @pytest.mark.asyncio
 async def test_readyz_reports_schema(client: AsyncClient) -> None:
-    resp = await client.get("/readyz")
+    resp = await client.get("/health/ready")
     assert resp.status_code == 200
     # schema created via metadata in tests (no alembic_version row)
     assert resp.json()["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_readyz_reports_schema_incompatible(database_url: str, session_factory: Any) -> None:
+    """Reachable DB with no events table -> 503, never a bare 500."""
+    from httpx import ASGITransport
+    from phlo_observer.app import create_app
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(database_url)
+    async with engine.begin() as conn:
+        await conn.execute(text("drop table if exists events cascade"))
+    await engine.dispose()
+    app = create_app(ObserverSettings(database_url=database_url))
+    app.state.session_factory = session_factory
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.get("/health/ready")
+        assert resp.status_code == 503
+        assert resp.json()["database"] == "schema_incompatible"
 
 
 @pytest.mark.asyncio

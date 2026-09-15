@@ -3,8 +3,8 @@
 Each canonical event becomes an OTel log record: the event name is the body,
 severity maps onto OTel severity numbers, and the remaining envelope fields are
 record attributes. Correlation identifiers are preserved verbatim under
-``phlo.correlation.*`` (plus ``phlo.trace_id``/``phlo.span_id`` shortcuts) so
-events can be joined to real traces downstream.
+``observe.correlation.*`` (plus ``observe.trace_id``/``observe.span_id``
+shortcuts) so events can be joined to real traces downstream.
 
 Requires the ``observe-core[otlp]`` extra.
 """
@@ -102,20 +102,20 @@ class OtlpDrain:
         for key in _FLAT_FIELDS:
             value = data.get(key)
             if value is not None:
-                attributes[f"phlo.{key}"] = value
+                attributes[f"observe.{key}"] = value
         correlation = data.get("correlation") or {}
         for key, value in correlation.items():
             if value is None or key == "extra":
                 continue
-            attributes[f"phlo.correlation.{key}"] = value
+            attributes[f"observe.correlation.{key}"] = value
         if correlation.get("trace_id"):
-            attributes["phlo.trace_id"] = correlation["trace_id"]
+            attributes["observe.trace_id"] = correlation["trace_id"]
         if correlation.get("span_id"):
-            attributes["phlo.span_id"] = correlation["span_id"]
+            attributes["observe.span_id"] = correlation["span_id"]
         for section in ("service", "error", "source", "attributes"):
             value = data.get(section)
             if value:
-                attributes[f"phlo.{section}"] = dumps(value).decode("utf-8")
+                attributes[f"observe.{section}"] = dumps(value).decode("utf-8")
 
         severity = Severity(data.get("severity", "info"))
         return self._log_record_cls(

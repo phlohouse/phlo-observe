@@ -103,6 +103,45 @@ async def test_database_reconnect_recovers(
 
 
 @pytest.mark.asyncio
+async def test_pool_exhaustion_fails_fast_and_recovers(database_url: str, make_event: Any) -> None:
+    """Pool exhaustion (spec §83): a saturated pool must not hang requests.
+
+    With ``pool_size=1`` and no overflow, holding the only pooled connection
+    forces checkouts to wait on ``pool_timeout`` — bounded, so the request
+    fails as a 5xx rather than blocking a worker forever. Readiness reports
+    not_ready while the pool is wedged, liveness stays up, and the service
+    recovers once the connection is returned.
+    """
+    busy_engine = create_async_engine(
+        database_url, pool_size=1, max_overflow=0, pool_timeout=1, pool_pre_ping=True
+    )
+    factory = async_sessionmaker(busy_engine, expire_on_commit=False)
+    app = create_app(ObserverSettings(database_url=database_url, ingest_tokens="", read_tokens=""))
+    app.state.session_factory = factory
+    app.state.engine = busy_engine
+    try:
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://t") as c:
+            assert (await c.post("/v1/events", json=make_event())).status_code == 202
+
+            held = await busy_engine.connect()  # occupies the only pool slot
+            try:
+                resp = await c.post("/v1/events", json=make_event())
+                assert resp.status_code >= 500  # bounded failure, not a hang
+                live = await c.get("/health/live")
+                assert live.status_code == 200
+                ready = await c.get("/health/ready")
+                assert ready.status_code == 503
+            finally:
+                await held.close()
+
+            recovered = await c.post("/v1/events", json=make_event())
+            assert recovered.status_code == 202
+    finally:
+        await busy_engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_timeline_bounded(
     make_event: Any, session_factory: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

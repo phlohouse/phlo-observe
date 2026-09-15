@@ -9,15 +9,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from pydantic_settings import (
     BaseSettings,
     EnvSettingsSource,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+    SettingsError,
 )
 
 
@@ -91,6 +94,63 @@ DrainConfig = Annotated[
 
 def _default_drains() -> list[DrainConfig]:
     return [ConsoleDrainConfig()]
+
+
+def _csv_or_json_list(value: Any) -> Any:
+    """Accept ``a,b`` or ``["a","b"]`` for ``list[str]`` settings.
+
+    Fields marked ``NoDecode`` receive raw env strings here; JSON array syntax
+    still works for operators who prefer it. Empty input means "no values".
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+_SECRETISH_FIELD = re.compile(
+    r"token|secret|password|credential|api_?key|private_?key|url", re.IGNORECASE
+)
+
+
+def format_settings_error(exc: BaseException) -> str:
+    """Render a configuration failure for an operator (spec §73).
+
+    Reports which ``OBSERVE_*`` variable is invalid, the received value when
+    it is not secret-bearing, and where to find the allowed values.
+    """
+    if isinstance(exc, SettingsError):
+        cause = exc.__cause__
+        detail = f": {cause}" if cause is not None else ""
+        return (
+            f"{exc}{detail}\nCheck your OBSERVE_* environment variables; "
+            "see docs/configuration.md for allowed values."
+        )
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    lines = ["invalid configuration:"]
+    for err in exc.errors():
+        field = ".".join(str(p) for p in err["loc"])
+        env = f"OBSERVE_{field.upper()}" if field else "configuration"
+        received = err.get("input")
+        shown = (
+            "<redacted>"
+            if received not in (None, "") and _SECRETISH_FIELD.search(field)
+            else repr(received)
+        )
+        lines.append(f"  {env}: {err['msg']} (received {shown})")
+    lines.append("Fix or unset the offending variables; see docs/configuration.md.")
+    return "\n".join(lines)
 
 
 def default_spool_dir() -> Path:
@@ -188,13 +248,13 @@ class ObserveSettings(BaseSettings):
     max_event_bytes: int = 256 * 1024
     max_depth: int = 8
 
-    redact_keys: list[str] = Field(default_factory=list)
+    redact_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Additional exact key names to redact (case-insensitive)."""
-    redact_key_patterns: list[str] = Field(default_factory=list)
+    redact_key_patterns: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Regexes matched against key names."""
-    redact_paths: list[str] = Field(default_factory=list)
+    redact_paths: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Dotted paths to always redact, e.g. ``attributes.connection.password``."""
-    redact_value_patterns: list[str] = Field(default_factory=list)
+    redact_value_patterns: Annotated[list[str], NoDecode] = Field(default_factory=list)
     """Regexes matched against string values regardless of key."""
     redaction_enabled: bool = True
 
@@ -221,6 +281,17 @@ class ObserveSettings(BaseSettings):
             names = [n.strip() for n in text.split(",") if n]
             return [_ShorthandEnvSource._expand(n) for n in names]
         return value
+
+    @field_validator(
+        "redact_keys",
+        "redact_key_patterns",
+        "redact_paths",
+        "redact_value_patterns",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_str_list(cls, value: Any) -> Any:
+        return _csv_or_json_list(value)
 
     @field_validator("batch_size", "queue_capacity", "max_event_bytes", "max_depth")
     @classmethod

@@ -29,7 +29,12 @@ from observe_core.config import (
     ObserveSettings,
     OtlpDrainConfig,
 )
-from observe_core.context import ambient_correlation, ambient_extra, ambient_service
+from observe_core.context import (
+    ambient_correlation,
+    ambient_extra,
+    ambient_service,
+    operation_correlation,
+)
 from observe_core.drains.base import CanonicalEvent, Drain
 from observe_core.drains.console import ConsoleDrain
 from observe_core.drains.http import HttpDrain
@@ -41,6 +46,7 @@ from observe_core.models import (
     CORRELATION_KEYS,
     Correlation,
     Delivery,
+    ErrorInfo,
     EventEnvelope,
     Outcome,
     Severity,
@@ -228,7 +234,16 @@ class Runtime:
                 self.stats.incr("worker_errors")
                 _diag(f"enricher {type(enricher).__name__} failed: {error}")
 
-        merged_corr = {**ambient_correlation(), **builder.correlation}
+        # Correlation precedence (spec §10.5): explicit event values win over
+        # the active operation context, which wins over bound ambient context.
+        # ``observe()`` blocks already fold the parent chain into
+        # ``builder.correlation`` at enter time; this merge is what lets a bare
+        # ``event()`` inside a block inherit run_id/trace_id/span coordinates.
+        merged_corr = {
+            **ambient_correlation(),
+            **operation_correlation(),
+            **builder.correlation,
+        }
         correlation = Correlation(
             **{k: _opt_str(merged_corr.get(k)) for k in CORRELATION_KEYS},
             extra=normalize_value(
@@ -240,6 +255,19 @@ class Runtime:
             ),
         )
         ambient_svc = ambient_service()
+        error = builder.error
+        if isinstance(error, ErrorInfo):
+            # ``error.details`` accepts arbitrary values; normalize them like
+            # attributes so one unserializable detail cannot drop the event —
+            # critical failure records must not vanish over a bad detail.
+            error = error.model_copy(
+                update={
+                    "details": normalize_value(error.details, max_depth=self.settings.max_depth)
+                }
+            )
+        elif isinstance(error, dict):
+            # Callers may assign a raw error dict; normalize it whole.
+            error = normalize_value(error, max_depth=self.settings.max_depth)
         envelope = EventEnvelope(
             event_id=new_event_id(),
             event=builder.event,
@@ -260,7 +288,7 @@ class Runtime:
             },
             correlation=correlation,
             attributes=normalize_value(builder.attributes, max_depth=self.settings.max_depth),
-            error=builder.error,
+            error=error,
             source=builder.source,
         )
         data = envelope.to_canonical_dict()

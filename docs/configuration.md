@@ -65,8 +65,8 @@ Security notes:
 | `SPOOL_REPLAY_INTERVAL_S` | `30` | how often the worker replays the spool to remote drains |
 | `CAPTURE_STACKTRACE` | `true` | include tracebacks on error events; `observe(capture_stacktrace=...)` overrides per operation |
 | `MAX_EVENT_BYTES` / `MAX_DEPTH` | `262144` / `8` | event size cap + normalization depth |
-| `REDACT_KEYS` | — | extra exact key names to redact (case-insensitive) |
-| `REDACT_KEY_PATTERNS` / `REDACT_PATHS` / `REDACT_VALUE_PATTERNS` | — | regex key rules, dotted paths, value regexes |
+| `REDACT_KEYS` | — | extra exact key names to redact (case-insensitive; comma-separated or JSON list) |
+| `REDACT_KEY_PATTERNS` / `REDACT_PATHS` / `REDACT_VALUE_PATTERNS` | — | regex key rules, dotted paths, value regexes (comma-separated or JSON list) |
 | `REDACTION_ENABLED` | `true` | master switch for redaction |
 | `SAMPLING_DEBUG_RATE` | `1.0` dev / `0.1` production | fraction of `debug` events kept |
 | `SAMPLING_TELEMETRY_RATE` | `1.0` | `critical` events are never sampled |

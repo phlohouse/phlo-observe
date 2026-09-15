@@ -7,23 +7,25 @@ fields support ``_FILE`` variants pointing at a file containing the secret
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, ValidationError, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict, SettingsError
 
 
-def _file_or_value(env_name: str) -> str | None:
-    """Read a secret from ``<NAME>_FILE`` or ``<NAME>``, file winning."""
+def _file_value(env_name: str) -> str | None:
+    """Read a secret from ``<NAME>_FILE`` (Docker/Kubernetes secret mounts)."""
     file_path = os.environ.get(f"{env_name}_FILE")
-    if file_path:
-        try:
-            return Path(file_path).read_text().strip()
-        except OSError as exc:
-            raise ValueError(f"{env_name}_FILE={file_path!r} is not readable: {exc}") from exc
-    return os.environ.get(env_name)
+    if not file_path:
+        return None
+    try:
+        return Path(file_path).read_text().strip()
+    except OSError as exc:
+        raise ValueError(f"{env_name}_FILE={file_path!r} is not readable: {exc}") from exc
 
 
 class ObserverSettings(BaseSettings):
@@ -39,10 +41,12 @@ class ObserverSettings(BaseSettings):
     db_pool_size: int = 10
     db_pool_max_overflow: int = 10
 
-    ingest_tokens: list[str] = Field(default_factory=list)
-    """Tokens allowed to write events. Empty = dev mode (no auth)."""
-    read_tokens: list[str] = Field(default_factory=list)
-    """Tokens allowed to query. Empty = dev mode (no auth)."""
+    # NoDecode keeps pydantic-settings from json.loads-ing the raw env value
+    # before the before-validator can apply the documented comma-separated form.
+    ingest_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    """Tokens allowed to write events (comma-separated). Empty = dev mode."""
+    read_tokens: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    """Tokens allowed to query (comma-separated). Empty = dev mode."""
 
     raw_retention_days: int = 14
     event_retention_days: int = 90
@@ -81,9 +85,21 @@ class ObserverSettings(BaseSettings):
     @field_validator("ingest_tokens", "read_tokens", mode="before")
     @classmethod
     def _split_tokens(cls, value: object) -> object:
-        if isinstance(value, str):
-            return [t.strip() for t in value.split(",") if t.strip()]
-        return value
+        """Accept ``a,b`` or ``["a","b"]``; either arrives here as a raw string."""
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(parsed, list):
+                    return [str(t).strip() for t in parsed if str(t).strip()]
+        return [t.strip() for t in text.split(",") if t.strip()]
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -164,14 +180,60 @@ class ObserverSettings(BaseSettings):
         return configs
 
 
+_SECRETISH_FIELD = re.compile(
+    r"token|secret|password|credential|api_?key|private_?key|url", re.IGNORECASE
+)
+
+
+def format_settings_error(exc: BaseException) -> str:
+    """Render a configuration failure for an operator (spec §73).
+
+    Reports which ``PHLO_OBSERVER_*`` variable is invalid, the received value
+    when it is not secret-bearing, and where to find the allowed values.
+    """
+    if isinstance(exc, SettingsError):
+        cause = exc.__cause__
+        detail = f": {cause}" if cause is not None else ""
+        return (
+            f"{exc}{detail}\nCheck your PHLO_OBSERVER_* environment variables; "
+            "see docs/configuration.md for allowed values."
+        )
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    lines = ["invalid configuration:"]
+    for err in exc.errors():
+        field = ".".join(str(p) for p in err["loc"])
+        env = f"PHLO_OBSERVER_{field.upper()}" if field else "configuration"
+        received = err.get("input")
+        shown = (
+            "<redacted>"
+            if received not in (None, "") and _SECRETISH_FIELD.search(field)
+            else repr(received)
+        )
+        lines.append(f"  {env}: {err['msg']} (received {shown})")
+    lines.append("Fix or unset the offending variables; see docs/configuration.md.")
+    return "\n".join(lines)
+
+
 def load_settings() -> ObserverSettings:
-    """Build settings, resolving ``_FILE`` token variants into the token lists."""
-    settings = ObserverSettings()
+    """Build settings, resolving ``_FILE`` token variants into the token lists.
+
+    Pydantic parse/validation failures are translated into an operator-facing
+    ``ValueError`` (spec §73) so startup surfaces a readable message rather
+    than a raw ``ValidationError`` traceback.
+    """
+    try:
+        settings = ObserverSettings()
+    except (ValidationError, SettingsError) as exc:
+        raise ValueError(format_settings_error(exc)) from exc
     for env_name, attr in (
         ("PHLO_OBSERVER_INGEST_TOKENS", "ingest_tokens"),
         ("PHLO_OBSERVER_READ_TOKENS", "read_tokens"),
     ):
-        resolved = _file_or_value(env_name)
+        # Only the _FILE variant is merged here: the plain env var already
+        # arrives via pydantic-settings' env source, so merging it again
+        # would double-count every token.
+        resolved = _file_value(env_name)
         if resolved:
             file_tokens = [t.strip() for t in resolved.split(",") if t.strip()]
             merged = [*getattr(settings, attr), *file_tokens]

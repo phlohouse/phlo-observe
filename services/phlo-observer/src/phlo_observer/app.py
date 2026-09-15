@@ -260,11 +260,21 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     task.add_done_callback(app.state.forward_tasks.discard)
             result.errors = errors + result.errors
             result.rejected += len(errors)
-            raw.normalization_status = "ok" if not errors else "partial"
-            if errors and not events:
-                raw.normalization_status = "failed"
-                raw.normalization_error = errors[0]["message"]
-        INGEST_BATCHES.labels(status="accepted" if result.accepted else "rejected").inc()
+            # Reflect persist-stage rejections too, not just adapter errors:
+            # a payload that normalized cleanly but stored nothing must not
+            # be recorded as "ok".
+            if not result.errors:
+                raw.normalization_status = "ok"
+            else:
+                raw.normalization_status = (
+                    "partial" if (result.accepted or result.duplicates) else "failed"
+                )
+                raw.normalization_error = result.errors[0]["message"]
+        if result.rejected:
+            batch_status = "partial" if (result.accepted or result.duplicates) else "rejected"
+        else:
+            batch_status = "accepted"
+        INGEST_BATCHES.labels(status=batch_status).inc()
         INGEST_EVENTS.labels(producer=producer, status="accepted").inc(result.accepted)
         INGEST_EVENTS.labels(producer=producer, status="rejected").inc(result.rejected)
         if app.state.self_observe:
@@ -592,12 +602,22 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 # missing alembic_version (unmigrated schema) aborts the txn
                 await session.rollback()
                 version = None
+            try:
+                events_stored = await count_events(session)
+            except Exception:
+                # Database reachable but the events schema is absent or
+                # incompatible: report not-ready rather than a 500.
+                await session.rollback()
+                return JSONResponse(
+                    {"status": "not_ready", "database": "schema_incompatible"},
+                    status_code=503,
+                )
             return JSONResponse(
                 {
                     "status": "ready",
                     "database": "ok",
                     "schema_version": version,
-                    "events_stored": await count_events(session),
+                    "events_stored": events_stored,
                 }
             )
 

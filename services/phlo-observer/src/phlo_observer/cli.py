@@ -10,7 +10,20 @@ import typer
 if TYPE_CHECKING:
     from alembic.config import Config
 
+    from phlo_observer.settings import ObserverSettings
+
 app = typer.Typer(help="phlo-observer ingestion and query service")
+
+
+def _settings() -> ObserverSettings:
+    """load_settings(); config errors exit cleanly for operators (spec §73)."""
+    from phlo_observer.settings import load_settings
+
+    try:
+        return load_settings()
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()
@@ -21,9 +34,7 @@ def serve(
     """Run the observer HTTP service."""
     import uvicorn
 
-    from phlo_observer.settings import load_settings
-
-    settings = load_settings()
+    settings = _settings()
     try:
         settings.require_tokens()
         settings.self_observe_drain_configs()  # validate early: bad values fail fast
@@ -44,7 +55,11 @@ def migrate(revision: str = typer.Argument("head", help="Alembic target revision
     """Run database migrations (default: upgrade to head)."""
     from alembic import command
 
-    cfg = _alembic_config()
+    try:
+        cfg = _alembic_config()
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     command.upgrade(cfg, revision)
     typer.echo(f"migrated to {revision}")
 
@@ -56,7 +71,12 @@ def downgrade(
     """Downgrade the database schema."""
     from alembic import command
 
-    command.downgrade(_alembic_config(), revision)
+    try:
+        cfg = _alembic_config()
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    command.downgrade(cfg, revision)
 
 
 @app.command()
@@ -65,13 +85,12 @@ def check() -> None:
     import asyncio
 
     from phlo_observer.db import check_database, make_engine, make_sessionmaker
-    from phlo_observer.settings import load_settings
 
-    settings = load_settings()
+    settings = _settings()
     try:
         settings.require_tokens()
     except ValueError as exc:
-        typer.echo(f"error: {exc}")
+        typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     if not settings.ingest_token_set:
         typer.echo("warning: no ingest tokens configured (dev mode)")
@@ -95,9 +114,7 @@ def config() -> None:
     """Print the effective configuration (secrets redacted)."""
     import json
 
-    from phlo_observer.settings import load_settings
-
-    settings = load_settings()
+    settings = _settings()
     data = settings.model_dump(mode="json")
     for key in ("ingest_tokens", "read_tokens", "database_url"):
         if data.get(key):
@@ -125,9 +142,7 @@ def replay_spool(
     from observe_core.drains.http import HttpDrain
     from observe_core.spool import Spool
 
-    from phlo_observer.settings import load_settings
-
-    settings = load_settings()
+    settings = _settings()
     host = settings.host if settings.host not in ("0.0.0.0", "::") else "127.0.0.1"  # noqa: S104
     url = endpoint or f"http://{host}:{settings.port}/v1/events"
     ingest_token = token or (settings.ingest_tokens[0] if settings.ingest_tokens else None)
