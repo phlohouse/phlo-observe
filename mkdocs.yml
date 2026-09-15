@@ -27,7 +27,8 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Specification: V1_SPEC.md
+  - V1 Specification: V1_SPEC.md
+  - V2 Specification: V2_SPEC.md
   - Architecture: architecture.md
   - Event model: event-model.md
   - Configuration: configuration.md
