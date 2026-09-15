@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import metrics, projections
+from phlo_observer import baselines, incidents, insights, metrics, projections
 from phlo_observer.correlate import correlation_method, link_trace_to_run, update_run_projection
 from phlo_observer.models import Event, RawEvent, Run
 
@@ -237,6 +237,16 @@ async def persist_events(
                     await update_run_projection(session, row)
                 for row in accepted_rows:
                     await projections.apply_event(session, row)
+                    event = projections._event_view(row)
+                    # Insights evaluate against baselines BEFORE this event's
+                    # sample joins them — an observation must not judge itself.
+                    findings = await insights.evaluate(session, event)
+                    if findings:
+                        new_insights = await insights.record_findings(session, event, findings)
+                        for insight in new_insights:
+                            await incidents.group_insight(session, insight)
+                    await insights.resolve_for_event(session, event)
+                    await baselines.update_baselines(session, event)
                 await session.flush()
         except SQLAlchemyError:
             logger.warning(
