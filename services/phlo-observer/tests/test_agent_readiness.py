@@ -37,7 +37,7 @@ def test_client_surface_is_read_only() -> None:
 async def test_insight_and_incident_lists_are_bounded(client: Any) -> None:
     """List endpoints enforce their server-side caps."""
     await client.post("/v1/events", json=wl.mixed_history(days=2, seed=22))
-    for path in ("/v2/insights", "/v2/incidents"):
+    for path in ("/v2/insights", "/v2/incidents", "/v2/schemas"):
         too_large = await client.get(path, params={"limit": 100_000})
         assert too_large.status_code == 422, path
         capped = await client.get(path, params={"limit": 5})

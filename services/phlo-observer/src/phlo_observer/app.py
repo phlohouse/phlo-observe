@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import observe_core
+import orjson
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from observe_core.timestamps import utcnow
@@ -228,6 +229,21 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(400, f"invalid gzip body: {exc}") from exc
         if len(body) > settings.max_body_bytes:
             raise _http_error(413, "request body too large")
+        return body
+
+    async def _json_body(request: Request) -> Any:
+        """Parse a JSON request body under the same bounds as ingest.
+
+        ``request.json()`` reads ``request.stream()`` with no limit, so a
+        chunked body without a Content-Length would bypass
+        ``max_body_bytes`` — the middleware only checks the declared size.
+        """
+        try:
+            body = orjson.loads(await _body(request))
+        except orjson.JSONDecodeError as exc:
+            raise _http_error(400, f"invalid JSON body: {exc}") from exc
+        if not isinstance(body, dict):
+            raise _http_error(400, "JSON body must be an object")
         return body
 
     def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -795,7 +811,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     )
     async def v2_transition_insight(insight_id: str, request: Request) -> dict[str, Any]:
         """Move an insight through its lifecycle (spec §15.3)."""
-        body = await request.json()
+        body = await _json_body(request)
         target = body.get("state")
         if target not in _INSIGHT_TRANSITIONS:
             raise _http_error(400, f"state must be one of {sorted(_INSIGHT_TRANSITIONS)}")
@@ -833,7 +849,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     )
     async def v2_transition_incident(incident_id: str, request: Request) -> dict[str, Any]:
         """Move an incident through its lifecycle."""
-        body = await request.json()
+        body = await _json_body(request)
         target = body.get("state")
         if target not in _INCIDENT_TRANSITIONS:
             raise _http_error(400, f"state must be one of {sorted(_INCIDENT_TRANSITIONS)}")
@@ -918,7 +934,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @app.post("/v2/query/compare-runs", dependencies=[Depends(require_read_token)])
     async def v2_compare_runs(request: Request) -> dict[str, Any]:
         """Compare two runs: ``{"run_a": ..., "run_b": ...}``."""
-        body = await request.json()
+        body = await _json_body(request)
         run_a, run_b = body.get("run_a"), body.get("run_b")
         if not run_a or not run_b:
             raise _http_error(400, "run_a and run_b are required")
@@ -1069,11 +1085,15 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             }
 
     @app.get("/v2/schemas", dependencies=[Depends(require_read_token)])
-    async def v2_list_schemas(request: Request) -> dict[str, Any]:
+    async def v2_list_schemas(
+        request: Request, limit: int = Query(200, ge=1, le=1000)
+    ) -> dict[str, Any]:
         """Registered contract schemas (spec §8.3)."""
         async with request.app.state.session_factory() as session:
             rows = (
-                await session.execute(select(SchemaRecord).order_by(SchemaRecord.schema_id))
+                await session.execute(
+                    select(SchemaRecord).order_by(SchemaRecord.schema_id).limit(limit)
+                )
             ).scalars()
             return {
                 "items": [
@@ -1090,7 +1110,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @app.post("/v2/schemas", dependencies=[Depends(require_ingest_token)])
     async def v2_register_schema(request: Request) -> dict[str, Any]:
         """Register or update a contract schema record."""
-        body = await request.json()
+        body = await _json_body(request)
         schema_id = body.get("schema_id")
         if not schema_id:
             raise _http_error(400, "schema_id is required")
@@ -1119,7 +1139,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @app.post("/v2/analyses", dependencies=[Depends(require_ingest_token)])
     async def v2_record_analysis(request: Request) -> dict[str, Any]:
         """Persist an LLM analysis with its evidence IDs (spec §21.4)."""
-        body = await request.json()
+        body = await _json_body(request)
         for field in ("model", "prompt_template_version", "output"):
             if not body.get(field):
                 raise _http_error(400, f"{field} is required")

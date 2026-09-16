@@ -248,9 +248,13 @@ def _attach(incident: Incident, insight: Insight, now: Any, key: tuple[Any, str]
         "entity": insight.entity_id,
         "key": _dump_key(key),
     }
+    # The replay creator is the earliest member's insight, so compare the
+    # new position against the members that were already attached — the
+    # entry itself must not join that minimum or the check can never fire.
+    earliest = min((_member_key(m) for m in members), default=None)
     if not any(m.get("iid") == entry["iid"] and _member_key(m) == key for m in members):
         members.append(entry)
-    if key < min((_member_key(m) for m in members), default=key):
+    if earliest is not None and key < earliest:
         # The replay creator is the earliest member's insight: when a late
         # finding lands before the members that built this row, the
         # incident takes its title/start, matching the rebuild.

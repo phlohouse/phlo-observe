@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from observe_core.timestamps import utcnow
 from phlo_observer.models import Event, RawEvent, Run
 from phlo_observer.retention import run_retention_once
@@ -39,7 +39,6 @@ async def test_readyz_reports_schema(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_readyz_reports_schema_incompatible(database_url: str, session_factory: Any) -> None:
     """Reachable DB with no events table -> 503, never a bare 500."""
-    from httpx import ASGITransport
     from phlo_observer.app import create_app
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -65,6 +64,44 @@ async def test_metrics_endpoint(client: AsyncClient, make_event: Any) -> None:
     assert "phlo_observer_events_stored_total" in text_body
     assert "phlo_observer_http_requests_total" in text_body
     assert "phlo_observer_queue_depth" in text_body
+
+
+@pytest.mark.asyncio
+async def test_json_endpoints_enforce_body_limit(session_factory: Any, database_url: str) -> None:
+    """Regression: JSON-parsing endpoints must enforce ``max_body_bytes``.
+
+    The middleware only checks the declared Content-Length, so a chunked
+    body without one used to reach ``request.json()`` — which buffers the
+    stream unboundedly. All JSON endpoints now read through ``_body()``.
+    """
+    from collections.abc import AsyncIterator
+
+    from phlo_observer.app import create_app
+
+    app = create_app(ObserverSettings(database_url=database_url, max_body_bytes=64))
+    app.state.session_factory = session_factory
+
+    async def _chunks() -> AsyncIterator[bytes]:
+        yield b'{"run_a": "'
+        yield b"x" * 128
+        yield b'"}'
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # No Content-Length -> middleware cannot reject; the endpoint's own
+        # bounded reader must.
+        resp = await c.post("/v2/query/compare-runs", content=_chunks())
+        assert resp.status_code == 413
+        # Declared oversize is still rejected up front.
+        big = await c.post("/v2/query/compare-runs", content=b"x" * 256)
+        assert big.status_code == 413
+        # In-bounds bodies still reach the endpoint's own validation.
+        missing = await c.post("/v2/query/compare-runs", json={"run_a": "a"})
+        assert missing.status_code == 400
+        unknown = await c.post("/v2/query/compare-runs", json={"run_a": "a", "run_b": "b"})
+        assert unknown.status_code == 404
+        # Malformed and non-object bodies are client errors, not 500s.
+        assert (await c.post("/v2/query/compare-runs", content=b"not json")).status_code == 400
+        assert (await c.post("/v2/query/compare-runs", json=[1, 2])).status_code == 400
 
 
 @pytest.mark.asyncio

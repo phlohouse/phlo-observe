@@ -281,6 +281,17 @@ Two consequences worth noting operationally:
   observed in the concurrency suite; the consistent select-order makes it
   unlikely rather than impossible.
 
+## 6e. External review: findings and fixes
+
+A post-hardening review of this branch found three gaps the passes above
+missed; all are fixed with regression tests.
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `incidents._attach` compared the attaching position against a `min()` that already included the new entry — the documented "earliest member wins title/start" takeover was dead code (unobservable today: the only critical rule derives its title from the entity, which must match to take that path) | correctness | Compare against the minimum over pre-existing members only | `test_earliest_critical_member_takes_over_incident` |
+| Five token-gated endpoints (insight/incident transitions, compare-runs, schema registration, analysis recording) called `request.json()` directly; the middleware only enforces a *declared* `Content-Length`, so a chunked body bypassed `max_body_bytes` and buffered unboundedly | security/resource bound | All JSON endpoints parse through `_json_body()`, which bounds wire and decompressed bytes via `_body()`; malformed and non-object bodies return 400 instead of 500 | `test_json_endpoints_enforce_body_limit` |
+| `GET /v2/schemas` returned every registered schema with no cap, while `SchemaRecord` rows are minted by any ingest-token holder via `contract.schema_id` — a producer-controlled table exposed through an unbounded read | resource bound | `limit` query param (`default 200, le 1000`) matching the other list endpoints | `test_insight_and_incident_lists_are_bounded` |
+
 ## 7. Insight quality
 
 On controlled histories (`test_insight_quality.py`, 10 tests): each rule

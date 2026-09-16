@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from typing import Any
 
@@ -291,6 +292,55 @@ class TestLifecycle:
         assert ok.status_code == 200
         bad = await client.post(f"/v2/incidents/{iid}/transition", json={"state": "acknowledged"})
         assert bad.status_code == 409
+
+
+@pytest.mark.asyncio
+class TestIncidentGrouping:
+    async def test_earliest_critical_member_takes_over_incident(self, session_factory: Any) -> None:
+        """Regression: a critical finding positioned before every existing
+        member is the replay-order creator — the incident takes its
+        title/start.
+
+        ``_attach`` previously compared the new position against a minimum
+        that already included the new entry, so the takeover could never
+        fire and the incident kept the first *arriving* insight's title.
+        """
+        from phlo_observer.incidents import group_insight
+
+        early_at = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.UTC)
+        later_at = early_at + dt.timedelta(minutes=10)
+
+        def _critical(title: str) -> Insight:
+            row = _insight()
+            row.title = title
+            row.severity = "critical"
+            row.entity_id = "run://dagster/r1"
+            return row
+
+        later = _critical("later finding")
+        earlier = _critical("earlier finding")
+        async with session_factory() as session, session.begin():
+            incident = await group_insight(
+                session, later, signal_key=(later_at, str(later.insight_id))
+            )
+            assert incident is not None
+            assert incident.title == "later finding"
+
+            attached = await group_insight(
+                session, earlier, signal_key=(early_at, str(earlier.insight_id))
+            )
+            assert attached is incident
+            assert incident.title == "earlier finding"
+            assert incident.started_at == earlier.created_at
+
+            # A finding after the earliest member attaches normally — no
+            # takeover once a real creator precedes it in event order.
+            newest = _critical("newest finding")
+            attached = await group_insight(
+                session, newest, signal_key=(later_at, str(newest.insight_id))
+            )
+            assert attached is incident
+            assert incident.title == "earlier finding"
 
 
 @pytest.mark.asyncio
