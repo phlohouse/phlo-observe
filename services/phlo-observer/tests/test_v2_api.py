@@ -148,6 +148,28 @@ class TestRunEndpoints:
         assert body["candidate_causes"]
         assert body["evidence"]
 
+    async def test_v2_investigate_truncated_only_beyond_cap(
+        self, client: Any, monkeypatch: Any
+    ) -> None:
+        """Regression: a run with exactly the cap of events is not truncated.
+
+        The bundle over-fetches by one so ``truncated`` is true only when an
+        event was actually left out — previously a run at exactly the cap
+        reported a false positive.
+        """
+        import phlo_observer.query_v2 as q2
+
+        monkeypatch.setattr(q2, "_MAX_RUN_EVENTS", 3)
+        await _post(client, [_event(run_id="cap-run") for _ in range(3)])
+        body = (await client.get("/v2/runs/cap-run/investigate")).json()
+        assert body["truncated"] is False
+        assert len(body["evidence"]) == 3
+
+        await _post(client, [_event(run_id="cap-run")])
+        body = (await client.get("/v2/runs/cap-run/investigate")).json()
+        assert body["truncated"] is True
+        assert len(body["evidence"]) == 3
+
     async def test_v2_compare_runs(self, client: Any) -> None:
         await _post(
             client,

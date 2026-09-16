@@ -462,7 +462,11 @@ async def investigation_bundle(session: AsyncSession, run_id: str) -> dict[str, 
     run = await session.get(Run, run_id)
     if run is None:
         return None
-    events = await run_events(session, run_id)
+    # Over-fetch by one so ``truncated`` only reports real truncation —
+    # a run with exactly _MAX_RUN_EVENTS events is not truncated.
+    events = await run_events(session, run_id, limit=_MAX_RUN_EVENTS + 1)
+    truncated = len(events) > _MAX_RUN_EVENTS
+    events = events[:_MAX_RUN_EVENTS]
     failures = [e for e in events if e.outcome == "failure" or e.error is not None]
     warnings = [e for e in events if e.severity in ("warn", "error")]
     changes = await run_changes(session, run_id)
@@ -513,7 +517,7 @@ async def investigation_bundle(session: AsyncSession, run_id: str) -> dict[str, 
         "impact": (impact or {}).get("impact", {}),
         "candidate_causes": _candidate_causes(failures, changes or {}),
         "evidence": [str(e.event_id) for e in events],
-        "truncated": len(events) >= _MAX_RUN_EVENTS,
+        "truncated": truncated,
     }
 
 

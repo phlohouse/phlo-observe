@@ -415,3 +415,36 @@ class TestArchiveRestore:
         )
         assert result.exit_code == 0, result.output
         assert "reprocessed" in result.output
+
+    async def test_reprocess_paginates_past_batch_size(
+        self,
+        client: Any,
+        session_factory: Any,
+        database_url: str,
+        monkeypatch: Any,
+    ) -> None:
+        """``--batch`` smaller than the window must still visit every event —
+        keyset pagination replaces the old single unbounded transaction."""
+        import asyncio
+        import re
+
+        from phlo_observer.cli import app
+        from phlo_observer.models import Event
+        from sqlalchemy import func
+        from typer.testing import CliRunner
+
+        await client.post(
+            "/v1/events",
+            json=[_event(run_id="repro-page") for _ in range(5)],
+        )
+        monkeypatch.setenv("PHLO_OBSERVER_DATABASE_URL", database_url)
+        result = await asyncio.to_thread(
+            CliRunner().invoke,
+            app,
+            ["reprocess", "--since", "2000-01-01T00:00:00", "--batch", "2"],
+        )
+        assert result.exit_code == 0, result.output
+        async with session_factory() as session:
+            total = await session.scalar(select(func.count()).select_from(Event))
+        # Every event in the window is re-folded, not just the first page.
+        assert int(re.search(r"reprocessed (\d+)", result.output).group(1)) == total

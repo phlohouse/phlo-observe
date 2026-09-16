@@ -295,6 +295,9 @@ def reprocess(
     re-derive run rows, insights, or baselines (run counters would
     double-count) — use ``rebuild-projections`` for a from-scratch rebuild
     of all derived state.
+
+    Each page commits before the next read: a large window never holds one
+    transaction's locks across the whole replay.
     """
     import asyncio
     from datetime import datetime
@@ -303,7 +306,7 @@ def reprocess(
 
     from phlo_observer.db import make_engine, make_sessionmaker
     from phlo_observer.models import Event
-    from phlo_observer.projections import apply_event
+    from phlo_observer.projections import apply_events_batch
 
     settings = _settings()
     lo = datetime.fromisoformat(since)
@@ -314,10 +317,10 @@ def reprocess(
         processed = 0
         try:
             factory = make_sessionmaker(engine)
-            async with factory() as session, session.begin():
-                last_ts = lo
-                last_id = None
-                while True:
+            last_ts = lo
+            last_id = None
+            while True:
+                async with factory() as session, session.begin():
                     stmt = select(Event).where(Event.received_at >= lo)
                     if hi:
                         stmt = stmt.where(Event.received_at <= hi)
@@ -327,15 +330,15 @@ def reprocess(
                             | ((Event.received_at == last_ts) & (Event.event_id > last_id))
                         )
                     stmt = stmt.order_by(Event.received_at, Event.event_id).limit(batch)
-                    rows = (await session.execute(stmt)).scalars().all()
-                    if not rows:
-                        break
-                    for row in rows:
-                        await apply_event(session, row)
-                    processed += len(rows)
-                    last_ts, last_id = rows[-1].received_at, rows[-1].event_id
-                    if len(rows) < batch:
-                        break
+                    rows = list((await session.execute(stmt)).scalars().all())
+                    if rows:
+                        await apply_events_batch(session, rows)
+                if not rows:
+                    break
+                processed += len(rows)
+                last_ts, last_id = rows[-1].received_at, rows[-1].event_id
+                if len(rows) < batch:
+                    break
             return processed
         finally:
             await engine.dispose()

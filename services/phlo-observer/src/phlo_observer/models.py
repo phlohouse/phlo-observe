@@ -133,6 +133,9 @@ class Run(Base):
     summary: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     """Derivation provenance: derived_from event ids, rule, rule_version, derived_at (§12.3)."""
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Fold-order bookkeeping: (observed_at, event_id) key that last wrote
+    each value field, so late events cannot regress newer observations."""
 
     __table_args__ = (Index("ix_runs_updated_at", "updated_at"),)
 
@@ -154,6 +157,8 @@ class Entity(Base):
     last_seen_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
     attributes: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Per-field attribute write keys (``attr_at``) — newest observation wins."""
 
     __table_args__ = (
         Index("ix_observe_entities_kind", "kind"),
@@ -181,6 +186,9 @@ class Relationship(Base):
     last_seen_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
     source_event_ids: Mapped[list[str]] = mapped_column(JsonColumn, nullable=False, default=list)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Source-event keys: the retained sources are the earliest-observed,
+    not the earliest-arrived — rebuild and ingest converge."""
 
     __table_args__ = (
         Index("ix_observe_rel_from", "from_entity"),
@@ -209,6 +217,8 @@ class Asset(Base):
     freshness_sla_seconds: Mapped[float | None] = mapped_column(Double)
     attributes: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Materialization/failure event keys + per-field write keys (§12.1)."""
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (Index("ix_observe_assets_key", "asset_key"),)
@@ -228,7 +238,7 @@ class Baseline(Base):
     mean: Mapped[float | None] = mapped_column(Double)
     p10: Mapped[float | None] = mapped_column(Double)
     p90: Mapped[float | None] = mapped_column(Double)
-    samples: Mapped[list[float]] = mapped_column(JsonColumn, nullable=False, default=list)
+    samples: Mapped[list[list[Any]]] = mapped_column(JsonColumn, nullable=False, default=list)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (

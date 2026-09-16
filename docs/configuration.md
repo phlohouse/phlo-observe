@@ -14,8 +14,8 @@ secret file, e.g. `PHLO_OBSERVER_INGEST_TOKENS_FILE=/run/secrets/tokens`.
 | `LOG_LEVEL` | `INFO` | uvicorn/app log level |
 | `DATABASE_URL` | local dev DSN | `postgresql+asyncpg://...`; `_FILE` supported |
 | `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` | `10` / `10` | Connection pool |
-| `INGEST_TOKENS` | — | Comma-separated write tokens; empty = dev mode; `_FILE` supported |
-| `READ_TOKENS` | — | Comma-separated query tokens; empty = dev mode; `_FILE` supported |
+| `INGEST_TOKENS` | — | Comma-separated write tokens; empty = dev-open only while no tokens exist anywhere; `_FILE` supported |
+| `READ_TOKENS` | — | Comma-separated query tokens; empty = dev-open only while no tokens exist anywhere; `_FILE` supported |
 | `ADMIN_TOKENS` | — | Comma-separated admin tokens (transitions, quarantine); never inherits read tokens; `_FILE` supported |
 | `AUTH_OPTIONAL_DEV` | `true` | `false` hard-fails startup unless all three token sets are configured |
 | `RAW_RETENTION_DAYS` | `14` | `raw_events.expires_at` sweep |
@@ -38,9 +38,11 @@ Security notes:
 - With no tokens configured the API is fully open — set
   `AUTH_OPTIONAL_DEV=false` anywhere outside local dev so startup fails
   instead.
-- Once any token is configured, admin endpoints require `ADMIN_TOKENS`:
-  an unset admin list fails closed (denies everyone) rather than falling
-  back to read tokens.
+- Once any token is configured, every surface fails closed: an unset
+  `INGEST_TOKENS`, `READ_TOKENS` or `ADMIN_TOKENS` list denies everyone
+  rather than staying open. Configuring only ingest tokens therefore does
+  not leave the read APIs anonymous, and admin powers are never inherited
+  from read tokens.
 - Canonical-event retention keys on `received_at` (the observer's clock),
   not producer-supplied `observed_at` — clock-skewed producers cannot
   expire events early or keep them forever.

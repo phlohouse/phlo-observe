@@ -282,3 +282,54 @@ async def test_alembic_upgrade_and_downgrade(database_url: str) -> None:
     assert result.returncode == 0, result.stderr
     result = run_alembic("migrate")
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_alembic_0006_rewrites_baseline_samples(database_url: str) -> None:
+    """0006 upgrades legacy ``[value, ...]`` samples to keyed triples and the
+    downgrade restores them — values and order survive the round trip."""
+    import sys
+
+    env = dict(os.environ, PHLO_OBSERVER_DATABASE_URL=database_url)
+
+    def run_alembic(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "phlo_observer.cli", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=MIGRATIONS_DIR.parent,
+        )
+
+    from phlo_observer.models import Base
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("drop table if exists alembic_version"))
+    result = run_alembic("migrate", "0005")
+    assert result.returncode == 0, result.stderr
+
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "insert into observe_baselines "
+                "(entity_id, metric, samples, count, mean, updated_at) "
+                "values ('e', 'm', '[1.5, 2.5]', 2, 2.0, now())"
+            )
+        )
+
+    result = run_alembic("migrate", "0006")
+    assert result.returncode == 0, result.stderr
+    async with engine.begin() as conn:
+        samples = (await conn.execute(text("select samples from observe_baselines"))).scalar_one()
+    assert [s[2] for s in samples] == [1.5, 2.5]
+    assert all(len(s) == 3 and s[0].endswith("Z") for s in samples)
+
+    result = run_alembic("downgrade", "0005")
+    assert result.returncode == 0, result.stderr
+    async with engine.begin() as conn:
+        samples = (await conn.execute(text("select samples from observe_baselines"))).scalar_one()
+    assert samples == [1.5, 2.5]
+    await engine.dispose()

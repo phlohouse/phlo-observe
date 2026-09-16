@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer.models import Baseline
-from phlo_observer.state_engine import event_producer
+from phlo_observer.state_engine import _EPOCH, _parse_key, event_key, event_producer
 
 MAX_SAMPLES = 200
 """Bounded rolling window per (entity, metric) — enough for stable medians."""
@@ -116,6 +116,43 @@ def observations_of(event: dict[str, Any]) -> list[tuple[str, str, float]]:
     return out
 
 
+def _entries(row: Baseline | None) -> list[tuple[Any, str, float]]:
+    """A row's samples as ``(observed_at, event_id, value)``, observed-sorted.
+
+    Samples are stored as ``[iso, event_id, value]`` so the window keeps the
+    newest *observed* samples regardless of arrival order — incremental
+    ingest and rebuild converge on the same retained set. Plain-float
+    samples written before the keyed format anchor at the epoch (they are
+    always older than anything newly folded).
+    """
+    out: list[tuple[Any, str, float]] = []
+    for item in (row.samples if row is not None else []) or []:
+        raw: Any = item
+        if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+            key = _parse_key(raw[:2])
+            if key is not None:
+                out.append((key[0], key[1], float(raw[2])))
+                continue
+        try:
+            out.append((_EPOCH, "", float(raw)))
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda entry: (entry[0], entry[1]))
+    return out
+
+
+def window_before(row: Baseline | None, key: tuple[Any, str]) -> list[float]:
+    """Retained sample values preceding ``key`` in observed order.
+
+    Insight rules evaluate an event against the baseline *as of* the
+    event's position, so a late arrival judges itself against the same
+    window a rebuild would have seen. Bounded by ``MAX_SAMPLES``: an event
+    whose position predates the retained window sees the oldest retained
+    prefix (a documented bounded-history limitation).
+    """
+    return [value for at, eid, value in _entries(row) if (at, eid) < key]
+
+
 async def update_baselines(
     session: AsyncSession,
     event: dict[str, Any],
@@ -124,11 +161,17 @@ async def update_baselines(
 ) -> int:
     """Fold one event's metric observations into rolling baselines.
 
+    Samples insert at their ``(observed_at, event_id)`` position and the
+    window keeps the newest ``MAX_SAMPLES`` by observed order, so folding a
+    late event lands it in place rather than at the tail — the retained set
+    matches a rebuild's.
+
     ``rows`` optionally supplies the batch's preloaded (entity, metric)
     -> Baseline map; newly created rows are registered into it so later
     events in the same batch see them without another query.
     """
     updated = 0
+    key = event_key(event)
     for entity_id, metric, value in observations_of(event):
         if rows is None:
             row = (
@@ -140,18 +183,22 @@ async def update_baselines(
             ).scalar_one_or_none()
         else:
             row = rows.get((entity_id, metric))
-        samples = list(row.samples) if row else []
-        samples.append(value)
-        if len(samples) > MAX_SAMPLES:
-            samples = samples[-MAX_SAMPLES:]
-        stats = compute(samples)
+        entries = _entries(row)
+        inserted = not any((at, eid) == key for at, eid, _ in entries)
+        if inserted:
+            entries.append((key[0], key[1], value))
+            entries.sort(key=lambda entry: (entry[0], entry[1]))
+            if len(entries) > MAX_SAMPLES:
+                del entries[: len(entries) - MAX_SAMPLES]
+        stats = compute([value for _, _, value in entries])
         if row is None:
-            row = Baseline(entity_id=entity_id, metric=metric, samples=samples)
+            row = Baseline(entity_id=entity_id, metric=metric, samples=[])
             session.add(row)
             if rows is not None:
                 rows[(entity_id, metric)] = row
-        row.samples = samples
-        row.count = (row.count or 0) + 1
+        row.samples = [[at.isoformat(), eid, v] for at, eid, v in entries]
+        if inserted:
+            row.count = (row.count or 0) + 1
         row.median = stats["median"]
         row.mad = stats["mad"]
         row.mean = stats["mean"]

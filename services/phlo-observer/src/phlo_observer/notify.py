@@ -69,14 +69,32 @@ class NotifyBridge:
     """
 
     def __init__(self, database_url: str, hub: Any, *, instance_id: str) -> None:
-        self._dsn = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        dsn: str | None = None
+        for prefix in ("postgresql+asyncpg://", "postgres+asyncpg://"):
+            if database_url.startswith(prefix):
+                dsn = "postgresql://" + database_url[len(prefix) :]
+                break
+        if dsn is None and database_url.startswith(("postgresql://", "postgres://")):
+            dsn = database_url
+        self._dsn = dsn
         self._hub = hub
         self._instance_id = instance_id
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
-        """Spawn the listener task."""
+        """Spawn the listener task.
+
+        A non-asyncpg DSN cannot LISTEN: the bridge disables cleanly (one
+        warning at startup) instead of reconnect-looping forever on a URL
+        asyncpg can never parse.
+        """
+        if self._dsn is None:
+            logger.warning(
+                "notify bridge disabled: database_url is not an asyncpg "
+                "Postgres DSN; SSE stays instance-local"
+            )
+            return
         self._task = asyncio.create_task(self._run(), name="phlo-notify-bridge")
 
     async def stop(self) -> None:

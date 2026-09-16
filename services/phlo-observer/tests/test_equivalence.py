@@ -60,6 +60,10 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
             "asset_count": r.asset_count,
             "asset_keys": sorted((r.summary or {}).get("asset_keys") or []),
             "provenance": _prov(r.provenance),
+            # Fold bookkeeping is deterministic event-position data: two
+            # converged states must carry identical keys or the NEXT late
+            # event would fold them apart.
+            "fold_state": r.fold_state or {},
         }
         for r in (await session.execute(select(Run))).scalars()
     }
@@ -72,6 +76,7 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
             "last_seen_at": e.last_seen_at,
             "attributes": e.attributes or {},
             "provenance": _prov(e.provenance),
+            "fold_state": e.fold_state or {},
         }
         for e in (await session.execute(select(Entity))).scalars()
     }
@@ -81,6 +86,7 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
             "method": r.method,
             "confidence": r.confidence,
             "source_event_ids": sorted(r.source_event_ids or []),
+            "fold_state": r.fold_state or {},
         }
         for r in (await session.execute(select(Relationship))).scalars()
     }
@@ -94,6 +100,7 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
             "freshness_sla_seconds": a.freshness_sla_seconds,
             "attributes": a.attributes or {},
             "provenance": _prov(a.provenance),
+            "fold_state": a.fold_state or {},
         }
         for a in (await session.execute(select(Asset))).scalars()
     }
@@ -111,8 +118,19 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
         for b in (await session.execute(select(Baseline))).scalars()
     }
 
+    def _pos_key(i: Any, name: str) -> Any:
+        raw = (i.attributes or {}).get(name)
+        return tuple(raw) if isinstance(raw, list) else raw
+
     snap["insights"] = {
-        i.dedupe_key or str(i.insight_id): {
+        # A dedupe key owns a *chain* of rows partitioned at resolver
+        # positions, so identity is (dedupe, open_from, resolved): all
+        # event positions, stable across incremental and rebuild.
+        (
+            i.dedupe_key or str(i.insight_id),
+            _pos_key(i, "open_from_key"),
+            _pos_key(i, "resolved_key"),
+        ): {
             "rule_id": i.rule_id,
             "rule_version": i.rule_version,
             "title": i.title,
@@ -126,11 +144,24 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
     }
 
     # Incident insight_ids hold uuids; map them onto insight dedupe keys so
-    # incidents compare semantically across runs of the same scenario.
+    # incidents compare semantically across runs of the same scenario. The
+    # member records inside attributes carry the same volatile uuids.
     insight_key_by_id = {
         str(i.insight_id): i.dedupe_key or str(i.insight_id)
         for i in (await session.execute(select(Insight))).scalars()
     }
+
+    def _incident_attrs(c: Any) -> dict[str, Any]:
+        attrs = dict(c.attributes or {})
+        members = attrs.get("members")
+        if isinstance(members, list):
+            attrs["members"] = [
+                {**m, "iid": insight_key_by_id.get(str(m.get("iid")), m.get("iid"))}
+                for m in members
+                if isinstance(m, dict)
+            ]
+        return attrs
+
     snap["incidents"] = {
         # Entity-set alone is not unique: two incidents can legitimately
         # share it, and keying on it alone would silently merge them.
@@ -140,7 +171,7 @@ async def snapshot_state(session: Any) -> dict[str, Any]:
             "title": c.title,
             "insight_keys": sorted(insight_key_by_id.get(i, i) for i in c.insight_ids or []),
             "entities": sorted(c.entities or []),
-            "attributes": c.attributes or {},
+            "attributes": _incident_attrs(c),
         }
         for c in (await session.execute(select(Incident))).scalars()
     }

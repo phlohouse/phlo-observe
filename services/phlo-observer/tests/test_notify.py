@@ -30,6 +30,20 @@ def test_pack_notify_caps_oversized_batches() -> None:
     assert pack_notify("inst", []) is None
 
 
+def test_bridge_disables_cleanly_on_non_asyncpg_dsn() -> None:
+    """A psycopg/SQLite DSN cannot LISTEN: the bridge must refuse once at
+    startup rather than reconnect-loop forever on a URL asyncpg will never
+    parse — a previous version logged warnings in a hot loop."""
+    for url in (
+        "postgresql+psycopg://u:p@h/db",
+        "sqlite+aiosqlite:///tmp/x.db",
+        "postgresql+pg8000://u:p@h/db",
+    ):
+        bridge = NotifyBridge(url, StreamHub(), instance_id="x")
+        bridge.start()  # must not spawn a task
+        assert bridge._task is None
+
+
 @asyncio_only
 async def test_notify_reaches_other_replica(session_factory: Any, database_url: str) -> None:
     """Ingest on instance A -> subscriber on instance B's hub sees it."""

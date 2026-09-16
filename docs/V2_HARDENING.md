@@ -93,7 +93,11 @@ drain worker. No Python bottleneck justifies a Rust path at these numbers.
 
 The projection-equivalence harness compares every derived table after
 incremental ingest vs after `rebuild-projections` on identical canonical
-input, under four orderings. It caught four real bugs:
+input, under four orderings — including `fold_state` bookkeeping, so a
+reducer that agrees on current values but would diverge on the next late
+event is still caught. It caught four real bugs (and the order-convergence
+pass in §6c added the reducers that make the claim hold for late events
+across request boundaries):
 
 1. **Provenance cap asymmetry** — incremental merged `derived_from` at 32
    entries, rebuild at 64. Unified via the shared state-engine bound.
@@ -187,6 +191,62 @@ missed; each now has a regression test or strengthened assertion.
 | `workloads.dbt_invocation` diverged from the real SDK shape (`run_id` prefixed `dbt-`, invocation first with `outcome="unknown"`, synthetic `pipeline.run`) — every workload-driven dbt run produced a `runs` row no entity/edge could join back to | test fidelity | `run_id` is the bare invocation id and the terminal `dbt.invocation` lands last with the worst-result outcome and elapsed duration — the same shape `emit_run_results` emits | exercised by every `mixed_history` consumer |
 | `WorkerBackend` eviction scanned via get/re-put, rotating the first 256 queued items to the tail on every eviction and racing a sentinel loss under concurrent producers | correctness | The scan runs in place on the queue's deque under its own mutex — survivors keep position, no pull/re-put race | `test_eviction_never_takes_sentinels` (order asserted), `test_eviction_scan_is_bounded` |
 
+## 6c. Order convergence: incremental == rebuild under late events
+
+A dedicated review pass attacked the core invariant directly: incremental
+ingest folds events in *arrival* order (sorted within each request only),
+while `rebuild-projections` folds in global `(observed_at, event_id)`
+order. Any reducer whose writes are last-folded-wins diverges when an
+event arrives late relative to its observed position — and two did,
+verifiably:
+
+- `apply_asset_event` set `status = "failing"` unconditionally on failure
+  but only escalated to `healthy`/`recovering` on success — a late
+  failure folded after a later-observed success left the asset `failing`
+  while rebuild reported `recovering` (the semantically correct answer:
+  the newest *observed* outcome was success).
+- Branch entity attributes merged last-writer-wins by fold position — a
+  late `wap.branch.create` regressed a `promoted` branch back to `open`.
+
+The same mechanism reached baselines (last-200 window shifted by
+arrival), insight verdicts (evaluated against the baseline at arrival
+time, not at the event's observed position), insight resolution (a
+finding folded after its own resolver duplicated or stayed open), and
+incident grouping (windowed on wall-clock arrival).
+
+The fix makes every order-sensitive reducer **event-time aware** by
+keying each write on the event's canonical position
+`(observed_at, event_id)`:
+
+| Component | Mechanism |
+| --- | --- |
+| Runs, entities, assets, edges | `fold_state` JSONB column persists per-field write keys (`field_at`), derived-id keys (`derived_keys`) and run-start bookkeeping; a write only lands when the event's position exceeds the recorded key — last-*observed* wins, not last-arrived |
+| Asset status | Derived from the newest materialization outcome by event position plus a bounded `materialize_times`/`last_failure` history, so `failing`/`recovering`/`healthy` converge regardless of fold order |
+| Baselines | `samples` stores `[observed_at, event_id, value]` triples sorted by position; the last-200 window is the newest *observed* samples and duplicates never inflate `count` |
+| Insights | A dedupe key's history is a chain of rows partitioned at resolver positions (`open_from_key`/`resolved_key`); findings attach to the interval their position falls in, resolvers repartition resolved rows retroactively, and a resolver folded before its finding still resolves it via a canonical-event scan |
+| Incidents | Membership records `{iid, entity, key:[observed_at,event_id]}`; grouping evaluates membership as-of the signal's position, and a late critical finding that replay would have made the creator absorbs the incident (earliest member wins title/start) |
+| Evaluation as-of | Insights evaluate against baseline/asset state reconstructed at the event's position, not at arrival — a late metric event is judged against what was known when it happened |
+
+Migration `0006` adds the four `fold_state` columns and rewrites legacy
+`baseline.samples` into keyed triples (anchored at `updated_at`, order
+preserved). The equivalence snapshot now compares `fold_state` too, so a
+run that happens to agree on current values but would diverge on the
+next late event is still caught.
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| Asset status regressed on late failures (`failing` vs rebuild's `recovering`) | correctness | Event-position-keyed status derivation | `test_order_convergence` suite |
+| Late `wap.branch.create` regressed `state` to `open` after promote | correctness | Per-field `field_at` gating on entity merges | `test_order_convergence` suite |
+| Baseline last-200 window shifted by arrival order | correctness | Keyed samples sorted by event position | `test_order_convergence` suite |
+| Insight evaluated against arrival-time baseline | correctness | As-of baseline prefix at the event's position | `test_equivalence` + `test_order_convergence` |
+| Late finding duplicated/stayed open around an already-folded resolver | correctness | Resolver-partitioned insight chain with retroactive repartition | `test_order_convergence` suite |
+| Late critical finding spawned a duplicate incident | correctness | Position-aware membership; earliest member absorbs | `test_order_convergence` suite |
+| Partial token config failed open on ingest/read (only admin failed closed) | security | Once any token exists, every unset surface denies | `test_auth` partial-config tests |
+| `_paged_events` accumulated full history in memory | resource bound | Pages fold incrementally; no full-history list | `test_equivalence` suite |
+| `reprocess` held one transaction across the window | operability | Per-page transactions via keyset pagination | `test_reprocess_paginates_past_batch_size` |
+| `NotifyBridge` reconnect-looped forever on non-asyncpg DSNs | robustness | Refuses to start on URLs asyncpg cannot LISTEN on | `test_bridge_disables_cleanly_on_non_asyncpg_dsn` |
+| Investigation bundle reported `truncated` at exactly the cap | correctness | Over-fetch by one; `truncated` only when events were dropped | `test_v2_investigate_truncated_only_beyond_cap` |
+
 ## 7. Insight quality
 
 On controlled histories (`test_insight_quality.py`, 10 tests): each rule
@@ -229,8 +289,8 @@ seeded healthy segments.
 - Run >= 2 replicas behind a balancer — HA ingest, dedup and cross-instance
   SSE are proven. `stream_notify` defaults on; leave it on.
 - Configure all three token scopes (`INGEST_TOKENS`, `READ_TOKENS`,
-  `ADMIN_TOKENS`) outside dev: admin endpoints fail closed once any
-  token exists, and `AUTH_OPTIONAL_DEV=false` refuses to boot without
+  `ADMIN_TOKENS`) outside dev: once any token exists every unset scope
+  fails closed, and `AUTH_OPTIONAL_DEV=false` refuses to boot without
   all three.
 - Keep `raw_event_ttl_hours` and retention windows configured; retention
   is lock-serialized and safe to leave scheduled on all instances. Event
