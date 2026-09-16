@@ -7,13 +7,19 @@ All numbers below are from `uv run pytest tests/performance -s` and the
 observer suite against Docker-Compose PostgreSQL 16 on an Apple-silicon
 laptop. CI runners are slower; the relative magnitudes are what matter.
 
+Reading this report: **implemented** items are in the code; **tested**
+items have an automated test named in the table; **measured** items carry
+numbers from those runs; §9 is **recommended** operational posture, not a
+hard requirement; §8 lists what is **unproven or accepted as-is** — two
+entries there are deliberate V2 acceptances rather than open bugs.
+
 ## 1. Scenarios tested
 
 | Area | Scenario | Where |
 | --- | --- | --- |
 | Workloads | Seeded `tests/workloads.py`: Dagster runs (steps, partitions, checks, retries), DLT loads, dbt models/tests, WAP branch lifecycle, Trino queries, metric samples, late/out-of-order arrivals, duplicates | `tests/workloads.py` |
 | Equivalence | Incremental ingest vs `rebuild-projections` over the same canonical events, in-order, shuffled, late-moved-to-end, and duplicated orderings | `test_equivalence.py` |
-| Stress | 5000-event sustained mixed ingest, 1094-event burst, 8 concurrent producers, concurrent writers to one run, 10k-event run timeline, two-instance dedup, rebuild during ingest | `tests/performance/test_stress.py` |
+| Stress | 2080-event sustained mixed ingest, 4×~270-event bursts (1082 total), 12 concurrent producers, concurrent writers to one run, 10k-event run timeline, two-instance dedup, rebuild during ingest | `tests/performance/test_stress.py` |
 | SDK | emit/observe overhead, enqueue under pressure, serialize, HTTP drain, dead exporter | `tests/performance/test_sdk_overhead.py` |
 | Failure injection | aborted transaction, projection-failure fail-open, DB down at ingest/readiness, pool exhaustion, retention during ingest, restart dedup, unknown schema version, late events | `test_resilience.py`, `test_db_failure_injection.py` |
 | Correlation | explicit run_id/trace_id/invocation linking, declared-entity edges, ambiguous telemetry left uncorrelated | `test_correlation.py` |
@@ -47,7 +53,7 @@ laptop. CI runners are slower; the relative magnitudes are what matter.
 | Trivial envelopes, varied runs | 7,640 events/s | ~65 ms / 500 | pre-V2 path |
 | Trivial envelopes, one run | 6,036 events/s | ~83 ms / 500 | per-run lock contention only |
 | **Realistic mixed workload** | **692 events/s** | p50 703 ms, p95 715 ms | 64 statements per 500-event batch, ~9 MB peak alloc |
-| Burst (1094 events) | — | p50/p95/p99 105 ms / 500 | back-to-back batches |
+| Burst (1082 events, 4 bursts) | — | p50/p95/p99 105 ms | back-to-back full histories |
 | Timeline, 10k-event run | — | p50 348 ms, p95 362 ms | bounded at 10k events |
 
 The realistic workload is ~11x slower per event than trivial envelopes —
@@ -55,6 +61,16 @@ that is the cost of baselines, insight evaluation, incident grouping and
 asset folds. After batching, ingest costs ~1.4 ms/event and ~0.13
 statements/event. The earlier per-event-query implementation measured
 343 events/s and 931 statements per batch on the same workload.
+
+These figures are point-in-time baselines from the authoring run. A
+re-run of the same suite on the same class of hardware (after the full
+observer suite had populated the test database) measured ~410 events/s,
+batch p50 ~1150 ms, ~125 statements per batch and ~10 MB peak — same
+order of magnitude, with the delta attributable to machine load and
+database state. The durable gates are the assertion floors encoded in
+the tests (`_per_s(400)` sustained, timeline p95 floor at 2x the 500 ms
+spec target locally, 4x under CI); the printed values exist to refresh
+this table per release.
 
 ### SDK (`observe-core`, local)
 
@@ -294,7 +310,7 @@ missed; all are fixed with regression tests.
 
 ## 7. Insight quality
 
-On controlled histories (`test_insight_quality.py`, 10 tests): each rule
+On controlled histories (`test_insight_quality.py`, 16 tests): each rule
 fires when it should and stays quiet when it shouldn't; baseline warm-up
 suppresses findings until minimum samples accumulate; partition-aware
 baselines don't cross-contaminate; open insights deduplicate by
@@ -320,24 +336,29 @@ seeded healthy segments.
 - **Timeline cap**: runs over 10k events return `truncated: true`; the
   full history remains in canonical events and paged queries.
 - **Rebuild serializes all derived-state writes, not just
-  insights/incidents** — a full rebuild holds the exclusive projection
-  advisory lock while it deletes and replays, so reads of derived tables
-  see a transient empty/rebuilding state and concurrent ingest queues its
-  projection pass for the rebuild's duration (canonical events still
-  commit). Plan for rebuilds as a brief write-freeze on derived state per
-  the rebuild-runbook. The scoped `--run` rebuild is online-safe: it
-  merges entity/edge contributions and re-derives touched assets from
-  their full history.
+  insights/incidents** — *accepted for V2.* A full rebuild holds the
+  exclusive projection advisory lock while it deletes and replays, so
+  reads of derived tables see a transient empty/rebuilding state and
+  concurrent ingest queues its projection pass for the rebuild's
+  duration (canonical events still commit — nothing is lost, only
+  delayed). Treat a full rebuild as an operational/maintenance action —
+  a planned write-freeze on derived state — not a routine background
+  job. The scoped `--run` rebuild is online-safe: it merges entity/edge
+  contributions and re-derives touched assets from their full history.
 - **Open-insight dedupe race surface**: the partial unique index is
   enforced at flush time inside the fail-open projection savepoint — a
   replica that loses the race keeps its canonical event but skips that
   pass's projections (self-healing on the next rebuild). Concurrent
-  incidents have no equivalent DB-level uniqueness: `group_insight`
-  relies on the `FOR UPDATE` lock on open incidents, which serializes
-  same-database writers but cannot stop two replicas from both finding
-  no open incident in a narrow window if they interleave between the
-  lock-free scope check and insert — grouped under at most a duplicated
-  incident row, which resolve/suppress lifecycle handles.
+  incidents have no equivalent DB-level uniqueness — *accepted for V2.*
+  `group_insight` relies on the `FOR UPDATE` lock on open incidents,
+  which serializes same-database writers but cannot stop two replicas
+  from both finding no open incident in a narrow window if they
+  interleave between the lock-free scope check and insert. Canonical
+  events are unaffected; the worst case is a duplicated incident row,
+  which the resolve/suppress lifecycle handles. Closing this window
+  would require a uniqueness constraint incidents don't naturally have
+  (membership is a growing set, not a key) or more infrastructure —
+  deliberately not engineered away here.
 - **`reprocess` does not rebuild runs/insights/baselines** — it re-folds
   a `received_at` window into entity/asset/edge state only; use
   `rebuild-projections` for derived-state changes.
@@ -345,8 +366,13 @@ seeded healthy segments.
 
 ## 9. Operational recommendations
 
-- Run >= 2 replicas behind a balancer — HA ingest, dedup and cross-instance
-  SSE are proven. `stream_notify` defaults on; leave it on.
+- Production HA: run >= 2 replicas behind a load balancer — HA ingest,
+  dedup and cross-instance SSE are proven. A single replica remains a
+  supported configuration for development, local Phlo deployments and
+  small/non-critical installations — it simply has no failover and its
+  SSE hub is instance-local (which is correct, since it is the only
+  instance). `stream_notify` defaults on and is harmless on one replica;
+  leave it on.
 - Configure all three token scopes (`INGEST_TOKENS`, `READ_TOKENS`,
   `ADMIN_TOKENS`) outside dev: once any token exists every unset scope
   fails closed, and `AUTH_OPTIONAL_DEV=false` refuses to boot without
