@@ -132,6 +132,13 @@ def test_env_redact_lists_empty(monkeypatch):
     assert ObserveSettings(service_name="x").redact_keys == []
 
 
+def test_env_tail_terminal_events_csv(monkeypatch):
+    """OBSERVE_TAIL_TERMINAL_EVENTS parses like the other list settings."""
+    monkeypatch.setenv("OBSERVE_TAIL_TERMINAL_EVENTS", "pipeline.run, dbt.invocation")
+    s = ObserveSettings(service_name="x")
+    assert s.tail_terminal_events == ["pipeline.run", "dbt.invocation"]
+
+
 def test_cli_config_bad_env_is_clean_error(monkeypatch, capsys):
     """A malformed OBSERVE_* var must not dump a raw traceback (spec §73)."""
     from observe_core.cli import main

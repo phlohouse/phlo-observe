@@ -403,6 +403,64 @@ def test_tail_sampling_via_settings(make_runtime):
     assert rt._tail is not None
 
 
+def test_tail_sampler_terminal_events_configurable():
+    """Application-named run boundaries close the buffer (spec §7.7).
+
+    Phlo's ``pipeline.run`` carries no ``.completed`` suffix; registered via
+    ``terminal_events`` it still ends the run — boring runs drop there.
+    """
+    emitted = []
+    tail = TailSampler(min_duration_ms=30_000, max_runs=100, terminal_events=["pipeline.run"])
+    corr = {"correlation": {"run_id": "r-1"}}
+    tail.process(_E({**corr, "event": "pipeline.step"}), emitted.append)
+    tail.process(
+        _E({**corr, "event": "pipeline.run", "duration_ms": 500, "outcome": "success"}),
+        emitted.append,
+    )
+    assert emitted == []  # boring run dropped at its real terminal event
+
+
+def test_tail_sampler_terminal_events_keep_failures():
+    """A registered terminal name releases failed runs immediately."""
+    emitted = []
+    tail = TailSampler(min_duration_ms=30_000, max_runs=100, terminal_events=["pipeline.run"])
+    corr = {"correlation": {"run_id": "r-1"}}
+    tail.process(_E({**corr, "event": "pipeline.step"}), emitted.append)
+    tail.process(
+        _E({**corr, "event": "pipeline.run", "outcome": Outcome.FAILURE.value}),
+        emitted.append,
+    )
+    assert len(emitted) == 2
+
+
+def test_tail_sampler_terminal_events_keep_slow_runs():
+    emitted = []
+    tail = TailSampler(min_duration_ms=30_000, max_runs=100, terminal_events=["pipeline.run"])
+    corr = {"correlation": {"run_id": "r-1"}}
+    tail.process(_E({**corr, "event": "pipeline.step"}), emitted.append)
+    tail.process(
+        _E({**corr, "event": "pipeline.run", "duration_ms": 60_000, "outcome": "success"}),
+        emitted.append,
+    )
+    assert len(emitted) == 2
+
+
+def test_tail_sampler_unrecognized_terminal_stays_buffered():
+    """A run-boundary name not in ``terminal_events`` cannot close the buffer."""
+    emitted = []
+    tail = TailSampler(min_duration_ms=30_000, max_runs=100)
+    corr = {"correlation": {"run_id": "r-1"}}
+    tail.process(_E({**corr, "event": "pipeline.run", "outcome": "success"}), emitted.append)
+    assert emitted == []
+    assert tail.buffered_runs() == 1
+
+
+def test_tail_sampling_settings_wire_terminal_events(make_runtime):
+    rt = make_runtime(tail_sampling=True, tail_terminal_events=["pipeline.run"])
+    assert rt._tail is not None
+    assert "pipeline.run" in rt._tail.terminal_events
+
+
 # -- V2 envelope emission -----------------------------------------------------------
 
 

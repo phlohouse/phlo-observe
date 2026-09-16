@@ -332,6 +332,12 @@ def reprocess(
                     stmt = stmt.order_by(Event.received_at, Event.event_id).limit(batch)
                     rows = list((await session.execute(stmt)).scalars().all())
                     if rows:
+                        # Shared projection lock: reprocess folds the same
+                        # rows ingest does, and must not interleave with a
+                        # rebuild's delete+replay window.
+                        from phlo_observer.projections import lock_projection_writes
+
+                        await lock_projection_writes(session)
                         await apply_events_batch(session, rows)
                 if not rows:
                     break

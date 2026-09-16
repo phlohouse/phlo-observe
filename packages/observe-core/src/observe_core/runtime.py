@@ -132,6 +132,7 @@ class Runtime:
             TailSampler(
                 min_duration_ms=settings.tail_min_duration_ms,
                 max_runs=settings.tail_max_runs,
+                terminal_events=settings.tail_terminal_events,
                 stats=self.stats,
             )
             if settings.tail_sampling

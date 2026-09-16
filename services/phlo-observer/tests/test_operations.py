@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import subprocess
 import uuid
@@ -332,4 +333,141 @@ async def test_alembic_0006_rewrites_baseline_samples(database_url: str) -> None
     async with engine.begin() as conn:
         samples = (await conn.execute(text("select samples from observe_baselines"))).scalar_one()
     assert samples == [1.5, 2.5]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_alembic_0007_collapses_duplicate_open_insights(database_url: str) -> None:
+    """0007 merges duplicate open rows into the earliest keeper before
+    creating the partial unique index — producers and evidence unioned,
+    losers suppressed with a ``deduped_into`` pointer, resolved rows and
+    NULL-dedupe rows untouched."""
+    import sys
+
+    env = dict(os.environ, PHLO_OBSERVER_DATABASE_URL=database_url)
+
+    def run_alembic(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "phlo_observer.cli", *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            cwd=MIGRATIONS_DIR.parent,
+        )
+
+    from phlo_observer.models import Base
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine(database_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("drop table if exists alembic_version"))
+    result = run_alembic("migrate", "0006")
+    assert result.returncode == 0, result.stderr
+
+    keeper = "11111111-1111-4111-8111-111111111111"
+    loser = "22222222-2222-4222-8222-222222222222"
+    resolved = "33333333-3333-4333-8333-333333333333"
+    async with engine.begin() as conn:
+        for iid, state, created, attrs, evidence in [
+            (
+                keeper,
+                "open",
+                dt.datetime(2025, 1, 1, tzinfo=dt.UTC),
+                {"producers": [{"at": "2025-01-01T00:00:00Z", "eid": "e-1"}]},
+                '["e-1"]',
+            ),
+            (
+                loser,
+                "open",
+                dt.datetime(2025, 1, 2, tzinfo=dt.UTC),
+                {"producers": [{"at": "2025-01-02T00:00:00Z", "eid": "e-2"}]},
+                '["e-2"]',
+            ),
+            (resolved, "resolved", dt.datetime(2024, 12, 31, tzinfo=dt.UTC), {}, "[]"),
+        ]:
+            await conn.execute(
+                text(
+                    "insert into observe_insights (insight_id, rule_id, rule_version,"
+                    " title, severity, state, entity_id, evidence_event_ids,"
+                    " evidence_metric_ids, recommended_action_verified, dedupe_key,"
+                    " attributes, created_at, updated_at)"
+                    " values (:iid, 'run-failure', 1, 't', 'warning', :state,"
+                    " 'asset://a', cast(:evidence as jsonb), '[]'::jsonb, 0, 'dk',"
+                    " cast(:attrs as jsonb), :created, :created)"
+                ),
+                {
+                    "iid": iid,
+                    "state": state,
+                    "created": created,
+                    "attrs": json.dumps(attrs),
+                    "evidence": evidence,
+                },
+            )
+        # An open row with NULL dedupe_key must survive the index.
+        await conn.execute(
+            text(
+                "insert into observe_insights (insight_id, rule_id, rule_version,"
+                " title, severity, state, entity_id, evidence_event_ids,"
+                " evidence_metric_ids, recommended_action_verified, dedupe_key,"
+                " attributes, created_at, updated_at)"
+                " values ('44444444-4444-4444-8444-444444444444', 'run-failure', 1,"
+                " 't', 'warning', 'open', 'asset://b', '[]'::jsonb, '[]'::jsonb, 0,"
+                " NULL, '{}'::jsonb, now(), now())"
+            )
+        )
+
+    result = run_alembic("migrate", "0007")
+    assert result.returncode == 0, result.stderr
+
+    async with engine.begin() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    text(
+                        "select insight_id, state, attributes, evidence_event_ids"
+                        " from observe_insights where dedupe_key = 'dk'"
+                        " order by created_at"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        assert len(rows) == 3
+        res, kept, dup = rows  # ordered by created_at: resolved predates both
+        assert str(res["insight_id"]) == resolved
+        assert res["state"] == "resolved"
+        assert str(kept["insight_id"]) == keeper
+        assert kept["state"] == "open"
+        assert kept["attributes"]["dedupe_merged"] is True
+        assert {p["eid"] for p in kept["attributes"]["producers"]} == {"e-1", "e-2"}
+        assert set(kept["evidence_event_ids"]) == {"e-1", "e-2"}
+        assert str(dup["insight_id"]) == loser
+        assert dup["state"] == "suppressed"
+        assert dup["attributes"]["deduped_into"] == keeper
+
+        # The partial unique index now rejects a second open row on 'dk'.
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn2:
+                await conn2.execute(
+                    text(
+                        "insert into observe_insights (insight_id, rule_id,"
+                        " rule_version, title, severity, state, entity_id,"
+                        " evidence_event_ids, evidence_metric_ids,"
+                        " recommended_action_verified, dedupe_key, attributes,"
+                        " created_at, updated_at)"
+                        " values ('55555555-5555-4555-8555-555555555555',"
+                        " 'run-failure', 1, 't', 'warning', 'open', 'asset://a',"
+                        " '[]'::jsonb, '[]'::jsonb, 0, 'dk', '{}'::jsonb,"
+                        " now(), now())"
+                    )
+                )
+
+    result = run_alembic("downgrade", "0006")
+    assert result.returncode == 0, result.stderr
+    result = run_alembic("migrate")
+    assert result.returncode == 0, result.stderr
     await engine.dispose()

@@ -15,7 +15,17 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import DateTime, Double, ForeignKey, Index, Integer, String, Text, Uuid
+from sqlalchemy import (
+    DateTime,
+    Double,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -273,6 +283,15 @@ class Insight(Base):
         Index("ix_observe_insights_state", "state"),
         Index("ix_observe_insights_entity", "entity_id"),
         Index("ix_observe_insights_dedupe", "dedupe_key"),
+        # At most one open insight per dedupe key — the DB enforces what the
+        # ingest-side open_by_dedupe map can only approximate across replicas.
+        Index(
+            "uq_observe_insights_open_dedupe",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("state = 'open' AND dedupe_key IS NOT NULL"),
+            sqlite_where=text("state = 'open' AND dedupe_key IS NOT NULL"),
+        ),
     )
 
 

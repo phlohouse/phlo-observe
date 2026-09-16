@@ -143,7 +143,11 @@ async def group_insight(
         signal_key = (signal, str(insight.insight_id))
     if open_incidents is None:
         candidates = list(
-            (await session.execute(select(Incident).where(Incident.state == "open")))
+            (
+                await session.execute(
+                    select(Incident).where(Incident.state == "open").with_for_update()
+                )
+            )
             .scalars()
             .all()
         )

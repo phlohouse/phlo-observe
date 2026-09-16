@@ -288,6 +288,12 @@ class ObserveSettings(BaseSettings):
     """Maximum concurrent run buffers held by the tail sampler."""
     tail_min_duration_ms: float = 30_000.0
     """Runs longer than this keep full telemetry even when successful."""
+    tail_terminal_events: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    """Event names that close a run buffer for a keep/drop decision
+    (spec §7.7). Matched exactly; names ending ``.completed``/``.failed``/
+    ``.cancelled`` are always terminal. Core ships no names of its own —
+    applications register their run-boundary vocabulary (for Phlo,
+    ``configure_phlo`` supplies ``pipeline.run`` etc.)."""
 
     telemetry_required: bool = False
     """Fail-closed mode: raise instead of dropping when export is impossible."""
@@ -313,6 +319,7 @@ class ObserveSettings(BaseSettings):
         "redact_key_patterns",
         "redact_paths",
         "redact_value_patterns",
+        "tail_terminal_events",
         mode="before",
     )
     @classmethod

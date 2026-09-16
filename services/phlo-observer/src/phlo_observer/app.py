@@ -34,6 +34,7 @@ from observe_core.timestamps import utcnow
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from phlo_observer import __version__, notify, query_v2
@@ -803,7 +804,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 iid = uuid.UUID(insight_id)
             except ValueError:
                 raise _http_error(404, "insight not found") from None
-            row = await session.get(Insight, iid)
+            row = await session.get(Insight, iid, with_for_update=True)
             if row is None:
                 raise _http_error(404, "insight not found")
             if target == row.state:
@@ -816,6 +817,14 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             row.updated_at = utcnow()
             if target == "resolved":
                 row.attributes = {**(row.attributes or {}), "resolved_manually": True}
+            try:
+                # Reopening can collide with another open insight sharing the
+                # dedupe key — the partial unique index decides, not us.
+                await session.flush()
+            except IntegrityError:
+                raise _http_error(
+                    409, "another open insight already exists for this dedupe key"
+                ) from None
             return {"insight_id": insight_id, "state": target}
 
     @app.post(
@@ -833,7 +842,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 iid = uuid.UUID(incident_id)
             except ValueError:
                 raise _http_error(404, "incident not found") from None
-            row = await session.get(Incident, iid)
+            row = await session.get(Incident, iid, with_for_update=True)
             if row is None:
                 raise _http_error(404, "incident not found")
             if target == row.state:
@@ -1025,7 +1034,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     async def v2_quarantine_replay(failure_id: str, request: Request) -> dict[str, Any]:
         """Re-run the adapter over a quarantined payload (spec §34)."""
         async with request.app.state.session_factory() as session, session.begin():
-            row = await session.get(IngestFailure, uuid.UUID(failure_id))
+            row = await session.get(IngestFailure, uuid.UUID(failure_id), with_for_update=True)
             if row is None:
                 raise _http_error(404, "quarantine entry not found")
             if row.replayed:
@@ -1091,7 +1100,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         schema_json = body.get("schema") or {}
         digest = hashlib.sha256(_json.dumps(schema_json, sort_keys=True).encode()).hexdigest()
         async with request.app.state.session_factory() as session, session.begin():
-            row = await session.get(SchemaRecord, schema_id)
+            row = await session.get(SchemaRecord, schema_id, with_for_update=True)
             if row is None:
                 row = SchemaRecord(
                     schema_id=schema_id,

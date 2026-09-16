@@ -3,7 +3,10 @@
 The incremental ingest path and ``rebuild-projections`` share the same pure
 reducers in ``state_engine``; this module owns the read-modify-write against
 Postgres, including row-lock serialization for concurrent events hitting the
-same projection (spec §12.4).
+same projection (spec §12.4). Every projection row folded from canonical
+events is read under ``SELECT .. FOR UPDATE`` before merge: an unlocked
+read-modify-write would let a concurrent ingest overwrite this transaction's
+merge wholesale and silently lose it.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete, func, or_, select, tuple_
+from sqlalchemy import delete, func, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +31,28 @@ from phlo_observer.models import (
     Relationship,
     Run,
 )
+
+_PROJECTION_LOCK_KEY = 0x70686C70
+"""Advisory lock serializing derived-state writes against full/scoped rebuilds.
+
+Ingest holds it shared for the projection pass (many producers fold
+concurrently); ``rebuild_projections`` holds it exclusively, so a rebuild
+waits out in-flight ingests and new ingests queue behind it rather than
+write rows the rebuild's delete+replay would silently drop. Chosen
+arbitrarily; distinct from retention's lock key.
+"""
+
+
+async def lock_projection_writes(session: AsyncSession) -> None:
+    """Shared lock for transactions that write derived state (ingest)."""
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock_shared(:key)"), {"key": _PROJECTION_LOCK_KEY}
+    )
+
+
+async def lock_rebuild(session: AsyncSession) -> None:
+    """Exclusive lock for delete+replay rebuilds; blocks ingest writes."""
+    await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _PROJECTION_LOCK_KEY})
 
 
 def _event_view(row: Event) -> dict[str, Any]:
@@ -221,7 +246,11 @@ async def _flush_entities(
     )
     existing = {
         r.entity_id: r
-        for r in (await session.execute(select(Entity).where(Entity.entity_id.in_(eids)))).scalars()
+        for r in (
+            await session.execute(
+                select(Entity).where(Entity.entity_id.in_(eids)).with_for_update()
+            )
+        ).scalars()
     }
     for eid, state in entity_states.items():
         row = existing.get(eid)
@@ -306,13 +335,15 @@ async def _flush_edges(
     )
     existing = (
         await session.execute(
-            select(Relationship).where(
+            select(Relationship)
+            .where(
                 tuple_(
                     Relationship.from_entity,
                     Relationship.to_entity,
                     Relationship.relationship_type,
                 ).in_(keys)
             )
+            .with_for_update()
         )
     ).scalars()
     for row in existing:
@@ -522,7 +553,14 @@ async def rebuild_projections(
     asset — a shared asset's history is never regressed by another run's
     contribution. Insights/incidents/baselines are only rebuilt in the
     unscoped path (their state depends on cross-run history).
+
+    The whole rebuild runs under the exclusive projection advisory lock:
+    ingest transactions hold it shared, so a rebuild first waits out any
+    in-flight ingest and then blocks new ingests' projection writes for its
+    duration — events stay durable (canonical inserts are not gated), and
+    no fold can be dropped by the delete+replay window.
     """
+    await lock_rebuild(session)
     counts = {
         "events": 0,
         "runs": 0,
@@ -613,7 +651,7 @@ async def rebuild_projections(
             # run's events did not touch survives untouched, and a field
             # they did touch only moves forward when the rebuild's writer
             # is the newest observation.
-            existing = await session.get(Entity, eid)
+            existing = await session.get(Entity, eid, with_for_update=True)
             if existing is not None:
                 first = min(x for x in (existing.first_seen_at, first) if x)
                 last = max(x for x in (existing.last_seen_at, last) if x)
@@ -659,13 +697,15 @@ async def rebuild_projections(
             (r.from_entity, r.to_entity, r.relationship_type): r
             for r in (
                 await session.execute(
-                    select(Relationship).where(
+                    select(Relationship)
+                    .where(
                         tuple_(
                             Relationship.from_entity,
                             Relationship.to_entity,
                             Relationship.relationship_type,
                         ).in_(list(edge_states))
                     )
+                    .with_for_update()
                 )
             ).scalars()
         }

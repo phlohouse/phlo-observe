@@ -16,6 +16,7 @@ from typing import Any
 
 from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer import baselines as bl
@@ -118,23 +119,44 @@ class BatchState:
                 entity_ids.add(ent)
         baseline_rows: dict[tuple[str, str], Baseline] = {}
         if keys:
+            # Pre-create missing baseline rows so the locked select below has
+            # a row to lock: without it, two concurrent first-samples race a
+            # plain INSERT into the (entity, metric) unique index and the
+            # loser's whole projection pass fails open.
+            dialect = getattr(getattr(session, "bind", None), "dialect", None)
+            if dialect is not None and dialect.name == "postgresql":
+                now = utcnow()
+                await session.execute(
+                    pg_insert(Baseline)
+                    .values(
+                        [
+                            {"entity_id": ent, "metric": metric, "updated_at": now}
+                            for ent, metric in sorted(keys)
+                        ]
+                    )
+                    .on_conflict_do_nothing(index_elements=["entity_id", "metric"])
+                )
             baseline_rows = {
                 (row.entity_id, row.metric): row
                 for row in (
                     await session.execute(
-                        select(Baseline).where(
-                            tuple_(Baseline.entity_id, Baseline.metric).in_(keys)
-                        )
+                        select(Baseline)
+                        .where(tuple_(Baseline.entity_id, Baseline.metric).in_(keys))
+                        .with_for_update()
                     )
                 ).scalars()
             }
-        insight_stmt = select(Insight).where(Insight.state == "open")
-        resolved_stmt = select(Insight).where(Insight.state == "resolved")
+        insight_stmt = select(Insight).where(Insight.state == "open").with_for_update()
+        resolved_stmt = select(Insight).where(Insight.state == "resolved").with_for_update()
         if entity_ids:
             scope = or_(Insight.entity_id.in_(entity_ids), Insight.entity_id.is_(None))
             insight_stmt = insight_stmt.where(scope)
             resolved_stmt = resolved_stmt.where(scope)
-            incident_stmt = select(incidents.Incident).where(incidents.Incident.state == "open")
+            incident_stmt = (
+                select(incidents.Incident)
+                .where(incidents.Incident.state == "open")
+                .with_for_update()
+            )
             dialect = getattr(getattr(session, "bind", None), "dialect", None)
             if dialect is not None and dialect.name == "postgresql":
                 # jsonb ?| — incidents whose entity array overlaps the batch.
@@ -263,7 +285,9 @@ async def _load_asset_states(
         return {}
     existing = {
         a.entity_id: a
-        for a in (await session.execute(select(Asset).where(Asset.entity_id.in_(ids)))).scalars()
+        for a in (
+            await session.execute(select(Asset).where(Asset.entity_id.in_(ids)).with_for_update())
+        ).scalars()
     }
     states: dict[str, dict[str, Any]] = {}
     for event in events:
@@ -554,10 +578,12 @@ async def _chain_rows(
         return list(
             (
                 await session.execute(
-                    select(Insight).where(
+                    select(Insight)
+                    .where(
                         Insight.dedupe_key == dedupe,
                         Insight.state.in_(("open", "resolved")),
                     )
+                    .with_for_update()
                 )
             ).scalars()
         )
@@ -813,22 +839,26 @@ async def resolve_for_event(
             rows = list(
                 (
                     await session.execute(
-                        select(Insight).where(
+                        select(Insight)
+                        .where(
                             Insight.rule_id == rule_id,
                             Insight.entity_id == entity_id,
                             Insight.state == "open",
                         )
+                        .with_for_update()
                     )
                 ).scalars()
             )
             resolved_rows = list(
                 (
                     await session.execute(
-                        select(Insight).where(
+                        select(Insight)
+                        .where(
                             Insight.rule_id == rule_id,
                             Insight.entity_id == entity_id,
                             Insight.state == "resolved",
                         )
+                        .with_for_update()
                     )
                 ).scalars()
             )

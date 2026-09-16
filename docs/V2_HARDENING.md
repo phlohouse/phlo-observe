@@ -19,6 +19,7 @@ laptop. CI runners are slower; the relative magnitudes are what matter.
 | Correlation | explicit run_id/trace_id/invocation linking, declared-entity edges, ambiguous telemetry left uncorrelated | `test_correlation.py` |
 | Insights | each deterministic rule on controlled histories; warm-up, dedup, resolution, partition baselines, lifecycle transitions | `test_insight_quality.py` |
 | HA | two replicas on one database: concurrent ingest, dedup, advisory-locked retention, cross-instance SSE via `LISTEN/NOTIFY` | `test_stress.py`, `test_notify.py` |
+| Concurrency | deterministic lost-update interleaves on entity/edge/baseline/insight rows, rebuild-vs-ingest lock fencing, open-insight dedupe under the partial index | `test_concurrency.py` |
 | Lifecycle | archive -> delete -> restore -> rebuild round-trip, retention at volume, V1 envelopes | `test_lifecycle.py` |
 | Observatory | the ten operational questions answered through the public API only | `test_observatory.py` |
 | Agent readiness | read-only client surface, enforced caps, evidence IDs, truncation flags | `test_agent_readiness.py` |
@@ -247,6 +248,39 @@ next late event is still caught.
 | `NotifyBridge` reconnect-looped forever on non-asyncpg DSNs | robustness | Refuses to start on URLs asyncpg cannot LISTEN on | `test_bridge_disables_cleanly_on_non_asyncpg_dsn` |
 | Investigation bundle reported `truncated` at exactly the cap | correctness | Over-fetch by one; `truncated` only when events were dropped | `test_v2_investigate_truncated_only_beyond_cap` |
 
+## 6d. Fourth-pass review: cross-replica concurrency
+
+The order-convergence pass made reducers correct under *ordering*
+adversity; this pass attacked the same `incremental == rebuild` invariant
+under *concurrency* — two replicas (or two in-flight requests) folding
+events onto the same projection row at once. The original defect was
+reproduced deterministically before fixing: two transactions each read
+the same committed entity row unlocked, merged their own contribution in
+Python, and committed — the second write discarded the first's attribute
+and provenance wholesale, leaving incremental state permanently diverged
+from rebuild with no error raised anywhere.
+
+| Issue | Severity | Fix | Test |
+| --- | --- | --- | --- |
+| `_flush_entities`/`_flush_edges` read projection rows unlocked, then merged in Python and wrote back — concurrent ingests onto the same entity/edge lost the other writer's fields (the same gap existed in `BatchState.load` for baselines, open/resolved insights and open incidents, in the asset overlay preload, and in the non-batch fallback paths) | data loss | Every read-modify-write select against projection rows runs `FOR UPDATE`, matching the existing `update_run_projections`/`_flush_assets` pattern: entity/edge flush selects, `BatchState.load` (baseline/insight/incident/asset selects), `_chain_rows`, `resolve_for_event`, `update_baselines`, `group_insight`, scoped-rebuild merge reads, lifecycle transitions, quarantine replay and schema upserts | `test_concurrency.py` (`TestRowLocks` drives the flush functions directly — the `ON CONFLICT DO NOTHING` precreate already waits on an *emitted* conflicting write, so persist-granularity tests cannot isolate the select lock) |
+| Two replicas could both insert the first baseline row for an `(entity, metric)` key — the loser's plain `session.add` hit the unique index and its whole projection pass failed open, silently dropping its sample until the next rebuild | data loss | `BatchState.load` pre-creates baseline shells with `INSERT .. ON CONFLICT DO NOTHING` before the locked select — the same precreate-then-lock pattern the entity/edge flush already used | `test_concurrent_baseline_samples_merge` |
+| Full `rebuild_projections` deleted all derived tables and replayed under no synchronization — an ingest committing mid-rebuild could have its projection writes deleted, or land in already-scanned keyset regions and never be replayed; the limitation note understated this as insights/incidents-only | data loss | Advisory lock `_PROJECTION_LOCK_KEY`: ingest projection passes hold `pg_advisory_xact_lock_shared`, rebuilds hold `pg_advisory_xact_lock` (exclusive). Canonical event inserts are *not* gated — events committed during a rebuild stay durable and are folded by the queued ingest pass or the next rebuild. `reprocess` takes the shared lock per page | `test_ingest_projection_writes_wait_for_rebuild_lock`, `test_rebuild_with_concurrent_ingest_converges` |
+| Open-insight dedupe lived only in the per-transaction `open_by_dedupe` map — two replicas could insert duplicate open insights for one dedupe key | correctness | Partial unique index `uq_observe_insights_open_dedupe` on `dedupe_key WHERE state = 'open'`; migration `0007` first collapses pre-existing duplicates (earliest row keeps `open`, absorbs merged producers/evidence; losers marked `suppressed` with `deduped_into`). The loser's insert `IntegrityError` is caught by the fail-open projection savepoint; manual resolved->open transitions lock the row and map the violation to HTTP 409 | `test_concurrent_open_insight_dedupes_in_db`, `test_second_open_row_same_dedupe_key_rejected`, `test_reopen_when_another_open_row_exists_is_409` |
+| `TailSampler` only treated names ending `.completed`/`.failed`/`.cancelled` as terminal, but Phlo's run boundaries are `pipeline.run`/`dlt.pipeline.run`/`dbt.invocation` — every tail-sampled run buffered until `max_age_seconds` (1 h default), the size bound, or shutdown | feature dead on real telemetry | `ObserveSettings.tail_terminal_events` (env `OBSERVE_TAIL_TERMINAL_EVENTS`, CSV/JSON) names exact terminal events; the suffix heuristic is kept for generic apps. `configure_phlo` unions `PHLO_TAIL_TERMINAL_EVENTS` with any caller-provided names | `test_tail_sampler_terminal_events_*`, `test_configure_phlo_registers_phlo_terminal_events`, `test_env_tail_terminal_events_csv` |
+
+Two consequences worth noting operationally:
+
+- The advisory lock serializes *derived-state writes only*. Ingest during a
+  rebuild keeps accepting and storing canonical events; it is the
+  projection pass that queues, so ingest latency during a rebuild grows by
+  the rebuild's duration, not by failure.
+- `FOR UPDATE` on overlapping row sets can deadlock in principle (two
+  transactions locking shared insights in different orders). A deadlock
+  raises `OperationalError` inside the projection savepoint — fail-open,
+  events stay durable, and the next rebuild converges. No deadlock was
+  observed in the concurrency suite; the consistent select-order makes it
+  unlikely rather than impossible.
+
 ## 7. Insight quality
 
 On controlled histories (`test_insight_quality.py`, 10 tests): each rule
@@ -274,11 +308,25 @@ seeded healthy segments.
   message list.
 - **Timeline cap**: runs over 10k events return `truncated: true`; the
   full history remains in canonical events and paged queries.
-- **Rebuild is offline for insights/incidents** — a full rebuild deletes
-  and replays insight/incident state; brief unavailability of open
-  findings during a rebuild is acceptable per the rebuild-runbook. The
-  scoped `--run` rebuild is online-safe: it merges entity/edge
-  contributions and re-derives touched assets from their full history.
+- **Rebuild serializes all derived-state writes, not just
+  insights/incidents** — a full rebuild holds the exclusive projection
+  advisory lock while it deletes and replays, so reads of derived tables
+  see a transient empty/rebuilding state and concurrent ingest queues its
+  projection pass for the rebuild's duration (canonical events still
+  commit). Plan for rebuilds as a brief write-freeze on derived state per
+  the rebuild-runbook. The scoped `--run` rebuild is online-safe: it
+  merges entity/edge contributions and re-derives touched assets from
+  their full history.
+- **Open-insight dedupe race surface**: the partial unique index is
+  enforced at flush time inside the fail-open projection savepoint — a
+  replica that loses the race keeps its canonical event but skips that
+  pass's projections (self-healing on the next rebuild). Concurrent
+  incidents have no equivalent DB-level uniqueness: `group_insight`
+  relies on the `FOR UPDATE` lock on open incidents, which serializes
+  same-database writers but cannot stop two replicas from both finding
+  no open incident in a narrow window if they interleave between the
+  lock-free scope check and insert — grouped under at most a duplicated
+  incident row, which resolve/suppress lifecycle handles.
 - **`reprocess` does not rebuild runs/insights/baselines** — it re-folds
   a `received_at` window into entity/asset/edge state only; use
   `rebuild-projections` for derived-state changes.

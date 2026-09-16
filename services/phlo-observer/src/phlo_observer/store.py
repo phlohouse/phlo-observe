@@ -274,6 +274,10 @@ async def persist_events(
         # anything. Projections are derived state and can be rebuilt.
         try:
             async with session.begin_nested():
+                # Shared projection lock: a concurrent rebuild holds the
+                # exclusive side, so this pass waits it out instead of
+                # writing rows its delete+replay would drop.
+                await projections.lock_projection_writes(session)
                 # One preload of existing trace->run bindings for every
                 # trace-only event in the batch, plus a batch-local map so a
                 # trace linked by an earlier row in this same batch is reused
@@ -429,6 +433,11 @@ async def _insert_rows(
     try:
         async with session.begin_nested():
             session.add_all(rows)
+            # Emit the INSERTs inside this savepoint: deferred to the next
+            # autoflush they'd land inside the projection savepoint, where a
+            # fail-open rollback would undo them and a real insert error
+            # would be misreported as a projection failure.
+            await session.flush()
     except (IntegrityError, DataError):
         pass  # isolate the bad rows one by one
     else:
@@ -442,6 +451,7 @@ async def _insert_rows(
         try:
             async with session.begin_nested():
                 session.add(row)
+                await session.flush()
         except IntegrityError:
             existing = await session.get(Event, row.event_id)
             if existing is not None and _rows_match(existing, data):

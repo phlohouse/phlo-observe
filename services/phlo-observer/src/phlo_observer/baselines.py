@@ -176,9 +176,9 @@ async def update_baselines(
         if rows is None:
             row = (
                 await session.execute(
-                    select(Baseline).where(
-                        Baseline.entity_id == entity_id, Baseline.metric == metric
-                    )
+                    select(Baseline)
+                    .where(Baseline.entity_id == entity_id, Baseline.metric == metric)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
         else:
