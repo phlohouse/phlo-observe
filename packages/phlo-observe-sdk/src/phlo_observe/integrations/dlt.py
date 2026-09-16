@@ -76,6 +76,7 @@ def dlt_pipeline_scope(pipeline: Any) -> Iterator[None]:
         "pipeline": _attr(pipeline, "pipeline_name"),
         "dlt_destination": _attr(pipeline, "destination.name", "destination_name"),
         "dlt_dataset": _attr(pipeline, "dataset_name"),
+        "producer": "dlt",
     }
     with bind_context(**{k: v for k, v in values.items() if v is not None}):
         yield
@@ -100,4 +101,5 @@ def dlt_pipeline_run(pipeline: Any, *, attributes: dict[str, Any] | None = None)
         attributes={k: v for k, v in attrs.items() if v is not None},
         correlation={"pipeline": pipeline_name},
         entities={"source": source_id("dlt", pipeline_name)} if pipeline_name else None,
+        producer="dlt",
     )

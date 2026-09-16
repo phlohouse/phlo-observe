@@ -84,4 +84,5 @@ def trino_query(
         attributes=attrs,
         correlation=correlation,
         entities={"service": service_id("trino")},
+        producer="trino",
     )

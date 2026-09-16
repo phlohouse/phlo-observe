@@ -31,6 +31,7 @@ import orjson
 from observe_core.ids import new_event_id
 from observe_core.models import (
     CORRELATION_KEYS,
+    ContractRef,
     ErrorInfo,
     EventEnvelope,
     ServiceInfo,
@@ -68,6 +69,7 @@ _SEVERITY_BY_TEXT = {
 _SERVICE_FIELDS = frozenset(ServiceInfo.model_fields)
 _SOURCE_FIELDS = frozenset(SourceInfo.model_fields)
 _ERROR_FIELDS = frozenset(ErrorInfo.model_fields)
+_CONTRACT_FIELDS = frozenset(ContractRef.model_fields)
 
 
 def _any_value(value: Any) -> Any:
@@ -357,6 +359,17 @@ class OtlpAdapter:
         else:
             error = None
 
+        entities = _json_section(attrs.get("observe.entities"))
+        entities = dict(entities) if isinstance(entities, dict) else {}
+        tags = _json_section(attrs.get("observe.tags"))
+        tags = dict(tags) if isinstance(tags, dict) else {}
+        contract = _json_section(attrs.get("observe.contract"))
+        contract = (
+            {key: value for key, value in contract.items() if key in _CONTRACT_FIELDS}
+            if isinstance(contract, dict)
+            else None
+        )
+
         attributes = _json_section(attrs.get("observe.attributes"))
         attributes = dict(attributes) if isinstance(attributes, dict) else {}
         # Anything not part of the observe.* encoding (collector-added
@@ -416,5 +429,8 @@ class OtlpAdapter:
             attributes=attributes,
             error=error,
             source=source,
+            entities=entities,
+            tags=tags,
+            contract=contract,
         )
         return envelope.to_canonical_dict()

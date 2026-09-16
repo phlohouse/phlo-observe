@@ -132,9 +132,12 @@ def rebuild_projections_cmd(
     """Rebuild derived projections from canonical events (spec §12.4).
 
     Without ``--run`` every projection (runs, entities, relationships,
-    assets) is dropped and recomputed from the full event history. With
-    ``--run`` only that run's scope is rebuilt; other projections are
-    untouched.
+    assets, baselines, insights, incidents) is dropped and recomputed from
+    the full event history. With ``--run`` only that run's scope is
+    rebuilt: the run row is replaced, entities/edges merge into existing
+    state, and touched assets are re-derived from their full event history
+    so other runs' contributions survive. Insights, incidents and baselines
+    are cross-run derived state and are only rebuilt unscoped.
     """
     import asyncio
 
@@ -199,24 +202,28 @@ def archive(
             factory = make_sessionmaker(engine)
             with out.open("w") as fh:
                 async with factory() as session:
-                    offset = 0
+                    # Keyset pagination on (received_at, event_id): OFFSET
+                    # rescans/skip rows when ingestion lands mid-export.
+                    last_ts = lo
+                    last_id = None
                     while True:
                         stmt = select(Event).order_by(Event.received_at, Event.event_id)
                         if lo:
                             stmt = stmt.where(Event.received_at >= lo)
                         if hi:
                             stmt = stmt.where(Event.received_at <= hi)
-                        rows = (
-                            (await session.execute(stmt.offset(offset).limit(batch)))
-                            .scalars()
-                            .all()
-                        )
+                        if last_id is not None:
+                            stmt = stmt.where(
+                                (Event.received_at > last_ts)
+                                | ((Event.received_at == last_ts) & (Event.event_id > last_id))
+                            )
+                        rows = (await session.execute(stmt.limit(batch))).scalars().all()
                         if not rows:
                             break
                         for row in rows:
                             fh.write(json.dumps(row.payload) + "\n")
                         written += len(rows)
-                        offset += len(rows)
+                        last_ts, last_id = rows[-1].received_at, rows[-1].event_id
                         if len(rows) < batch:
                             break
             return written
@@ -278,12 +285,19 @@ def reprocess(
     until: Annotated[
         str | None, typer.Option(help="Reprocess events received before this ISO timestamp")
     ] = None,
+    batch: Annotated[int, typer.Option(help="Read batch size")] = 1000,
 ) -> None:
-    """Rebuild projections for events in a received-at window (spec §24.3).
+    """Re-fold events in a received-at window into entity/asset/edge state.
 
-    Unlike ``rebuild-projections`` this only replays the matching events
-    through the reducer, merging into existing projections — for surgical
-    reprocessing after a hotfix rather than a full rebuild.
+    This is a surgical tool for picking up reducer fixes on a window of
+    history: matching events are replayed through ``apply_event`` in
+    received-at order, merging into existing projections. It does NOT
+    re-derive run rows, insights, or baselines (run counters would
+    double-count) — use ``rebuild-projections`` for a from-scratch rebuild
+    of all derived state.
+
+    Each page commits before the next read: a large window never holds one
+    transaction's locks across the whole replay.
     """
     import asyncio
     from datetime import datetime
@@ -292,7 +306,7 @@ def reprocess(
 
     from phlo_observer.db import make_engine, make_sessionmaker
     from phlo_observer.models import Event
-    from phlo_observer.projections import apply_event
+    from phlo_observer.projections import apply_events_batch
 
     settings = _settings()
     lo = datetime.fromisoformat(since)
@@ -300,16 +314,38 @@ def reprocess(
 
     async def _run() -> int:
         engine = make_engine(settings)
+        processed = 0
         try:
             factory = make_sessionmaker(engine)
-            async with factory() as session, session.begin():
-                stmt = select(Event).where(Event.received_at >= lo).order_by(Event.received_at)
-                if hi:
-                    stmt = stmt.where(Event.received_at <= hi)
-                rows = (await session.execute(stmt)).scalars().all()
-                for row in rows:
-                    await apply_event(session, row)
-                return len(rows)
+            last_ts = lo
+            last_id = None
+            while True:
+                async with factory() as session, session.begin():
+                    stmt = select(Event).where(Event.received_at >= lo)
+                    if hi:
+                        stmt = stmt.where(Event.received_at <= hi)
+                    if last_id is not None:
+                        stmt = stmt.where(
+                            (Event.received_at > last_ts)
+                            | ((Event.received_at == last_ts) & (Event.event_id > last_id))
+                        )
+                    stmt = stmt.order_by(Event.received_at, Event.event_id).limit(batch)
+                    rows = list((await session.execute(stmt)).scalars().all())
+                    if rows:
+                        # Shared projection lock: reprocess folds the same
+                        # rows ingest does, and must not interleave with a
+                        # rebuild's delete+replay window.
+                        from phlo_observer.projections import lock_projection_writes
+
+                        await lock_projection_writes(session)
+                        await apply_events_batch(session, rows)
+                if not rows:
+                    break
+                processed += len(rows)
+                last_ts, last_id = rows[-1].received_at, rows[-1].event_id
+                if len(rows) < batch:
+                    break
+            return processed
         finally:
             await engine.dispose()
 

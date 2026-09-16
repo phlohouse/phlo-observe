@@ -28,15 +28,17 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import observe_core
+import orjson
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from observe_core.timestamps import utcnow
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from phlo_observer import __version__, query_v2
+from phlo_observer import __version__, notify, query_v2
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_admin_token, require_ingest_token, require_read_token
@@ -57,6 +59,7 @@ from phlo_observer.models import (
     Incident,
     IngestFailure,
     Insight,
+    Relationship,
     Run,
     SchemaRecord,
 )
@@ -129,11 +132,21 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             )
         )
         app.state.retention_task = retention_task
+        bridge = None
+        if settings.stream_notify:
+            bridge = notify.NotifyBridge(
+                settings.database_url,
+                app.state.stream,
+                instance_id=app.state.instance_id,
+            )
+            bridge.start()
         try:
             yield
         finally:
             stop.set()
             retention_task.cancel()
+            if bridge is not None:
+                await bridge.stop()
             with contextlib.suppress(asyncio.CancelledError):
                 await retention_task
             # Bound in-flight OTLP forwards: give them a moment, then cancel.
@@ -161,6 +174,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     app.state.forward_tasks = set()
     app.state.alert_tasks = set()
     app.state.stream = StreamHub()
+    app.state.instance_id = notify.new_instance_id()
 
     @app.exception_handler(InvalidQuery)
     async def invalid_query_handler(request: Request, exc: InvalidQuery) -> JSONResponse:
@@ -215,6 +229,21 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(400, f"invalid gzip body: {exc}") from exc
         if len(body) > settings.max_body_bytes:
             raise _http_error(413, "request body too large")
+        return body
+
+    async def _json_body(request: Request) -> Any:
+        """Parse a JSON request body under the same bounds as ingest.
+
+        ``request.json()`` reads ``request.stream()`` with no limit, so a
+        chunked body without a Content-Length would bypass
+        ``max_body_bytes`` — the middleware only checks the declared size.
+        """
+        try:
+            body = orjson.loads(await _body(request))
+        except orjson.JSONDecodeError as exc:
+            raise _http_error(400, f"invalid JSON body: {exc}") from exc
+        if not isinstance(body, dict):
+            raise _http_error(400, "JSON body must be an object")
         return body
 
     def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
@@ -274,6 +303,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 stream=app.state.stream,
                 alert_urls=settings.alert_webhook_urls,
                 alert_tasks=app.state.alert_tasks,
+                instance_id=app.state.instance_id,
             )
             PERSIST_DURATION.observe(time.perf_counter() - start)
             if settings.otlp_endpoint and result.event_ids:
@@ -758,8 +788,22 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 raise _http_error(404, "incident not found")
             return result
 
-    _INSIGHT_STATES = {"open", "acknowledged", "resolved", "suppressed", "expired"}
-    _INCIDENT_STATES = {"open", "acknowledged", "resolved", "suppressed"}
+    # Lifecycle state machines (spec §15.3): only the listed transitions are
+    # legal — ``expired`` is terminal, and leaving ``resolved`` clears
+    # ``resolved_at`` so a reopened incident doesn't carry a stale stamp.
+    _INSIGHT_TRANSITIONS = {
+        "open": {"acknowledged", "resolved", "suppressed", "expired"},
+        "acknowledged": {"open", "resolved", "suppressed", "expired"},
+        "suppressed": {"open", "resolved"},
+        "resolved": {"open"},
+        "expired": set(),
+    }
+    _INCIDENT_TRANSITIONS = {
+        "open": {"acknowledged", "resolved", "suppressed"},
+        "acknowledged": {"open", "resolved", "suppressed"},
+        "suppressed": {"open", "resolved"},
+        "resolved": {"open"},
+    }
 
     @app.post(
         "/v2/insights/{insight_id}/transition",
@@ -767,22 +811,36 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     )
     async def v2_transition_insight(insight_id: str, request: Request) -> dict[str, Any]:
         """Move an insight through its lifecycle (spec §15.3)."""
-        body = await request.json()
+        body = await _json_body(request)
         target = body.get("state")
-        if target not in _INSIGHT_STATES:
-            raise _http_error(400, f"state must be one of {sorted(_INSIGHT_STATES)}")
+        if target not in _INSIGHT_TRANSITIONS:
+            raise _http_error(400, f"state must be one of {sorted(_INSIGHT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
             try:
                 iid = uuid.UUID(insight_id)
             except ValueError:
                 raise _http_error(404, "insight not found") from None
-            row = await session.get(Insight, iid)
+            row = await session.get(Insight, iid, with_for_update=True)
             if row is None:
                 raise _http_error(404, "insight not found")
+            if target == row.state:
+                return {"insight_id": insight_id, "state": target}
+            if target not in _INSIGHT_TRANSITIONS.get(row.state, set()):
+                raise _http_error(
+                    409, f"cannot transition insight from {row.state!r} to {target!r}"
+                )
             row.state = target
             row.updated_at = utcnow()
             if target == "resolved":
                 row.attributes = {**(row.attributes or {}), "resolved_manually": True}
+            try:
+                # Reopening can collide with another open insight sharing the
+                # dedupe key — the partial unique index decides, not us.
+                await session.flush()
+            except IntegrityError:
+                raise _http_error(
+                    409, "another open insight already exists for this dedupe key"
+                ) from None
             return {"insight_id": insight_id, "state": target}
 
     @app.post(
@@ -791,22 +849,27 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     )
     async def v2_transition_incident(incident_id: str, request: Request) -> dict[str, Any]:
         """Move an incident through its lifecycle."""
-        body = await request.json()
+        body = await _json_body(request)
         target = body.get("state")
-        if target not in _INCIDENT_STATES:
-            raise _http_error(400, f"state must be one of {sorted(_INCIDENT_STATES)}")
+        if target not in _INCIDENT_TRANSITIONS:
+            raise _http_error(400, f"state must be one of {sorted(_INCIDENT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
             try:
                 iid = uuid.UUID(incident_id)
             except ValueError:
                 raise _http_error(404, "incident not found") from None
-            row = await session.get(Incident, iid)
+            row = await session.get(Incident, iid, with_for_update=True)
             if row is None:
                 raise _http_error(404, "incident not found")
+            if target == row.state:
+                return {"incident_id": incident_id, "state": target}
+            if target not in _INCIDENT_TRANSITIONS.get(row.state, set()):
+                raise _http_error(
+                    409, f"cannot transition incident from {row.state!r} to {target!r}"
+                )
             row.state = target
             row.updated_at = utcnow()
-            if target == "resolved":
-                row.resolved_at = utcnow()
+            row.resolved_at = utcnow() if target == "resolved" else None
             return {"incident_id": incident_id, "state": target}
 
     @app.get("/v2/entities", dependencies=[Depends(require_read_token)])
@@ -856,12 +919,22 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 )
             ).scalars()
             contributing["entity"] = list(entities)
+            edges = (
+                await session.execute(
+                    select(Relationship).where(
+                        Relationship.source_event_ids.cast(JSONB).contains([eid])
+                    )
+                )
+            ).scalars()
+            contributing["edge"] = [
+                f"{e.from_entity} -[{e.relationship_type}]-> {e.to_entity}" for e in edges
+            ]
             return {"event_id": eid, "projections": contributing}
 
     @app.post("/v2/query/compare-runs", dependencies=[Depends(require_read_token)])
     async def v2_compare_runs(request: Request) -> dict[str, Any]:
         """Compare two runs: ``{"run_a": ..., "run_b": ...}``."""
-        body = await request.json()
+        body = await _json_body(request)
         run_a, run_b = body.get("run_a"), body.get("run_b")
         if not run_a or not run_b:
             raise _http_error(400, "run_a and run_b are required")
@@ -977,7 +1050,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     async def v2_quarantine_replay(failure_id: str, request: Request) -> dict[str, Any]:
         """Re-run the adapter over a quarantined payload (spec §34)."""
         async with request.app.state.session_factory() as session, session.begin():
-            row = await session.get(IngestFailure, uuid.UUID(failure_id))
+            row = await session.get(IngestFailure, uuid.UUID(failure_id), with_for_update=True)
             if row is None:
                 raise _http_error(404, "quarantine entry not found")
             if row.replayed:
@@ -1012,11 +1085,15 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             }
 
     @app.get("/v2/schemas", dependencies=[Depends(require_read_token)])
-    async def v2_list_schemas(request: Request) -> dict[str, Any]:
+    async def v2_list_schemas(
+        request: Request, limit: int = Query(200, ge=1, le=1000)
+    ) -> dict[str, Any]:
         """Registered contract schemas (spec §8.3)."""
         async with request.app.state.session_factory() as session:
             rows = (
-                await session.execute(select(SchemaRecord).order_by(SchemaRecord.schema_id))
+                await session.execute(
+                    select(SchemaRecord).order_by(SchemaRecord.schema_id).limit(limit)
+                )
             ).scalars()
             return {
                 "items": [
@@ -1033,7 +1110,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @app.post("/v2/schemas", dependencies=[Depends(require_ingest_token)])
     async def v2_register_schema(request: Request) -> dict[str, Any]:
         """Register or update a contract schema record."""
-        body = await request.json()
+        body = await _json_body(request)
         schema_id = body.get("schema_id")
         if not schema_id:
             raise _http_error(400, "schema_id is required")
@@ -1043,7 +1120,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         schema_json = body.get("schema") or {}
         digest = hashlib.sha256(_json.dumps(schema_json, sort_keys=True).encode()).hexdigest()
         async with request.app.state.session_factory() as session, session.begin():
-            row = await session.get(SchemaRecord, schema_id)
+            row = await session.get(SchemaRecord, schema_id, with_for_update=True)
             if row is None:
                 row = SchemaRecord(
                     schema_id=schema_id,
@@ -1062,7 +1139,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
     @app.post("/v2/analyses", dependencies=[Depends(require_ingest_token)])
     async def v2_record_analysis(request: Request) -> dict[str, Any]:
         """Persist an LLM analysis with its evidence IDs (spec §21.4)."""
-        body = await request.json()
+        body = await _json_body(request)
         for field in ("model", "prompt_template_version", "output"):
             if not body.get(field):
                 raise _http_error(400, f"{field} is required")

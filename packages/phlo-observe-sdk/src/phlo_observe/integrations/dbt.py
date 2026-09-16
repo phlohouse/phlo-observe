@@ -44,36 +44,64 @@ def manifest_metadata(path_or_dict: str | Path | dict[str, Any]) -> dict[str, An
     }
 
 
+def _tested_model(result: dict[str, Any]) -> str | None:
+    """The model a dbt test targets, when the result declares its dependency."""
+    depends_on = result.get("depends_on") or {}
+    nodes = depends_on.get("nodes") if isinstance(depends_on, dict) else None
+    for node in nodes or []:
+        if isinstance(node, str) and node.startswith("model."):
+            return node.split(".")[-1]
+    return None
+
+
 def run_results_events(path_or_dict: str | Path | dict[str, Any]) -> list[dict[str, Any]]:
     """Convert ``run_results.json`` into canonical event payloads.
 
     One ``dbt.invocation`` event plus one ``dbt.model.execute`` or
-    ``dbt.test.execute`` per node result. Returns dicts ready to emit; use
-    :func:`emit_run_results` to emit them directly.
+    ``dbt.test.execute`` per node result. The invocation doubles as the run's
+    terminal event: ``correlation.run_id`` is the dbt invocation id so the
+    observer projects a real run (``run://dbt/<invocation>``), and its
+    outcome reflects the worst result status. Returns dicts ready to emit;
+    use :func:`emit_run_results` to emit them directly.
     """
     results_doc = _load(path_or_dict)
     metadata = results_doc.get("metadata", {})
     invocation_id = metadata.get("invocation_id")
     dbt_version = metadata.get("dbt_version")
     elapsed_s = results_doc.get("elapsed_time")
+    results = results_doc.get("results", [])
+    invocation_failed = any(
+        str(r.get("status", "")).lower() in ("error", "fail")
+        for r in results
+        if isinstance(r, dict)
+    )
+    invocation_correlation: dict[str, Any] = {"invocation_id": invocation_id}
+    if invocation_id:
+        # The invocation id is the dbt run identity: it gives the observer a
+        # run projection to hang failures, durations and insights on.
+        invocation_correlation["run_id"] = invocation_id
 
     events: list[dict[str, Any]] = [
         {
             "event": E.DBT_INVOCATION,
             "category": "pipeline",
+            "outcome": "failure" if invocation_failed else "success",
+            "duration_ms": float(elapsed_s) * 1000.0
+            if isinstance(elapsed_s, int | float)
+            else None,
             "attributes": {
                 "invocation_id": invocation_id,
                 "dbt_version": dbt_version,
                 "elapsed_time_s": elapsed_s,
                 "args": results_doc.get("args"),
-                "results_count": len(results_doc.get("results", [])),
+                "results_count": len(results),
             },
-            "correlation": {"invocation_id": invocation_id},
+            "correlation": invocation_correlation,
             "entities": ({"run": str(run_id_for("dbt", invocation_id))} if invocation_id else {}),
         }
     ]
 
-    for result in results_doc.get("results", []):
+    for result in results:
         unique_id = result.get("unique_id", "")
         resource_type = unique_id.split(".", 1)[0] if "." in unique_id else ""
         is_test = resource_type in _TEST_RESOURCE_TYPES or result.get("unique_id", "").startswith(
@@ -101,6 +129,16 @@ def run_results_events(path_or_dict: str | Path | dict[str, Any]) -> list[dict[s
             "fail": "failure",
             "skipped": "cancelled",
         }.get(str(result.get("status", "")).lower(), "unknown")
+        model_name = name if not is_test else _tested_model(result)
+        entities: dict[str, Any] = {}
+        if invocation_id:
+            entities["run"] = str(run_id_for("dbt", invocation_id))
+        if model_name:
+            entities["model"] = str(model_id("dbt", model_name))
+        correlation: dict[str, Any] = {"invocation_id": invocation_id}
+        if invocation_id:
+            correlation["run_id"] = invocation_id
+        exec_s = result.get("execution_time")
         events.append(
             {
                 "event": E.DBT_TEST_EXECUTE
@@ -108,16 +146,11 @@ def run_results_events(path_or_dict: str | Path | dict[str, Any]) -> list[dict[s
                 else _NODE_TYPE_EVENTS.get(resource_type, E.DBT_MODEL_EXECUTE),
                 "category": "quality" if is_test else "data",
                 "outcome": outcome,
+                "severity": "error" if outcome == "failure" else "info",
+                "duration_ms": float(exec_s) * 1000.0 if isinstance(exec_s, int | float) else None,
                 "attributes": {k: v for k, v in attrs.items() if v is not None},
-                "correlation": {"invocation_id": invocation_id},
-                "entities": (
-                    {
-                        "run": str(run_id_for("dbt", invocation_id)),
-                        **({"model": str(model_id("dbt", name))} if name and not is_test else {}),
-                    }
-                    if invocation_id
-                    else ({"model": str(model_id("dbt", name))} if name and not is_test else {})
-                ),
+                "correlation": correlation,
+                "entities": entities,
             }
         )
     return events
@@ -131,7 +164,9 @@ def emit_run_results(path_or_dict: str | Path | dict[str, Any]) -> int:
         event(
             payload["event"],
             category=payload.get("category"),
+            severity=payload.get("severity"),
             outcome=payload.get("outcome"),
+            duration_ms=payload.get("duration_ms"),
             attributes=payload.get("attributes"),
             correlation=payload.get("correlation"),
             entities=payload.get("entities"),

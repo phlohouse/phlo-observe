@@ -135,6 +135,15 @@ class TestRunReducer:
         apply_run_event(state, _event(outcome="failure"))
         assert state["status"] == "failure"
 
+    def test_dbt_invocation_is_terminal(self) -> None:
+        """Regression: a pushed run_results doc ends its run on its own."""
+        state = new_run_state("dbt-inv-1")
+        apply_run_event(
+            state, _event(event="dbt.invocation", outcome="success", run_id="dbt-inv-1")
+        )
+        assert state["status"] == "success"
+        assert state["ended_at"] is not None
+
 
 @pytest.mark.asyncio
 class TestIncrementalAndRebuild:

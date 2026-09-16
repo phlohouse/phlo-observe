@@ -13,10 +13,14 @@ provenance (spec §12.3) without a second bookkeeping pass.
 
 from __future__ import annotations
 
+import bisect
+import datetime as dt
 import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any
+
+from observe_core.timestamps import parse_rfc3339
 
 RUN_RULE = "run-state-v2"
 RUN_RULE_VERSION = 1
@@ -32,7 +36,9 @@ _MAX_SUMMARY_ASSETS = 1000
 _MAX_EDGE_SOURCES = 32
 
 # Run terminal signal: outcome=unknown means "the run started".
-_TERMINAL_RUN_EVENTS = {"pipeline.run", "dlt.pipeline.run"}
+# ``dbt.invocation`` is terminal too: the run_results document is written at
+# the end of the invocation and carries the invocation's own outcome/duration.
+_TERMINAL_RUN_EVENTS = {"pipeline.run", "dlt.pipeline.run", "dbt.invocation"}
 
 _STATUS_PRECEDENCE = {
     "unknown": 0,
@@ -129,10 +135,34 @@ def event_entities(event: dict[str, Any]) -> dict[str, str]:
 
 
 def _record(state: dict[str, Any], event: dict[str, Any]) -> None:
-    refs = state.setdefault("derived_from", [])
+    """Record provenance for one contributing event, earliest-observed wins.
+
+    ``derived_keys`` holds the ``(observed_at, event_id)`` positions of the
+    retained sources — the window keeps the earliest *observed* events, so
+    late arrivals fold into place and incremental/rebuild provenance sets
+    converge.
+    """
     eid = str(event.get("event_id") or "")
-    if eid and len(refs) < _MAX_DERIVED_FROM and eid not in refs:
-        refs.append(eid)
+    if not eid:
+        return
+    keys = state.setdefault("derived_keys", [])
+    _insert_sorted(keys, event_key(event), _MAX_DERIVED_FROM, keep="earliest")
+    state["derived_from"] = [k[1] for k in keys]
+
+
+def parse_keys(raw: Any) -> list[tuple[Any, str]]:
+    """A stored ``[[iso, eid], ...]`` key list, parsed and sorted."""
+    keys = [k for k in (_parse_key(entry) for entry in raw or []) if k is not None]
+    keys.sort()
+    return keys
+
+
+def _derived_keys_from(state_or_fold: dict[str, Any], derived_from: list[str]) -> list[tuple]:
+    """``derived_keys`` for a row written before keyed provenance existed."""
+    stored = parse_keys(state_or_fold.get("derived_keys"))
+    if stored:
+        return stored
+    return [(_EPOCH, str(eid)) for eid in derived_from or []]
 
 
 def provenance(
@@ -145,6 +175,153 @@ def provenance(
         "rule_version": rule_version,
         "derived_at": derived_at.isoformat() if hasattr(derived_at, "isoformat") else derived_at,
     }
+
+
+# -- event-time ordering ------------------------------------------------------
+#
+# Incremental ingest folds events in arrival order across batches; a rebuild
+# folds the whole history in observed order. Any reducer state whose value
+# depends on *which* event wrote it (status fields, lifecycle attributes,
+# durations, baselines) must therefore be keyed on the event's fold-order
+# position — ``(observed_at, event_id)`` — rather than on fold position, or
+# late and out-of-order events leave incremental state diverged from a
+# rebuild. ``field_at``/``attr_at``/``materialize_times`` and friends carry
+# that bookkeeping and round-trip through ``fold_state`` columns.
+
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+
+
+def _as_dt(value: Any) -> Any:
+    """Normalize an event timestamp to a tz-aware datetime (None-tolerant).
+
+    Canonical rows carry datetimes; reducer unit tests and V1 envelopes may
+    carry RFC3339 strings. Keys and comparisons must never mix the two —
+    ``str < datetime`` raises, and ``str.replace(tzinfo=...)`` is not the
+    datetime method.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return parse_rfc3339(value)
+        except ValueError:
+            return None
+    if getattr(value, "tzinfo", None) is None:
+        return value.replace(tzinfo=dt.UTC)
+    return value
+
+
+def event_key(event: dict[str, Any]) -> tuple[Any, str]:
+    """Canonical fold-order position of one event: (observed_at, event_id)."""
+    observed = _as_dt(_event_dt(event))
+    if observed is None:
+        observed = _EPOCH
+    return (observed, str(event.get("event_id") or ""))
+
+
+def _dump_key(key: tuple[Any, str]) -> list[Any]:
+    at, eid = key
+    return [at.isoformat() if hasattr(at, "isoformat") else at, eid]
+
+
+def _parse_key(raw: Any) -> tuple[Any, str] | None:
+    """Inverse of ``_dump_key``; tolerant of malformed stored keys."""
+    if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+        return None
+    at = _as_dt(raw[0])
+    if at is None:
+        return None
+    return (at, str(raw[1]))
+
+
+def _dump_field_at(field_at: dict[str, tuple[Any, str]]) -> dict[str, list[Any]]:
+    return {name: _dump_key(key) for name, key in field_at.items()}
+
+
+def _parse_field_at(raw: Any) -> dict[str, tuple[Any, str]]:
+    out: dict[str, tuple[Any, str]] = {}
+    for name, key in (raw or {}).items():
+        parsed = _parse_key(key)
+        if parsed is not None:
+            out[str(name)] = parsed
+    return out
+
+
+def _insert_sorted(items: list[tuple], key: tuple, cap: int, *, keep: str = "newest") -> None:
+    """Insert ``key`` into a sorted list, bounded to ``cap`` entries.
+
+    ``keep="newest"`` retains the largest keys (materialization times);
+    ``keep="earliest"`` retains the smallest (provenance windows).
+    """
+    if key in items:
+        return
+    bisect.insort(items, key)
+    if len(items) > cap:
+        if keep == "earliest":
+            del items[cap:]
+        else:
+            del items[: len(items) - cap]
+
+
+def _set_latest(state: dict[str, Any], field_name: str, value: Any, key: tuple[Any, str]) -> None:
+    """Write ``value`` when the event is the newest writer of the field.
+
+    The write wins when the event's ``(observed_at, event_id)`` key is at or
+    after the key that last wrote the field — a late event can fill a field
+    but never overwrite a newer observation, so arrival order cannot regress
+    projected state.
+    """
+    if value in (None, ""):
+        return
+    at_map = state.setdefault("field_at", {})
+    current = at_map.get(field_name)
+    if current is None or key >= current:
+        state[field_name] = value
+        at_map[field_name] = key
+
+
+def merge_attributes(state: dict[str, Any], updates: dict[str, Any], key: tuple[Any, str]) -> None:
+    """Merge per-event attribute updates, newest observation wins per field.
+
+    ``state["attr_at"]`` records the ``(observed_at, event_id)`` key that last
+    wrote each field, so a late ``wap.branch.create`` cannot rewind ``state``
+    past a promotion it predates — and a rebuild in observed order converges
+    to the same attributes.
+    """
+    at_map = state.setdefault("attr_at", {})
+    merged = dict(state.get("attributes") or {})
+    for name, value in updates.items():
+        current = at_map.get(name)
+        if current is None or key >= current:
+            merged[name] = value
+            at_map[name] = key
+    state["attributes"] = merged
+
+
+def gated_attr_merge(
+    target_attrs: dict[str, Any],
+    target_at: dict[str, tuple[Any, str]],
+    new_attrs: dict[str, Any],
+    new_at: dict[str, tuple[Any, str]],
+    *,
+    legacy_gate: tuple[Any, str] | None = None,
+) -> None:
+    """Merge accumulated attributes into an existing row, per-field gated.
+
+    ``legacy_gate`` substitutes for missing ``target_at`` entries on rows
+    written before field keys existed: a field already present is treated as
+    set at the row's last-seen timestamp so a late event cannot regress it.
+    """
+    for name, value in new_attrs.items():
+        current = target_at.get(name)
+        if current is None and name in (target_attrs or {}):
+            current = legacy_gate
+        new_key = new_at.get(name)
+        if new_key is None:
+            continue
+        if current is None or new_key >= current:
+            target_attrs[name] = value
+            target_at[name] = new_key
 
 
 # -- run projection ---------------------------------------------------------
@@ -168,6 +345,26 @@ def new_run_state(run_id: str) -> dict[str, Any]:
         "branch": None,
         "asset_keys": set(),
         "derived_from": [],
+        "derived_keys": [],
+        "field_at": {},
+        "min_started": None,
+        "first_key": None,
+        "first_fallback": None,
+    }
+
+
+def run_fold_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Serializable bookkeeping for ``Run.fold_state``."""
+    return {
+        "field_at": _dump_field_at(state.get("field_at") or {}),
+        "derived_keys": [_dump_key(k) for k in state.get("derived_keys") or []],
+        "run_start": {
+            "min_started": (state["min_started"].isoformat() if state.get("min_started") else None),
+            "first": _dump_key(state["first_key"]) if state.get("first_key") else None,
+            "first_fallback": (
+                state["first_fallback"].isoformat() if state.get("first_fallback") else None
+            ),
+        },
     }
 
 
@@ -178,15 +375,22 @@ def _event_dt(event: dict[str, Any]) -> Any:
 def apply_run_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     """Fold one canonical event into run reducer state.
 
-    Order-tolerant: ``started_at`` keeps the earliest observed start,
-    ``ended_at`` the latest terminal end, and status transitions take the
-    maximum precedence, so replay order does not change the outcome.
+    Order-tolerant: status takes maximum precedence, ``ended_at`` the
+    latest terminal end, and value fields (``duration_ms``, ``trigger``,
+    metadata) are won by the newest observation. ``started_at`` reproduces
+    the replay result exactly — the earliest-observed event contributes its
+    ``started_at`` or, lacking one, its ``observed_at``, then every event's
+    ``started_at`` can only lower it — so arrival order never changes it.
     """
     corr = event.get("correlation") or {}
     service = event.get("service") or {}
     attrs = event.get("attributes") or {}
     severity = event.get("severity")
     outcome = event.get("outcome")
+    key = event_key(event)
+    started = _as_dt(event.get("started_at"))
+    ended = _as_dt(event.get("ended_at"))
+    observed = _as_dt(event.get("observed_at"))
 
     _record(state, event)
     state["event_count"] += 1
@@ -199,39 +403,39 @@ def apply_run_event(state: dict[str, Any], event: dict[str, Any]) -> None:
     if asset_key and len(state["asset_keys"]) < _MAX_SUMMARY_ASSETS:
         state["asset_keys"].add(asset_key)
 
-    for key, value in (
+    for field_name, value in (
         ("branch", corr.get("branch")),
         ("job_name", corr.get("job_id")),
         ("service_name", service.get("name")),
         ("environment", service.get("environment")),
     ):
-        if value and not state[key]:
-            state[key] = value
+        _set_latest(state, field_name, value, key)
 
     if event.get("event") in _TERMINAL_RUN_EVENTS:
         new_status = "running" if outcome in (None, "unknown") else outcome
         if _STATUS_PRECEDENCE.get(new_status, 0) >= _STATUS_PRECEDENCE.get(state["status"], 0):
             state["status"] = new_status
-        if event.get("started_at") and (
-            state["started_at"] is None or event["started_at"] < state["started_at"]
-        ):
-            state["started_at"] = event["started_at"]
         if outcome not in (None, "unknown"):
-            end = event.get("ended_at") or event.get("observed_at")
+            end = ended or observed
             if end and (state["ended_at"] is None or end > state["ended_at"]):
                 state["ended_at"] = end
-        if event.get("duration_ms"):
-            state["duration_ms"] = event["duration_ms"]
-        if attrs.get("trigger"):
-            state["trigger"] = attrs["trigger"]
-    elif state["status"] == "unknown" and state["started_at"] is None:
+        _set_latest(state, "duration_ms", event.get("duration_ms"), key)
+        _set_latest(state, "trigger", attrs.get("trigger"), key)
+    elif _STATUS_PRECEDENCE.get(state["status"], 0) < _STATUS_PRECEDENCE["running"]:
+        # A non-terminal event is evidence the run exists: replay marks the
+        # run running until a terminal event supersedes it.
         state["status"] = "running"
-        state["started_at"] = event.get("started_at") or event.get("observed_at")
 
-    if state["started_at"] is None:
-        state["started_at"] = event.get("started_at") or event.get("observed_at")
-    elif event.get("started_at") and event["started_at"] < state["started_at"]:
-        state["started_at"] = event["started_at"]
+    # started_at = min(first-observed event's started-or-observed, every
+    # event's started_at). Track both pieces so a late event that precedes
+    # the previously-earliest event still produces the replay value.
+    if started is not None and (state["min_started"] is None or started < state["min_started"]):
+        state["min_started"] = started
+    if state["first_key"] is None or key < state["first_key"]:
+        state["first_key"] = key
+        state["first_fallback"] = observed if started is None else None
+    candidates = [c for c in (state["min_started"], state["first_fallback"]) if c is not None]
+    state["started_at"] = min(candidates) if candidates else None
 
 
 # -- entity registry --------------------------------------------------------
@@ -340,14 +544,13 @@ def edges_of(event: dict[str, Any]) -> list[Edge]:
     return edges
 
 
-def merge_edge_sources(existing: list[str], event_id: str) -> list[str]:
-    """Bounded provenance for an edge: keep the earliest distinct sources."""
-    if event_id in existing or len(existing) >= _MAX_EDGE_SOURCES:
-        return existing
-    return [*existing, event_id]
-
-
 # -- asset projection ---------------------------------------------------------
+
+
+_MATERIALIZE_VERBS = ("materialize", "materialized", "produce", "write", "load", "execute")
+_MAX_MATERIALIZE_TIMES = 64
+"""Retained successful-materialization keys per asset — bounds the history a
+late event's freshness check can look back across."""
 
 
 def new_asset_state(entity_id: str, asset_key: str) -> dict[str, Any]:
@@ -361,31 +564,119 @@ def new_asset_state(entity_id: str, asset_key: str) -> dict[str, Any]:
         "freshness_sla_seconds": None,
         "attributes": {},
         "derived_from": [],
+        "derived_keys": [],
+        "materialize_times": [],
+        "last_failure": None,
+        "field_at": {},
     }
 
 
+def _asset_status(state: dict[str, Any]) -> str:
+    """Status as a pure function of the newest materialization outcomes.
+
+    ``materialize_times``/``last_failure`` hold the newest success/failure
+    ``(observed_at, event_id)`` keys; comparing them decides the status the
+    *latest observed* outcome implies, independent of fold order — a failure
+    arriving late after a newer success leaves the asset ``recovering``, not
+    ``failing``.
+    """
+    times = state.get("materialize_times") or []
+    last_success = times[-1] if times else None
+    last_failure = state.get("last_failure")
+    if last_failure is None:
+        return "healthy" if last_success else "unknown"
+    if last_success is None or last_failure >= last_success:
+        return "failing"
+    return "recovering"
+
+
+def materialized_before(state: dict[str, Any], key: tuple[Any, str]) -> Any:
+    """Newest successful materialization observed strictly before ``key``.
+
+    Freshness rules evaluate against the asset's history *as of* the
+    checking event, not as of now — a late event must see only the
+    materializations that precede its position in observed order.
+    """
+    times = state.get("materialize_times") or []
+    i = bisect.bisect_left(times, key)
+    return times[i - 1][0] if i else None
+
+
 def apply_asset_event(state: dict[str, Any], event: dict[str, Any]) -> None:
-    """Fold one event into asset reducer state."""
+    """Fold one event into asset reducer state (order-insensitive)."""
     _record(state, event)
-    observed = _event_dt(event)
+    observed = _as_dt(_event_dt(event))
+    key = event_key(event)
     if observed and (state["last_event_at"] is None or observed > state["last_event_at"]):
         state["last_event_at"] = observed
     verb = _verb_of(str(event.get("event") or ""))
-    if verb in ("materialize", "materialized", "produce", "write", "load", "execute"):
+    if verb in _MATERIALIZE_VERBS and observed is not None:
         outcome = event.get("outcome")
-        if (
-            outcome == "success"
-            and observed
-            and (state["last_materialized_at"] is None or observed > state["last_materialized_at"])
-        ):
-            state["last_materialized_at"] = observed
-        if outcome == "failure":
-            state["status"] = "failing"
-        elif outcome == "success" and state["status"] in ("unknown", "failing"):
-            state["status"] = "healthy" if state["status"] == "unknown" else "recovering"
+        if outcome == "success":
+            _insert_sorted(state["materialize_times"], key, _MAX_MATERIALIZE_TIMES)
+            if state["last_materialized_at"] is None or observed > state["last_materialized_at"]:
+                state["last_materialized_at"] = observed
+        elif outcome == "failure":
+            if state["last_failure"] is None or key > state["last_failure"]:
+                state["last_failure"] = key
+        state["status"] = _asset_status(state)
     sla = (event.get("attributes") or {}).get("freshness_sla_seconds")
-    if sla and not state["freshness_sla_seconds"]:
-        state["freshness_sla_seconds"] = sla
+    _set_latest(state, "freshness_sla_seconds", sla, key)
+
+
+def asset_fold_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Serializable bookkeeping for ``Asset.fold_state``."""
+    return {
+        "materialize_times": [_dump_key(k) for k in state.get("materialize_times") or []],
+        "last_failure": (_dump_key(state["last_failure"]) if state.get("last_failure") else None),
+        "field_at": _dump_field_at(state.get("field_at") or {}),
+        "derived_keys": [_dump_key(k) for k in state.get("derived_keys") or []],
+    }
+
+
+def asset_state_from_row(row: Any) -> dict[str, Any]:
+    """Reducer state seeded from a stored ``Asset`` row (incremental paths).
+
+    Rows written before fold bookkeeping existed get conservative defaults:
+    a ``failing`` row's failure is anchored at its last event, a
+    ``recovering`` row's at the epoch, and a recorded SLA gates at the last
+    event — so a late event cannot silently regress pre-migration state.
+    """
+    fs = row.fold_state or {}
+    materialize_times = [
+        key for k in fs.get("materialize_times") or [] if (key := _parse_key(k)) is not None
+    ]
+    if not materialize_times and row.last_materialized_at is not None:
+        materialize_times = [(row.last_materialized_at, "")]
+    last_failure = _parse_key(fs.get("last_failure"))
+    if last_failure is None and row.status in ("failing", "recovering"):
+        anchor = (
+            (row.last_event_at or row.last_materialized_at or _EPOCH)
+            if row.status == "failing"
+            else _EPOCH
+        )
+        last_failure = (anchor, "")
+    field_at = _parse_field_at(fs.get("field_at"))
+    if row.freshness_sla_seconds is not None and "freshness_sla_seconds" not in field_at:
+        field_at["freshness_sla_seconds"] = (row.last_event_at or _EPOCH, "")
+    state = new_asset_state(row.entity_id, row.asset_key)
+    state.update(
+        {
+            "status": row.status,
+            "last_materialized_at": row.last_materialized_at,
+            "last_event_at": row.last_event_at,
+            "freshness_sla_seconds": row.freshness_sla_seconds,
+            "attributes": dict(row.attributes or {}),
+            "derived_from": list((row.provenance or {}).get("derived_from") or []),
+            "derived_keys": _derived_keys_from(
+                fs, (row.provenance or {}).get("derived_from") or []
+            ),
+            "materialize_times": materialize_times,
+            "last_failure": last_failure,
+            "field_at": field_at,
+        }
+    )
+    return state
 
 
 def dedupe_key(rule_id: str, entity_id: str | None, event: dict[str, Any]) -> str:

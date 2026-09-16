@@ -261,6 +261,12 @@ class WorkerBackend:
 
     # -- admission -------------------------------------------------------------
 
+    def _spool_critical(self, event: CanonicalEvent) -> EmitResult:
+        """Spool a critical event; the result reflects what actually happened."""
+        if self.delivery.spool_event(event):
+            return EmitResult(accepted=True, spooled=True)
+        return EmitResult(accepted=False, dropped=True, reason="queue_full_spool_unavailable")
+
     def emit(self, event: CanonicalEvent) -> EmitResult:
         """Enqueue a canonical event, applying the configured drop policy."""
         try:
@@ -270,8 +276,7 @@ class WorkerBackend:
         except queue.Full:
             pass
         if event.delivery == Delivery.CRITICAL:
-            self.delivery.spool_event(event)
-            return EmitResult(accepted=True, spooled=True)
+            return self._spool_critical(event)
         if self.settings.drop_policy == "drop_oldest":
             evicted = self._evict_oldest_event()
             if evicted is not None:
@@ -291,8 +296,7 @@ class WorkerBackend:
                 return EmitResult(accepted=True, enqueued=True)
             except queue.Full:
                 if event.delivery == Delivery.CRITICAL:
-                    self.delivery.spool_event(event)
-                    return EmitResult(accepted=True, spooled=True)
+                    return self._spool_critical(event)
                 self._drop_noncritical(event.delivery)
                 return EmitResult(accepted=False, dropped=True, reason="queue_full")
         self._drop_noncritical(event.delivery)
@@ -306,63 +310,49 @@ class WorkerBackend:
         if self.settings.telemetry_required:
             raise TelemetryError("observe queue is full")
 
+    _EVICT_SCAN_LIMIT = 256
+    """Max queue items inspected per eviction.
+
+    Unbounded head-to-tail scans make every emit O(capacity) once the queue
+    saturates — the drop policy then amplifies the pressure it exists to
+    absorb. The window preserves the preference order (non-critical before
+    critical) over the oldest part of the queue where eviction matters most.
+    """
+
     def _evict_oldest_event(self) -> CanonicalEvent | None:
         """Remove one queued event to make room, preferring non-critical ones.
 
         Control sentinels (``_FlushRequest``/``_STOP``) are never evicted:
         dropping one would hang ``flush()``/``close()``. Critical events
-        are evicted only when the queue holds nothing else; the caller spools
-        them rather than counting a drop. Items pulled during the scan are
-        re-queued in their original order.
+        are evicted only when the scanned window holds nothing else; the
+        caller spools them rather than counting a drop.
+
+        The scan runs in place on the queue's own deque under its mutex:
+        survivors keep their positions, so eviction never reorders the
+        stream, and a racing producer cannot interleave between a pull and
+        a re-put (the get/re-put dance could drop a sentinel).
         """
-        held: list[Any] = []
-        evicted: CanonicalEvent | None = None
-        oldest_critical: CanonicalEvent | None = None
-        # Drain the whole queue so survivors can be re-queued in their
-        # original order; stopping at the first eviction would move held items
-        # behind everything never dequeued.
-        while True:
-            try:
-                item = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            if isinstance(item, CanonicalEvent):
-                if item.delivery == Delivery.CRITICAL:
-                    if oldest_critical is None:
-                        oldest_critical = item
-                elif evicted is None:
-                    evicted = item
+        with self._queue.mutex:
+            items = self._queue.queue
+            evicted_index: int | None = None
+            critical_index: int | None = None
+            for i in range(min(len(items), self._EVICT_SCAN_LIMIT)):
+                item = items[i]
+                if not isinstance(item, CanonicalEvent):
                     continue
-            held.append(item)
-        if evicted is None and oldest_critical is not None:
-            # Queue holds only criticals/sentinels: the oldest critical makes
-            # room and is spooled by the caller. Compare by identity — two
-            # canonical events may be equal by value.
-            for i, item in enumerate(held):
-                if item is oldest_critical:
-                    del held[i]
-                    break
-            evicted = oldest_critical
-        for item in held:
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                # A racing producer refilled the slot between the scan and the
-                # re-put. Sentinels must never be lost; criticals go to the
-                # spool; anything else counts as a normal drop.
-                if isinstance(item, CanonicalEvent):
-                    if item.delivery == Delivery.CRITICAL:
-                        self.delivery.spool_event(item)
-                    else:
-                        self.stats.incr(
-                            "dropped_debug"
-                            if item.delivery == Delivery.DEBUG
-                            else "dropped_telemetry"
-                        )
+                if item.delivery == Delivery.CRITICAL:
+                    if critical_index is None:
+                        critical_index = i
                 else:
-                    with contextlib.suppress(queue.Full):
-                        self._queue.put(item, timeout=0.5)
-        return evicted
+                    evicted_index = i
+                    break
+            index = evicted_index if evicted_index is not None else critical_index
+            if index is None:
+                return None
+            evicted = items[index]
+            del items[index]
+            self._queue.not_full.notify()
+            return evicted
 
     # -- worker ------------------------------------------------------------------
 

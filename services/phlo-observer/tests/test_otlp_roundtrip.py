@@ -143,6 +143,33 @@ def test_observe_core_record_restores_envelope() -> None:
     assert restored["source"]["adapter"] == "otlp.1.0"
 
 
+def test_v2_sections_roundtrip_through_otlp() -> None:
+    """Regression: entities/tags/contract must survive the OTLP encode/decode."""
+    event = canonical_event(
+        entities={
+            "run": "run://dagster/run-otlp-1",
+            "asset": "asset://staging.orders",
+        },
+        tags={"partition": "2025-01-01", "team": "etl"},
+        contract={
+            "name": "orders-contract",
+            "version": 2,
+            "schema_id": "contract://orders/v1",
+            "schema_hash": "sha256:abc",
+        },
+    )
+    batch = normalize(otlp_body(observe_record(event)))
+    assert not batch.errors
+    (restored,) = batch.events
+    assert restored["entities"]["run"] == "run://dagster/run-otlp-1"
+    assert restored["entities"]["asset"] == "asset://staging.orders"
+    assert restored["tags"]["partition"] == "2025-01-01"
+    assert restored["tags"]["team"] == "etl"
+    assert restored["contract"]["name"] == "orders-contract"
+    assert restored["contract"]["version"] == 2
+    assert restored["contract"]["schema_id"] == "contract://orders/v1"
+
+
 def test_event_name_restored_when_body_is_not_a_name() -> None:
     """Collectors may replace the body; ``observe.event`` still restores it."""
     event = canonical_event()

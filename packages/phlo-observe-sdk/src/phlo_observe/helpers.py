@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core import observe
+from observe_core.identifiers import branch_id
 from observe_core.models import Category
 
 from phlo_observe import events as E
@@ -40,6 +41,7 @@ def pipeline_run(
     attempt: int | None = None,
     trigger: str | None = None,
     assets: int | None = None,
+    producer: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> observe:
     """Wrap a pipeline/job run. Emits ``pipeline.run`` on exit."""
@@ -52,6 +54,7 @@ def pipeline_run(
         category=Category.PIPELINE,
         attributes=attrs,
         correlation={"run_id": run_id, "job_id": job},
+        producer=producer,
     )
 
 
@@ -59,9 +62,11 @@ def asset_materialize(
     *,
     asset_key: str,
     partition_key: str | None = None,
+    run_id: str | None = None,
     rows_in: int | None = None,
     rows_out: int | None = None,
     bytes_written: int | None = None,
+    producer: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> observe:
     """Wrap an asset materialization. Emits ``asset.materialize`` on exit."""
@@ -79,7 +84,12 @@ def asset_materialize(
         E.ASSET_MATERIALIZE,
         category=Category.DATA,
         attributes=attrs,
-        correlation={"asset_key": asset_key, "partition_key": partition_key},
+        correlation={
+            "asset_key": asset_key,
+            "partition_key": partition_key,
+            "run_id": run_id,
+        },
+        producer=producer,
     )
 
 
@@ -91,6 +101,9 @@ def quality_validate(
     checks_failed: int | None = None,
     rows_checked: int | None = None,
     rows_failed: int | None = None,
+    run_id: str | None = None,
+    asset_key: str | None = None,
+    producer: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> observe:
     """Wrap a validation run. Emits ``quality.validate`` on exit."""
@@ -105,7 +118,13 @@ def quality_validate(
         ),
         attributes,
     )
-    return observe(E.QUALITY_VALIDATE, category=Category.QUALITY, attributes=attrs)
+    return observe(
+        E.QUALITY_VALIDATE,
+        category=Category.QUALITY,
+        attributes=attrs,
+        correlation={"run_id": run_id, "asset_key": asset_key},
+        producer=producer,
+    )
 
 
 def wap_promote(
@@ -114,6 +133,7 @@ def wap_promote(
     target: str = "main",
     commit_id: str | None = None,
     checks_passed: int | None = None,
+    run_id: str | None = None,
     attributes: dict[str, Any] | None = None,
 ) -> observe:
     """Wrap a WAP promote decision. Emits ``wap.promote`` with ``critical`` delivery."""
@@ -128,5 +148,9 @@ def wap_promote(
         category=Category.WAP,
         delivery="critical",
         attributes=attrs,
-        correlation={"branch": branch},
+        correlation={"branch": branch, "run_id": run_id},
+        # WAP branches live in the Nessie namespace, matching the richer
+        # helpers in ``integrations.wap``.
+        entities={"branch": branch_id("nessie", branch)},
+        producer="wap",
     )

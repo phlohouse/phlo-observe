@@ -64,8 +64,12 @@ async def run_retention_once(
         raw_cutoff = now  # expires_at was stamped at insert
         result = await session.execute(delete(RawEvent).where(RawEvent.expires_at <= raw_cutoff))
         report.raw_events = _rowcount(result)
+        # Events expire on ``received_at``, the observer-side clock —
+        # producer-controlled ``observed_at`` is untrusted: a skewed producer
+        # clock would otherwise expire fresh events instantly or pin stale
+        # ones forever.
         event_cutoff = now - dt.timedelta(days=settings.event_retention_days)
-        result = await session.execute(delete(Event).where(Event.observed_at <= event_cutoff))
+        result = await session.execute(delete(Event).where(Event.received_at <= event_cutoff))
         report.events = _rowcount(result)
         run_cutoff = now - dt.timedelta(days=settings.run_retention_days)
         result = await session.execute(delete(Run).where(Run.updated_at <= run_cutoff))

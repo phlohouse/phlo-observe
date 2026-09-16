@@ -50,6 +50,7 @@ def _wap_op(
         attributes=attrs,
         correlation=correlation,
         entities=entities,
+        producer="wap",
     )
 
 

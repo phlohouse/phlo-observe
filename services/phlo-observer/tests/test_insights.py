@@ -253,3 +253,108 @@ class TestInsightRules:
         assert row is not None
         assert row.count == 1
         assert row.median == 2000.0
+
+    async def test_batch_state_load_scopes_to_batch_entities(
+        self, client: Any, session_factory: Any
+    ) -> None:
+        """Regression: preload must not pull every open row in the deployment."""
+        from observe_core.timestamps import utcnow
+        from phlo_observer.insights import BatchState
+
+        touched = "asset://scoped/yes"
+        other = "asset://scoped/no"
+        async with session_factory() as session, session.begin():
+            session.add(
+                Insight(
+                    insight_id=uuid.uuid4(),
+                    rule_id="quality-failure",
+                    rule_version=1,
+                    title="t",
+                    severity="warn",
+                    state="open",
+                    entity_id=other,
+                    dedupe_key=f"dedupe-{uuid.uuid4().hex[:8]}",
+                    evidence_event_ids=[],
+                    evidence_metric_ids=[],
+                    attributes={},
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                )
+            )
+            session.add(
+                Incident(
+                    incident_id=uuid.uuid4(),
+                    title="i",
+                    state="open",
+                    severity="warn",
+                    entities=[other],
+                    insight_ids=[],
+                    timeline={},
+                    impact={},
+                    attributes={},
+                    updated_at=utcnow(),
+                )
+            )
+        batch_event = _event(
+            event="quality.check",
+            outcome="failure",
+            entities={"asset": touched},
+            run_id=None,
+        )
+        async with session_factory() as session:
+            state = await BatchState.load(session, [batch_event])
+        # The unrelated open insight/incident is out of scope.
+        assert all(i.entity_id != other for i in state.open_insights)
+        assert all(other not in (c.entities or []) for c in state.open_incidents)
+
+    async def test_batch_state_load_includes_touched_open_rows(
+        self, client: Any, session_factory: Any
+    ) -> None:
+        """Dedupe still sees open insights on entities this batch touches."""
+        from observe_core.timestamps import utcnow
+        from phlo_observer.insights import BatchState
+
+        touched = "asset://scoped/hit"
+        dedupe = f"dedupe-{uuid.uuid4().hex[:8]}"
+        async with session_factory() as session, session.begin():
+            session.add(
+                Insight(
+                    insight_id=uuid.uuid4(),
+                    rule_id="quality-failure",
+                    rule_version=1,
+                    title="t",
+                    severity="warn",
+                    state="open",
+                    entity_id=touched,
+                    dedupe_key=dedupe,
+                    evidence_event_ids=[],
+                    evidence_metric_ids=[],
+                    attributes={},
+                    created_at=utcnow(),
+                    updated_at=utcnow(),
+                )
+            )
+            session.add(
+                Incident(
+                    incident_id=uuid.uuid4(),
+                    title="i",
+                    state="open",
+                    severity="warn",
+                    entities=[touched],
+                    insight_ids=[],
+                    timeline={},
+                    impact={},
+                    attributes={},
+                    updated_at=utcnow(),
+                )
+            )
+        batch_event = _event(
+            event="quality.check",
+            outcome="failure",
+            entities={"asset": touched},
+            run_id=None,
+        )
+        async with session_factory() as session:
+            state = await BatchState.load(session, [batch_event])
+        assert dedupe in state.open_by_dedupe
+        assert any(touched in (c.entities or []) for c in state.open_incidents)

@@ -15,7 +15,17 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import DateTime, Double, ForeignKey, Index, Integer, String, Text, Uuid
+from sqlalchemy import (
+    DateTime,
+    Double,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    Uuid,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -99,6 +109,7 @@ class Event(Base):
 
     __table_args__ = (
         Index("ix_events_observed_at", "observed_at"),
+        Index("ix_events_received_at", "received_at"),
         Index("ix_events_run_observed", "run_id", "observed_at"),
         Index("ix_events_asset_observed", "asset_key", "observed_at"),
         Index("ix_events_event_observed", "event", "observed_at"),
@@ -132,6 +143,9 @@ class Run(Base):
     summary: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     """Derivation provenance: derived_from event ids, rule, rule_version, derived_at (§12.3)."""
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Fold-order bookkeeping: (observed_at, event_id) key that last wrote
+    each value field, so late events cannot regress newer observations."""
 
     __table_args__ = (Index("ix_runs_updated_at", "updated_at"),)
 
@@ -153,6 +167,8 @@ class Entity(Base):
     last_seen_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
     attributes: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Per-field attribute write keys (``attr_at``) — newest observation wins."""
 
     __table_args__ = (
         Index("ix_observe_entities_kind", "kind"),
@@ -180,6 +196,9 @@ class Relationship(Base):
     last_seen_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
     source_event_ids: Mapped[list[str]] = mapped_column(JsonColumn, nullable=False, default=list)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Source-event keys: the retained sources are the earliest-observed,
+    not the earliest-arrived — rebuild and ingest converge."""
 
     __table_args__ = (
         Index("ix_observe_rel_from", "from_entity"),
@@ -208,6 +227,8 @@ class Asset(Base):
     freshness_sla_seconds: Mapped[float | None] = mapped_column(Double)
     attributes: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
     provenance: Mapped[dict[str, Any]] = mapped_column(JsonColumn, nullable=False, default=dict)
+    fold_state: Mapped[dict[str, Any] | None] = mapped_column(JsonColumn)
+    """Materialization/failure event keys + per-field write keys (§12.1)."""
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (Index("ix_observe_assets_key", "asset_key"),)
@@ -227,7 +248,7 @@ class Baseline(Base):
     mean: Mapped[float | None] = mapped_column(Double)
     p10: Mapped[float | None] = mapped_column(Double)
     p90: Mapped[float | None] = mapped_column(Double)
-    samples: Mapped[list[float]] = mapped_column(JsonColumn, nullable=False, default=list)
+    samples: Mapped[list[list[Any]]] = mapped_column(JsonColumn, nullable=False, default=list)
     updated_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
@@ -262,6 +283,15 @@ class Insight(Base):
         Index("ix_observe_insights_state", "state"),
         Index("ix_observe_insights_entity", "entity_id"),
         Index("ix_observe_insights_dedupe", "dedupe_key"),
+        # At most one open insight per dedupe key — the DB enforces what the
+        # ingest-side open_by_dedupe map can only approximate across replicas.
+        Index(
+            "uq_observe_insights_open_dedupe",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("state = 'open' AND dedupe_key IS NOT NULL"),
+            sqlite_where=text("state = 'open' AND dedupe_key IS NOT NULL"),
+        ),
     )
 
 

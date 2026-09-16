@@ -30,6 +30,7 @@ nav:
   - V1 Specification: V1_SPEC.md
   - V2 Specification: V2_SPEC.md
   - V2 Features: v2.md
+  - V2 Hardening: V2_HARDENING.md
   - Architecture: architecture.md
   - Event model: event-model.md
   - Configuration: configuration.md

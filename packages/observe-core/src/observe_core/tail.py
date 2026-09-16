@@ -8,17 +8,24 @@ Safety bounds — when a limit is hit the buffer degrades to pass-through
 mode for that run rather than growing unbounded:
 
 - ``max_runs``: concurrent run buffers (new runs pass through);
-- ``max_run_events``: per-run event count (the run's buffer releases and
-  remaining events pass through);
+- ``max_run_events``: per-run event count (the run's buffer releases as one
+  bounded chunk, then buffering resumes so the run drains in chunks);
 - ``max_age_seconds``: orphaned runs without a terminal event are flushed
   when polled.
+
+An event ends its run when its name is in ``terminal_events`` or ends with
+``.completed``/``.failed``/``.cancelled``. Applications name their run
+boundaries differently — Phlo's ``pipeline.run`` does not carry a status
+suffix — so the terminal set is configurable rather than a fixed suffix
+list; a name the sampler does not recognise as terminal leaves the run
+buffered until an age/size bound flushes it.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -44,12 +51,14 @@ class TailSampler:
         max_runs: int,
         max_run_events: int = 10_000,
         max_age_seconds: float = 3_600.0,
+        terminal_events: Collection[str] = (),
         stats: Any | None = None,
     ) -> None:
         self.min_duration_ms = min_duration_ms
         self.max_runs = max_runs
         self.max_run_events = max_run_events
         self.max_age_seconds = max_age_seconds
+        self.terminal_events = frozenset(terminal_events)
         self._stats = stats
         self._buffers: dict[str, _RunBuffer] = {}
         self._lock = threading.Lock()
@@ -73,7 +82,9 @@ class TailSampler:
             emit(event)
             return
         name = str(event.data.get("event") or "")
-        terminal = name.endswith((".completed", ".failed", ".cancelled"))
+        terminal = name in self.terminal_events or name.endswith(
+            (".completed", ".failed", ".cancelled")
+        )
         with self._lock:
             buffer = self._buffers.get(run_id)
             if buffer is None:
@@ -87,10 +98,11 @@ class TailSampler:
             buffer.events.append(event)
             self._incr("tail_buffered")
             if len(buffer.events) > self.max_run_events:
-                # Per-run bound hit: release everything buffered plus this
-                # event, then let subsequent events pass through.
+                # Per-run bound hit: release everything buffered (the current
+                # event included — it was appended above), then start a fresh
+                # buffer so the run keeps draining in bounded chunks.
                 self._release(run_id, emit)
-                emit(event)
+                self._incr("tail_released")
                 return
             if not terminal:
                 return

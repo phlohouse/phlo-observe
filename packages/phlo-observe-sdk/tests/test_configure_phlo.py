@@ -89,3 +89,30 @@ def test_configure_phlo_settings_roundtrip_revalidated():
         assert rt.settings.service_name == "sdk-test"
     finally:
         shutdown()
+
+
+def test_configure_phlo_registers_phlo_terminal_events():
+    """Phlo run boundaries (pipeline.run et al.) reach the tail sampler."""
+    rt = configure_phlo(service_name="sdk-test", drains=[], spool_enabled=False, tail_sampling=True)
+    try:
+        assert rt._tail is not None
+        assert {"pipeline.run", "dlt.pipeline.run", "dbt.invocation"} <= set(
+            rt._tail.terminal_events
+        )
+    finally:
+        shutdown()
+
+
+def test_configure_phlo_tail_terminal_events_union_with_callers():
+    rt = configure_phlo(
+        service_name="sdk-test",
+        drains=[],
+        spool_enabled=False,
+        tail_sampling=True,
+        tail_terminal_events=["custom.done"],
+    )
+    try:
+        assert rt._tail is not None
+        assert {"pipeline.run", "custom.done"} <= set(rt._tail.terminal_events)
+    finally:
+        shutdown()

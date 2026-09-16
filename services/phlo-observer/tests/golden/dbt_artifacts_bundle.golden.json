@@ -21,20 +21,23 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "9c1d8e2f-3333-4444-5555-666666666666",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 1100.0,
     "ended_at": null,
+    "entities": {
+      "run": "run://dbt/9c1d8e2f-3333-4444-5555-666666666666"
+    },
     "error": null,
     "event": "dbt.invocation",
     "event_id": "<event-id>",
     "observed_at": "<observed-at>",
-    "outcome": "unknown",
+    "outcome": "success",
     "schema_version": "2.0",
     "service": {
       "environment": null,
@@ -75,15 +78,19 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
-      "run_id": null,
+      "run_id": "9c1d8e2f-3333-4444-5555-666666666666",
       "snapshot_id": null,
       "span_id": null,
       "table": null,
       "trace_id": null
     },
     "delivery": "telemetry",
-    "duration_ms": null,
+    "duration_ms": 900.0,
     "ended_at": null,
+    "entities": {
+      "model": "model://dbt/stg_orders",
+      "run": "run://dbt/9c1d8e2f-3333-4444-5555-666666666666"
+    },
     "error": null,
     "event": "dbt.model.execute",
     "event_id": "<event-id>",

@@ -16,11 +16,11 @@ from observe_core.models import EventEnvelope
 from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import asc, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from phlo_observer import alerts, baselines, incidents, insights, metrics, projections
-from phlo_observer.correlate import correlation_method, link_trace_to_run
+from phlo_observer import alerts, insights, metrics, notify, projections
+from phlo_observer.correlate import correlation_method
 from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
@@ -154,6 +154,45 @@ def _parse_dt(value: Any) -> Any:
     return value
 
 
+async def _link_traces(session: AsyncSession, correlated: list[Event]) -> None:
+    """Resolve run_ids for trace-only events in one query, not one per row."""
+    unresolved = [row for row in correlated if not row.run_id and row.trace_id]
+    if not unresolved:
+        return
+    trace_ids = {row.trace_id for row in unresolved}
+    # Same-batch rows that already carry a run_id for this trace are valid
+    # bindings — the old per-row SELECT saw them via autoflush. Ambiguous
+    # traces resolve to the smallest run_id, the same rule the committed-rows
+    # query below applies: payload order must not change the answer, or two
+    # replicas receiving differently ordered batches would bind the same
+    # orphan differently.
+    known: dict[str, str] = {}
+    for row in correlated:
+        if row.run_id and row.trace_id:
+            prev = known.get(row.trace_id)
+            if prev is None or row.run_id < prev:
+                known[row.trace_id] = row.run_id
+    missing = trace_ids - known.keys()
+    if missing:
+        rows = await session.execute(
+            select(Event.trace_id, Event.run_id)
+            .where(Event.trace_id.in_(missing), Event.run_id.is_not(None))
+            .distinct()
+            .order_by(Event.trace_id, Event.run_id)
+        )
+        for trace_id, run_id in rows:
+            prev = known.get(trace_id)
+            if prev is None or run_id < prev:
+                known[trace_id] = run_id
+    for row in unresolved:
+        run_id = known.get(row.trace_id or "")
+        if run_id:
+            # correlation_method() already counted this event under
+            # "trace_id" at staging time — just fill the link.
+            row.run_id = run_id
+            row.correlation_method = "trace_id"
+
+
 async def persist_events(
     session: AsyncSession,
     event_dicts: list[dict[str, Any]],
@@ -163,6 +202,7 @@ async def persist_events(
     stream: Any = None,
     alert_urls: list[str] | None = None,
     alert_tasks: set[Any] | None = None,
+    instance_id: str | None = None,
 ) -> IngestResult:
     """Insert canonical events idempotently and update run projections.
 
@@ -185,6 +225,7 @@ async def persist_events(
         logger.warning("source_indices length mismatch; using event list positions")
         source_indices = None
     staged: list[tuple[int, Event, dict[str, Any]]] = []
+    staged_ids: dict[uuid.UUID, dict[str, Any]] = {}
     for index, data in enumerate(event_dicts):
         if source_indices is not None:
             index = source_indices[index]
@@ -204,6 +245,26 @@ async def persist_events(
                 }
             )
             continue
+        # Same-batch duplicates never reach the DB: two pending rows sharing a
+        # primary key would fight over the session identity map and the
+        # surviving payload would silently win. Apply the same duplicate vs
+        # conflict rule as the cross-batch path.
+        prior = staged_ids.get(row.event_id)
+        if prior is not None:
+            if _rows_match_dict(prior, data):
+                result.duplicates += 1
+                metrics.DUPLICATE_EVENTS.inc()
+            else:
+                result.rejected += 1
+                result.errors.append(
+                    {
+                        "index": index,
+                        "code": "INTEGRITY_CONFLICT",
+                        "message": f"event_id {row.event_id} already exists with different content",
+                    }
+                )
+            continue
+        staged_ids[row.event_id] = data
         staged.append((index, row, data))
     accepted_rows = await _insert_rows(session, staged, result)
     correlated = [row for row in accepted_rows if row.run_id or row.trace_id]
@@ -213,8 +274,15 @@ async def persist_events(
         # anything. Projections are derived state and can be rebuilt.
         try:
             async with session.begin_nested():
-                for row in correlated:
-                    await link_trace_to_run(session, row)
+                # Shared projection lock: a concurrent rebuild holds the
+                # exclusive side, so this pass waits it out instead of
+                # writing rows its delete+replay would drop.
+                await projections.lock_projection_writes(session)
+                # One preload of existing trace->run bindings for every
+                # trace-only event in the batch, plus a batch-local map so a
+                # trace linked by an earlier row in this same batch is reused
+                # (the per-row query saw flushed same-batch rows identically).
+                await _link_traces(session, correlated)
                 # Pre-create missing run projections in one statement so the
                 # per-event update below is a single locked read, not a
                 # savepoint-guarded insert per run_id.
@@ -237,57 +305,84 @@ async def persist_events(
                         .on_conflict_do_nothing(index_elements=["run_id"])
                     )
                 await projections.update_run_projections(session, correlated)
+                # The insight pass preloads every row it can touch — baselines
+                # for the batch's metrics, open insights, open incidents and
+                # per-asset reducer state — before apply_events_batch mutates
+                # asset rows, then runs the ordered events entirely in memory.
+                ordered_events = [
+                    projections._event_view(r)
+                    for r in sorted(
+                        accepted_rows,
+                        key=lambda r: (r.observed_at or received_at, r.event_id),
+                    )
+                ]
+                insight_state = await insights.BatchState.load(session, ordered_events)
                 await projections.apply_events_batch(session, accepted_rows)
-                for row in accepted_rows:
-                    event = projections._event_view(row)
+
+                # Every locally-published message is also collected for one
+                # pg_notify at flush: other replicas' SSE hubs republish them
+                # after commit (spec §26/§38). ``instance_id`` tags the origin
+                # so the publishing instance doesn't double-deliver.
+                pending_notifications: list[dict[str, Any]] = []
+
+                def _publish(kind: str, data: dict[str, Any]) -> None:
+                    if stream is not None:
+                        stream.publish(kind, data)
+                    pending_notifications.append({"kind": kind, "data": data})
+
+                # A replica with no local subscribers still emits notifications
+                # for other replicas (``instance_id``), so ``on_insight`` is
+                # built whenever any sink exists.
+                on_insight = None
+                if (
+                    stream is not None
+                    or instance_id is not None
+                    or (alert_urls and alert_tasks is not None)
+                ):
+
+                    async def on_insight(insight: Any, incident: Any) -> None:
+                        _publish(
+                            "insight.opened",
+                            {
+                                "insight_id": str(insight.insight_id),
+                                "rule": insight.rule_id,
+                                "entity": insight.entity_id,
+                                "severity": insight.severity,
+                            },
+                        )
+                        if incident is not None:
+                            _publish(
+                                "incident.updated",
+                                {
+                                    "incident_id": str(incident.incident_id),
+                                    "state": incident.state,
+                                },
+                            )
+                        if alert_urls and alert_tasks is not None:
+                            await alerts.notify(
+                                alert_urls,
+                                "insight",
+                                {
+                                    "insight_id": str(insight.insight_id),
+                                    "rule": insight.rule_id,
+                                    "title": insight.title,
+                                    "severity": insight.severity,
+                                    "entity": insight.entity_id,
+                                },
+                                tasks=alert_tasks,
+                                cooldown_key=insight.dedupe_key or str(insight.insight_id),
+                            )
+
+                for event in ordered_events:
                     # Insights evaluate against baselines BEFORE this event's
                     # sample joins them — an observation must not judge itself.
-                    findings = await insights.evaluate(session, event)
-                    if findings:
-                        new_insights = await insights.record_findings(session, event, findings)
-                        for insight in new_insights:
-                            incident = await incidents.group_insight(session, insight)
-                            if stream is not None:
-                                stream.publish(
-                                    "insight.opened",
-                                    {
-                                        "insight_id": str(insight.insight_id),
-                                        "rule": insight.rule_id,
-                                        "entity": insight.entity_id,
-                                        "severity": insight.severity,
-                                    },
-                                )
-                                if incident is not None:
-                                    stream.publish(
-                                        "incident.updated",
-                                        {
-                                            "incident_id": str(incident.incident_id),
-                                            "state": incident.state,
-                                        },
-                                    )
-                            if alert_urls and alert_tasks is not None:
-                                await alerts.notify(
-                                    alert_urls,
-                                    "insight",
-                                    {
-                                        "insight_id": str(insight.insight_id),
-                                        "rule": insight.rule_id,
-                                        "title": insight.title,
-                                        "severity": insight.severity,
-                                        "entity": insight.entity_id,
-                                    },
-                                    tasks=alert_tasks,
-                                    cooldown_key=insight.dedupe_key or str(insight.insight_id),
-                                )
-                    await insights.resolve_for_event(session, event)
-                    await baselines.update_baselines(session, event)
-                if stream is not None:
-                    for row in correlated:
-                        if row.run_id:
-                            stream.publish(
-                                "run.changed",
-                                {"run_id": row.run_id, "event": row.event},
-                            )
+                    await insight_state.step(session, event, on_insight=on_insight)
+                for row in correlated:
+                    if row.run_id:
+                        _publish(
+                            "run.changed",
+                            {"run_id": row.run_id, "event": row.event},
+                        )
                 # Register contract schemas seen on envelopes (spec §8.3):
                 # an event carrying contract.schema_id upserts the registry
                 # row so schemas stay queryable without a separate publish.
@@ -310,8 +405,14 @@ async def persist_events(
                         )
                         .on_conflict_do_nothing(index_elements=["schema_id"])
                     )
+                if instance_id is not None:
+                    packed = notify.pack_notify(instance_id, pending_notifications)
+                    if packed is not None:
+                        await notify.emit_notify(session, packed)
                 await session.flush()
-        except SQLAlchemyError:
+        except Exception:
+            # Fail-open covers code bugs too, not just DB errors: derived
+            # state is rebuildable, durable events must not be lost.
             logger.warning(
                 "correlation/projection update failed for %d events",
                 len(accepted_rows),
@@ -332,6 +433,11 @@ async def _insert_rows(
     try:
         async with session.begin_nested():
             session.add_all(rows)
+            # Emit the INSERTs inside this savepoint: deferred to the next
+            # autoflush they'd land inside the projection savepoint, where a
+            # fail-open rollback would undo them and a real insert error
+            # would be misreported as a projection failure.
+            await session.flush()
     except (IntegrityError, DataError):
         pass  # isolate the bad rows one by one
     else:
@@ -345,6 +451,7 @@ async def _insert_rows(
         try:
             async with session.begin_nested():
                 session.add(row)
+                await session.flush()
         except IntegrityError:
             existing = await session.get(Event, row.event_id)
             if existing is not None and _rows_match(existing, data):
@@ -392,6 +499,16 @@ def _rows_match(existing: Event, incoming: dict[str, Any]) -> bool:
     return stored == new
 
 
+def _rows_match_dict(staged: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Same-batch variant of ``_rows_match``: compare two canonical dicts."""
+    try:
+        first = EventEnvelope.model_validate(staged).to_canonical_dict()
+        second = EventEnvelope.model_validate(incoming).to_canonical_dict()
+    except Exception:
+        return False
+    return first == second
+
+
 def _fmt(value: Any) -> Any:
     if value is None:
         return None
@@ -400,6 +517,11 @@ def _fmt(value: Any) -> Any:
             value = value.replace(tzinfo=dt.UTC)
         return value.isoformat()
     return value
+
+
+def _like_escape(value: str) -> str:
+    """Escape LIKE metacharacters so caller input matches literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # -- queries ----------------------------------------------------------------
@@ -470,14 +592,14 @@ async def query_events(
         # adequate until the §24.4 volume thresholds force a re-evaluation.
         from sqlalchemy import String, cast, or_  # noqa: PLC0415
 
-        term = f"%{filters['q']}%"
+        term = f"%{_like_escape(str(filters['q']))}%"
         stmt = stmt.where(
             or_(
-                Event.event.ilike(term),
-                Event.table_name.ilike(term),
-                Event.asset_key.ilike(term),
-                Event.service_name.ilike(term),
-                cast(Event.error["message"], String).ilike(term),
+                Event.event.ilike(term, escape="\\"),
+                Event.table_name.ilike(term, escape="\\"),
+                Event.asset_key.ilike(term, escape="\\"),
+                Event.service_name.ilike(term, escape="\\"),
+                cast(Event.error["message"], String).ilike(term, escape="\\"),
             )
         )
     if cursor:

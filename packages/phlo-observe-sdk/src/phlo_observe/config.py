@@ -24,9 +24,19 @@ from typing import TYPE_CHECKING, Any
 from observe_core import configure
 from observe_core.config import HttpDrainConfig, ObserveSettings
 
+from phlo_observe.events import DBT_INVOCATION, DLT_PIPELINE_RUN, PIPELINE_RUN
+
 if TYPE_CHECKING:
     from observe_core.enrich import Enricher
     from observe_core.runtime import Runtime
+
+PHLO_TAIL_TERMINAL_EVENTS = (PIPELINE_RUN, DLT_PIPELINE_RUN, DBT_INVOCATION)
+"""Phlo's run-boundary event names (spec §7.7): the ``observe`` wrapper emits
+``pipeline.run`` on scope exit and the dlt/dbt integrations emit their
+invocation events on run completion. None carry a ``.completed``-style
+suffix, so tail sampling needs them registered explicitly — without them a
+tail-sampled run buffers until an age/size bound flushes it.
+"""
 
 
 def _drain_endpoint(drain: Any) -> str | None:
@@ -53,6 +63,10 @@ def configure_phlo(
     (``service_name``, ``environment``, ``drains``, ...). When an observer
     endpoint is known — via ``observer_endpoint`` or ``OBSERVE_HTTP_ENDPOINT``
     — an HTTP drain is appended unless one is already configured for it.
+
+    ``tail_terminal_events`` is unioned with Phlo's run-boundary names
+    (``pipeline.run``, ``dlt.pipeline.run``, ``dbt.invocation``) so tail
+    sampling closes Phlo run buffers at the run's last event.
     """
     if settings is not None:
         # Fold the settings into overrides so the merged result is fully
@@ -60,6 +74,9 @@ def configure_phlo(
         merged = settings.model_dump(mode="python")
         merged.update(overrides)
         overrides, settings = merged, None
+    overrides["tail_terminal_events"] = sorted(
+        {*PHLO_TAIL_TERMINAL_EVENTS, *(overrides.get("tail_terminal_events") or [])}
+    )
     drains: list[Any] | None = overrides.pop("drains", None)
     endpoint = observer_endpoint or os.environ.get("OBSERVE_HTTP_ENDPOINT")
     if endpoint is not None and not any(_drain_endpoint(d) == endpoint for d in drains or []):

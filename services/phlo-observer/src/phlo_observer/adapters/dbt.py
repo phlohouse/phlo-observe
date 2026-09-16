@@ -65,9 +65,13 @@ class DbtAdapter:
                     event=item["event"],
                     category=item.get("category", "other"),
                     outcome=item.get("outcome", "unknown"),
-                    severity="error" if item.get("outcome") == "failure" else "info",
+                    severity=item.get("severity")
+                    or ("error" if item.get("outcome") == "failure" else "info"),
+                    duration_ms=item.get("duration_ms"),
                     correlation=item.get("correlation"),
                     attributes=attrs,
+                    entities=item.get("entities"),
+                    tags=item.get("tags"),
                     source={
                         "producer": "dbt",
                         "kind": "run_results",

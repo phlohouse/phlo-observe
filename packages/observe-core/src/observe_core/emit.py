@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from observe_core.builder import EventBuilder
+from observe_core.context import ambient_correlation, operation_correlation
 from observe_core.models import (
     Category,
     Delivery,
@@ -16,6 +17,15 @@ from observe_core.models import (
 from observe_core.runtime import get_runtime
 
 
+def _source_with_producer(source: SourceInfo | None, producer: str | None) -> SourceInfo | None:
+    """Merge a ``producer`` convenience kwarg into the event's source info."""
+    if producer is None:
+        return source
+    if source is None:
+        return SourceInfo(producer=producer)
+    return source.model_copy(update={"producer": producer})
+
+
 def event(
     name: str,
     *,
@@ -23,10 +33,12 @@ def event(
     delivery: Delivery | str | None = None,
     severity: Severity | str | None = None,
     outcome: Outcome | str | None = None,
+    duration_ms: float | None = None,
     attributes: dict[str, Any] | None = None,
     correlation: dict[str, Any] | None = None,
     error: ErrorInfo | None = None,
     source: SourceInfo | None = None,
+    producer: str | None = None,
     entities: dict[str, object] | None = None,
     tags: dict[str, object] | None = None,
 ) -> None:
@@ -52,10 +64,11 @@ def event(
         builder.outcome = Outcome.FAILURE
         if severity is None:
             builder.severity = Severity.ERROR
+    if duration_ms is not None:
+        builder.duration_ms = float(duration_ms)
     if error is not None:
         builder.error = error
-    if source is not None:
-        builder.source = source
+    builder.source = _source_with_producer(source, producer)
     if entities:
         for role, identifier in entities.items():
             builder.set_entity(role, identifier)
@@ -72,17 +85,40 @@ def metric(
     dimensions: dict[str, str] | None = None,
     aggregate: bool = True,
     flush_after_seconds: float = 60.0,
+    correlation: dict[str, Any] | None = None,
+    entities: dict[str, object] | None = None,
+    tags: dict[str, object] | None = None,
 ) -> None:
     """Record a metric sample (spec §7.11 — metrics are event-shaped too).
 
     With ``aggregate=True`` (default) samples accumulate in the runtime's
     :class:`MetricAggregator`; :func:`flush_metrics` emits one summary event
-    per series. With ``aggregate=False`` an immediate ``metric.recorded``
-    event is emitted for low-cardinality measurements.
+    per series. The series key includes ``correlation``/``entities``/``tags``
+    (plus ambient run/asset context) so aggregated summaries still reach the
+    observer's per-entity baselines. ``flush_after_seconds`` bounds how long
+    samples sit un-emitted: when the accumulator is older than that, this
+    call drains pending summaries before returning.
+
+    With ``aggregate=False`` an immediate ``metric.recorded`` event is
+    emitted for low-cardinality measurements.
     """
     runtime = get_runtime()
-    if aggregate and runtime.aggregator.record(name, float(value), dimensions):
+    merged_correlation: dict[str, Any] = {
+        **ambient_correlation(),
+        **operation_correlation(),
+        **(correlation or {}),
+    }
+    if aggregate and runtime.aggregator.record(
+        name,
+        float(value),
+        dimensions,
+        correlation=merged_correlation or None,
+        entities=entities,
+        tags=tags,
+    ):
         runtime.stats.incr("aggregated_events")
+        if runtime.aggregator.due(flush_after_seconds):
+            runtime.emit_metric_summaries()
         return
     # aggregate=False, or the series bound rejected the sample — emit an
     # immediate event instead of silently dropping it.
@@ -94,6 +130,9 @@ def metric(
         category="metric",
         delivery="telemetry",
         attributes=attrs,
+        correlation=merged_correlation or None,
+        entities=entities,
+        tags=tags,
     )
 
 
@@ -104,12 +143,4 @@ def flush_metrics() -> int:
     or rely on :func:`observe_core.runtime.flush`, which drains pending
     summaries too.
     """
-    summaries = get_runtime().aggregator.flush()
-    for summary in summaries:
-        event(
-            "metric.summary",
-            category="metric",
-            delivery="telemetry",
-            attributes=summary,
-        )
-    return len(summaries)
+    return get_runtime().emit_metric_summaries()

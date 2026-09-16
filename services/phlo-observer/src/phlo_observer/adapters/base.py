@@ -108,10 +108,14 @@ def envelope_for(
     severity: str = "info",
     delivery: str = "telemetry",
     observed_at: Any = None,
+    duration_ms: float | None = None,
     correlation: dict[str, Any] | None = None,
     attributes: dict[str, Any] | None = None,
     source: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
+    entities: dict[str, Any] | None = None,
+    tags: dict[str, Any] | None = None,
+    contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a canonical event dict through the real model (validation + ids)."""
     envelope = EventEnvelope(
@@ -122,11 +126,15 @@ def envelope_for(
         severity=severity,
         delivery=delivery,
         observed_at=observed_at or utcnow(),
+        duration_ms=duration_ms,
         service={"name": (source or {}).get("producer", "external")},
         correlation=correlation or {},
         attributes=attributes or {},
         error=error,
         source=source,
+        entities=entities or {},
+        tags=tags or {},
+        contract=contract,
     )
     return envelope.to_canonical_dict()
 
