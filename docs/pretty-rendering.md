@@ -105,6 +105,16 @@ are best-effort, never required. Canonical envelopes carry `None` where a
 sparse dict carries nothing; both count as absent. `duration_ms` is
 appended automatically when present and not already listed as a field.
 
+`Field(..., suppress=predicate)` hides individual degenerate values: the
+predicate sees the resolved value before formatting, and a truthy result
+renders nothing for that field. Use it for placeholder identifiers,
+sentinel names, or a zero that reads as "no measurement":
+
+```python
+Field("attributes.job_name", label="Job", suppress=lambda v: str(v).startswith("__anon"))
+Field("attributes.rows", label="Rows", format="integer", suppress=lambda v: v == 0)
+```
+
 ## Field formats
 
 Generic formats, usable on any value:

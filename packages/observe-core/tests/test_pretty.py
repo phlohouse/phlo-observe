@@ -252,6 +252,60 @@ def test_none_field_values_omitted() -> None:
     assert out == "✓ Load  table: t"
 
 
+# -- field suppress predicates -----------------------------------------------------
+
+
+def _suppress_rules(**field_kwargs) -> dict:
+    return {
+        "job.done": EventPresentation(
+            label="Job",
+            fields=[
+                Field("attributes.name", label="Name", **field_kwargs),
+                Field("attributes.status", label="Status"),
+            ],
+        )
+    }
+
+
+def test_suppress_hides_degenerate_value() -> None:
+    """A placeholder value the consumer declares degenerate renders nothing."""
+    rules = _suppress_rules(suppress=lambda v: str(v).startswith("__internal"))
+    out = renderer(rules=rules).render(
+        ev("job.done", attributes={"name": "__internal_job", "status": "done"})
+    )
+    assert out == "✓ Job  Status: done"
+
+
+def test_suppress_passes_raw_value_before_formatting() -> None:
+    """The predicate sees the resolved value, not the formatted string."""
+    seen: list[object] = []
+    rules = _suppress_rules(suppress=lambda v: seen.append(v) or False)
+    renderer(rules=rules).render(ev("job.done", attributes={"name": "nightly", "status": "done"}))
+    assert seen == ["nightly"]
+
+
+def test_suppress_keeps_normal_values() -> None:
+    rules = _suppress_rules(suppress=lambda v: str(v).startswith("__internal"))
+    out = renderer(rules=rules).render(
+        ev("job.done", attributes={"name": "nightly", "status": "done"})
+    )
+    assert "Name: nightly" in out
+
+
+def test_suppress_applies_in_verbose_too() -> None:
+    rules = _suppress_rules(suppress=lambda v: v == "placeholder", visibility="secondary")
+    r = renderer(rules=rules, mode="verbose")
+    out = r.render(ev("job.done", attributes={"name": "placeholder", "status": "done"}))
+    assert out == "✓ Job  Status: done"
+    out = r.render(ev("job.done", attributes={"name": "real", "status": "done"}))
+    assert "Name: real" in out
+
+
+def test_suppress_rejects_non_callable() -> None:
+    with pytest.raises(TypeError, match="suppress"):
+        Field("attributes.name", suppress="nope")  # type: ignore[arg-type]
+
+
 def test_envelope_none_fields_render_nothing() -> None:
     """Fixed envelope keys arrive present-as-None in canonical dicts."""
     from observe_core import EventEnvelope, ServiceInfo
