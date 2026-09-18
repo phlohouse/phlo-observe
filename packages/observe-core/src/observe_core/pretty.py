@@ -108,6 +108,13 @@ class Field:
     leading characters kept before an ellipsis. ``visibility`` mirrors
     :class:`Visibility`: ``secondary`` fields render only in verbose
     mode, ``hidden`` fields never render.
+
+    ``suppress`` is an optional predicate applied to the resolved value:
+    when it returns true the field renders nothing. It lets a consumer
+    declare degenerate values — placeholder identifiers, sentinel names,
+    a zero where "no measurement" reads better than ``0`` — without a
+    full custom formatter. The predicate sees the raw resolved value,
+    before formatting.
     """
 
     path: str
@@ -115,6 +122,7 @@ class Field:
     format: FieldFormat | str = FieldFormat.STRING
     visibility: Visibility | str = Visibility.PRIMARY
     head: int | None = None
+    suppress: Callable[[Any], bool] | None = None
 
     def __post_init__(self) -> None:
         """Coerce string enum inputs into their enum members."""
@@ -122,6 +130,10 @@ class Field:
         _validate_label(self.label)
         object.__setattr__(self, "format", FieldFormat(self.format))
         object.__setattr__(self, "visibility", Visibility(self.visibility))
+        if self.suppress is not None and not callable(self.suppress):
+            raise TypeError(
+                f"suppress must be callable or None, got {type(self.suppress).__name__}"
+            )
 
     @property
     def display_label(self) -> str:
@@ -756,6 +768,8 @@ class PrettyRenderer:
                     continue
                 value = _resolve(data, fld.path)
                 if value is _MISSING or value is None:
+                    continue
+                if fld.suppress is not None and fld.suppress(value):
                     continue
                 rendered = format_value(value, fld.format, head=fld.head, ellipsis=self._ellipsis)
                 parts.append(_sanitize(f"{fld.display_label}: {rendered}"))
