@@ -1,5 +1,40 @@
 # Changelog
 
+## [3 packages] - 2026-09-18
+
+### Added
+- observe-core: V2 phase 1 — contracts, schema registry, backends, propagation
+- observe-core: emit canonical entities from integrations
+- observe-core: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE ([#7](https://github.com/phlohouse/phlo-observe/issues/7))
+- observe-core: add generic human-readable event renderer ([#8](https://github.com/phlohouse/phlo-observe/issues/8))
+- phlo-observe: add V2 lifecycle and registry endpoints, operator CLIs, archive/restore
+- phlo-observe: emit canonical entities from integrations
+- phlo-observe: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE ([#7](https://github.com/phlohouse/phlo-observe/issues/7))
+- phlo-observe: add generic human-readable event renderer ([#8](https://github.com/phlohouse/phlo-observe/issues/8))
+- phlo-observer: V2 phase 1 — contracts, schema registry, backends, propagation
+- phlo-observer: add V2 state engine — entity registry, edges, asset projections, rebuild
+- phlo-observer: add V2 insight layer — baselines, deterministic rules, incident grouping
+- phlo-observer: add V2 query API endpoints and investigation bundle
+- phlo-observer: add V2 operations — search, SSE stream, alert webhooks, quarantine admin
+- phlo-observer: add V2 lifecycle and registry endpoints, operator CLIs, archive/restore
+- phlo-observer: add WAP branch state projection and retention for V2 tables
+- phlo-observer: add alert cooldown and dedup
+- phlo-observer: serialize retention across instances; document HA and DR
+- phlo-observer: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE ([#7](https://github.com/phlohouse/phlo-observe/issues/7))
+
+### Changed
+- phlo-observer: batch projection and run-state updates in the ingest hot path
+
+### Fixed
+- phlo-observer: add observe-query to the image; fix help assertion on narrow terminals
+
+### Contributors
+Thanks to our contributors for this release:
+- @iamgp (22 commits)
+
+---
+Full Changelog: https://github.com/phlohouse/phlo-observe/compare/phlo-observer/v0.1.0...v0.2.0
+
 ## [3 packages] - 2026-09-15
 
 ### Added
