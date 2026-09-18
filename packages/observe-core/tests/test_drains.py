@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from observe_core import add_drain, configure, event, flush, shutdown
 from observe_core.config import HttpDrainConfig
 from observe_core.drains.base import CanonicalEvent
 from observe_core.drains.console import ConsoleDrain
@@ -123,3 +124,83 @@ class TestDrainConfigValidation:
     def test_http_drain_requires_endpoint(self):
         with pytest.raises(ValidationError):
             HttpDrainConfig(type="http")
+
+
+class _RecordingDrain:
+    """Minimal consumer-provided drain: records every batch it receives."""
+
+    name = "recording"
+    is_remote = False
+
+    def __init__(self):
+        self.batches: list[list[CanonicalEvent]] = []
+        self.raw: list[bytes] = []
+        self.closed = False
+
+    def emit_batch(self, events):
+        self.batches.append(list(events))
+
+    def emit_raw(self, payloads):
+        self.raw.extend(payloads)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class TestCustomDrainRegistration:
+    """The runtime's programmatic extension point for consumer drains."""
+
+    def test_runtime_add_drain_receives_events(self):
+        rt = configure(service_name="svc", drains=[{"type": "memory"}], spool_enabled=False)
+        try:
+            custom = _RecordingDrain()
+            rt.add_drain(custom)
+            event("pipeline.step")
+            flush(2.0)
+            assert [e.event for batch in custom.batches for e in batch] == ["pipeline.step"]
+        finally:
+            shutdown(2.0)
+
+    def test_add_drain_applies_to_current_runtime(self):
+        rt = configure(service_name="svc", drains=[{"type": "memory"}], spool_enabled=False)
+        custom = _RecordingDrain()
+        add_drain(custom)
+        try:
+            event("pipeline.step")
+            flush(2.0)
+            assert custom.batches
+            assert rt.drains[-1] is custom
+        finally:
+            shutdown(2.0)
+
+    def test_add_drain_before_configure_attaches_to_next_runtime(self):
+        custom = _RecordingDrain()
+        add_drain(custom)
+        try:
+            rt = configure(service_name="svc", drains=[{"type": "memory"}], spool_enabled=False)
+            event("pipeline.step")
+            flush(2.0)
+            assert rt.drains[-1] is custom
+            assert [e.event for batch in custom.batches for e in batch] == ["pipeline.step"]
+        finally:
+            shutdown(2.0)
+
+    def test_registered_drain_flushed_and_closed_with_runtime(self):
+        rt = configure(service_name="svc", drains=[{"type": "memory"}], spool_enabled=False)
+        custom = _RecordingDrain()
+        rt.add_drain(custom)
+        shutdown(2.0)
+        assert custom.closed
+
+    def test_add_drain_rejects_non_drain(self):
+        rt = configure(service_name="svc", drains=[{"type": "memory"}], spool_enabled=False)
+        try:
+            with pytest.raises(TypeError, match="Drain protocol"):
+                rt.add_drain(object())
+            with pytest.raises(TypeError, match="Drain protocol"):
+                add_drain(object())
+        finally:
+            shutdown(2.0)

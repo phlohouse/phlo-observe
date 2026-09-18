@@ -276,6 +276,71 @@ def test_envelope_none_fields_render_nothing() -> None:
     assert r.render(env) == "✓ Job"
 
 
+# -- timestamps --------------------------------------------------------------------
+
+
+def test_timestamps_off_by_default() -> None:
+    out = renderer().render(
+        ev("job.started", observed_at="2026-09-17T21:51:23.456Z", attributes={"worker": "w"})
+    )
+    assert out == "✓ Job started  Worker: w"
+
+
+def test_timestamp_column_from_observed_at() -> None:
+    out = renderer(timestamps=True).render(
+        ev("job.started", observed_at="2026-09-17T21:51:23.456Z", attributes={"worker": "w"})
+    )
+    assert out == "21:51:23.456 ✓ Job started  Worker: w"
+
+
+def test_timestamp_column_falls_back_to_started_then_ended() -> None:
+    r = renderer(timestamps=True)
+    started_only = r.render(
+        ev("job.started", started_at="2026-09-17T21:00:00.100Z", attributes={"worker": "w"})
+    )
+    ended_only = r.render(ev("job.started", ended_at="2026-09-17T22:00:00.900Z"))
+    assert started_only.startswith("21:00:00.100 ✓")
+    assert ended_only.startswith("22:00:00.900 ✓")
+
+
+def test_timestamp_column_observed_at_wins_over_started_at() -> None:
+    out = renderer(timestamps=True).render(
+        ev(
+            "job.started",
+            observed_at="2026-09-17T21:51:23.000Z",
+            started_at="2026-09-17T21:00:00.000Z",
+        )
+    )
+    assert out.startswith("21:51:23.000 ✓")
+
+
+def test_timestamp_column_absent_when_event_has_no_time() -> None:
+    out = renderer(timestamps=True).render(ev("job.started", attributes={"worker": "w"}))
+    assert out == "✓ Job started  Worker: w"
+
+
+def test_timestamp_column_unparseable_value_renders_no_column() -> None:
+    out = renderer(timestamps=True).render(ev("job.started", observed_at="not-a-time"))
+    assert out == "✓ Job started"
+
+
+def test_timestamp_column_applies_to_custom_formatter_lines() -> None:
+    rules = {
+        "job.started": EventPresentation(
+            label="Job", formatter=lambda data: ["custom body", "more"]
+        )
+    }
+    out = renderer(rules=rules, timestamps=True).render(
+        ev("job.started", observed_at="2026-09-17T21:51:23.001Z")
+    )
+    assert out.splitlines()[0] == "21:51:23.001 ✓ Job  custom body"
+
+
+def test_timestamps_rejects_non_bool() -> None:
+    with pytest.raises(TypeError):
+        renderer(timestamps="yes")
+
+
 # -- context -----------------------------------------------------------------------
 
 
@@ -626,6 +691,76 @@ def test_write_many_uses_stream() -> None:
     r = PrettyRenderer(color="never", stream=stream)
     r.write_many([ev("a.b"), ev("c.d")])
     assert stream.getvalue() == "✓ a.b  success\n✓ c.d  success\n"
+
+
+def test_write_event_tracks_context_across_calls() -> None:
+    """Incremental writes share group state: one header per context switch,
+    matching what render_many produces for the same sequence."""
+    stream = io.StringIO()
+    r = PrettyRenderer(
+        rules=RULES, context=CONTEXT, color="never", symbols="unicode", stream=stream
+    )
+    events = [
+        ev("job.started", correlation={"run_id": "r1"}),
+        ev("job.started", correlation={"run_id": "r1"}),
+        ev("job.started", correlation={"run_id": "r2"}),
+    ]
+    for event in events:
+        r.write_event(event)
+    assert stream.getvalue() == (
+        "── Run: r1\n✓ Job started\n✓ Job started\n\n── Run: r2\n✓ Job started\n"
+    )
+    assert stream.getvalue() == r.render_many(events) + "\n"
+
+
+def test_write_event_suppressed_events_do_not_emit_headers() -> None:
+    stream = io.StringIO()
+    r = PrettyRenderer(
+        rules=RULES, context=CONTEXT, color="never", symbols="unicode", stream=stream
+    )
+    r.write_event(ev("job.started", correlation={"run_id": "run-a"}, attributes={"worker": "w"}))
+    r.write_event(ev("internal.tick", correlation={"run_id": "run-b"}))
+    r.write_event(ev("job.started", correlation={"run_id": "run-a"}))
+    assert stream.getvalue() == "── Run: run-a\n✓ Job started  Worker: w\n✓ Job started\n"
+
+
+def test_write_event_unrenderable_does_not_break_grouping() -> None:
+    stream = io.StringIO()
+    r = PrettyRenderer(
+        rules=RULES, context=CONTEXT, color="never", symbols="unicode", stream=stream
+    )
+    r.write_event(ev("job.started", correlation={"run_id": "r1"}))
+    r.write_event(None)
+    r.write_event(ev("job.started", correlation={"run_id": "r1"}))
+    assert stream.getvalue() == (
+        "── Run: r1\n✓ Job started\n• <unrenderable event>\n✓ Job started\n"
+    )
+
+
+def test_write_event_no_context_configured() -> None:
+    stream = io.StringIO()
+    r = PrettyRenderer(color="never", stream=stream)
+    r.write_event(ev("a.b"))
+    r.write_event(ev("c.d"))
+    assert stream.getvalue() == "✓ a.b  success\n✓ c.d  success\n"
+
+
+def test_write_event_verbose_renders_secondary_incrementally() -> None:
+    """Secondary events suppressed in pretty mode render on the incremental
+    path in verbose mode — visibility applies identically to write_event."""
+    stream = io.StringIO()
+    r = PrettyRenderer(rules=RULES, context=CONTEXT, mode="verbose", color="never", stream=stream)
+    r.write_event(ev("job.started", correlation={"run_id": "r1"}))
+    r.write_event(ev("validation.completed", correlation={"run_id": "r1"}))
+    assert stream.getvalue() == "── Run: r1\n✓ Job started\n  ✓ Validate\n"
+
+
+def test_write_event_applies_timestamps() -> None:
+    stream = io.StringIO()
+    r = PrettyRenderer(color="never", timestamps=True, stream=stream)
+    r.write_event(ev("a.b", observed_at="2026-09-17T21:51:23.456Z"))
+    r.write_event(ev("c.d"))  # no usable time: no column, same as render()
+    assert stream.getvalue() == "21:51:23.456 ✓ a.b  success\n✓ c.d  success\n"
 
 
 # -- serialization unchanged --------------------------------------------------------

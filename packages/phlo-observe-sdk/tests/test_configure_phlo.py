@@ -6,6 +6,7 @@ import pytest
 from observe_core import ObserveSettings, shutdown
 from observe_core.config import HttpDrainConfig
 from observe_core.drains.http import HttpDrain
+from observe_core.drains.jsonl import JsonlDrain
 from observe_core.drains.memory import MemoryDrain
 from phlo_observe import configure_phlo
 
@@ -74,6 +75,43 @@ def test_configure_phlo_no_endpoint_keeps_drains():
     rt = configure_phlo(service_name="sdk-test", drains=[{"type": "memory"}], spool_enabled=False)
     try:
         assert not any(isinstance(d, HttpDrain) for d in rt.drains)
+    finally:
+        shutdown()
+
+
+def test_configure_phlo_accepts_drain_shorthand_string(monkeypatch, tmp_path):
+    """A filtered OBSERVE_DRAINS remainder passes through verbatim — the same
+    "name,name" shorthand the env parser accepts, including expansion of
+    name-specific env vars (OBSERVE_JSONL_PATH)."""
+    monkeypatch.setenv("OBSERVE_JSONL_PATH", str(tmp_path / "events.jsonl"))
+    rt = configure_phlo(service_name="sdk-test", drains="jsonl,memory", spool_enabled=False)
+    try:
+        kinds = [type(d) for d in rt.drains]
+        assert JsonlDrain in kinds
+        assert MemoryDrain in kinds
+        jsonl = next(d for d in rt.drains if isinstance(d, JsonlDrain))
+        assert jsonl.path == tmp_path / "events.jsonl"
+    finally:
+        shutdown()
+
+
+def test_configure_phlo_empty_drain_string_suppresses_default():
+    """An explicit empty shorthand is "no configured drains" — the console
+    default does not apply."""
+    rt = configure_phlo(service_name="sdk-test", drains="", spool_enabled=False)
+    try:
+        assert rt.drains == []
+    finally:
+        shutdown()
+
+
+def test_configure_phlo_shorthand_string_merges_endpoint(monkeypatch):
+    monkeypatch.setenv("OBSERVE_HTTP_ENDPOINT", "https://env.test/v1/events")
+    rt = configure_phlo(service_name="sdk-test", drains="memory", spool_enabled=False)
+    try:
+        kinds = [type(d) for d in rt.drains]
+        assert MemoryDrain in kinds
+        assert HttpDrain in kinds
     finally:
         shutdown()
 

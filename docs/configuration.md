@@ -61,7 +61,7 @@ Security notes:
 | `DROP_POLICY` | `drop_newest` | `drop_newest` / `drop_oldest` — queue pressure policy for non-critical events |
 | `BATCH_SIZE` / `FLUSH_INTERVAL_MS` | `100` / `1000` | worker batching |
 | `WORKER_COUNT` / `SHUTDOWN_TIMEOUT_S` | `1` / `5.0` | drain workers; bounded shutdown |
-| `DRAINS` | `console` | shorthand list (`console,http,jsonl,otlp,memory`) or JSON array of drain configs. JSON form exposes per-drain fields such as `{"type": "http", "endpoint": ..., "spool_on_failure": false}` — `spool_on_failure` (default `true`) controls whether a rejected remote write spools critical events |
+| `DRAINS` | `console` | shorthand list (`console,http,jsonl,otlp,memory`) or JSON array of drain configs. JSON form exposes per-drain fields such as `{"type": "http", "endpoint": ..., "spool_on_failure": false}` — `spool_on_failure` (default `true`) controls whether a rejected remote write spools critical events. Application-built `Drain` instances attach programmatically via `runtime.add_drain(...)` / `observe_core.add_drain(...)` |
 | `HTTP_ENDPOINT` | — | observer ingest URL (required when `DRAINS` includes `http`) |
 | `HTTP_TOKEN` | — | observer token → `Authorization: Bearer` |
 | `HTTP_API_KEY` | — | observer token → `X-API-Key` (equivalent to `HTTP_TOKEN`) |

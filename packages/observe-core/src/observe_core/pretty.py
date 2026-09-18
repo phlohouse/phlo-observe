@@ -395,6 +395,20 @@ def format_timestamp(value: Any) -> str:
     return str(value)
 
 
+def _format_timestamp_ms(value: Any) -> str:
+    """RFC3339 string or datetime -> ``"HH:MM:SS.mmm"``; ``""`` when unusable."""
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return ""
+    else:
+        return ""
+    return f"{parsed:%H:%M:%S}.{parsed.microsecond // 1000:03d}"
+
+
 def format_identifier(value: Any, head: int = 16, *, ellipsis: str = "…") -> str:
     """Shorten long identifiers: ``"pipeline-run-2f6b1f8dfa…"`` -> prefix + ``…``.
 
@@ -464,6 +478,9 @@ class PrettyRenderer:
       ``"always"``, ``"never"``.
     - ``symbols`` — ``"auto"`` (Unicode when the stream's encoding supports
       it, ASCII otherwise), ``"unicode"``, ``"ascii"``.
+    - ``timestamps`` — prefix each event line with the event's own time as
+      ``HH:MM:SS.mmm``, read from the canonical ``observed_at`` (falling
+      back to ``started_at`` then ``ended_at``). Off by default.
     - ``stream`` — used for TTY/encoding detection and as the target of
       :meth:`write`/:meth:`write_many`. Defaults to ``sys.stdout``.
     """
@@ -476,6 +493,7 @@ class PrettyRenderer:
         mode: str = "pretty",
         color: str = "auto",
         symbols: str = "auto",
+        timestamps: bool = False,
         stream: TextIO | None = None,
     ) -> None:
         if mode not in ("pretty", "verbose"):
@@ -484,6 +502,8 @@ class PrettyRenderer:
             raise ValueError(f"color must be 'auto', 'always' or 'never', got {color!r}")
         if symbols not in ("auto", "unicode", "ascii"):
             raise ValueError(f"symbols must be 'auto', 'unicode' or 'ascii', got {symbols!r}")
+        if not isinstance(timestamps, bool):
+            raise TypeError(f"timestamps must be a bool, got {type(timestamps).__name__}")
         self._rules = dict(rules or {})
         for name, presentation in self._rules.items():
             if not isinstance(name, str) or not isinstance(presentation, EventPresentation):
@@ -498,6 +518,7 @@ class PrettyRenderer:
                     f"context must contain ContextField instances, got {type(cf).__name__}"
                 )
         self._mode = mode
+        self._timestamps = timestamps
         self._stream = stream if stream is not None else sys.stdout
         self._color = _want_color(self._stream, color)
         if symbols == "auto":
@@ -514,6 +535,11 @@ class PrettyRenderer:
             if cf.visibility != Visibility.HIDDEN
             and (self._mode == "verbose" or cf.visibility != Visibility.SECONDARY)
         )
+        # Incremental-write state for :meth:`write_event`: the group last
+        # written and whether anything has been written yet (a blank line
+        # separates groups, but never precedes the first line of output).
+        self._stream_context: tuple[Any, ...] | None = None
+        self._stream_emitted = False
 
     # -- public API ---------------------------------------------------------
 
@@ -575,6 +601,41 @@ class PrettyRenderer:
         text = self.render_many(events)
         if text:
             self._stream.write(text + "\n")
+        self._stream.flush()
+
+    def write_event(self, event: Any) -> None:
+        """Render one event to the configured stream, tracking context across calls.
+
+        Successive calls share group state — the context header is written
+        only when the context values change, and a blank line separates
+        groups — so incremental consumers (drains, tail-followers) get the
+        same grouping :meth:`render_many` gives a complete sequence without
+        re-emitting a header per batch. :meth:`write` and :meth:`write_many`
+        are stateless and do not participate in this tracking.
+        """
+        data = self._normalize(event)
+        if data is None:
+            self._stream.write(f"{self._glyphs['info']} <unrenderable event>\n")
+            self._stream_emitted = True
+            self._stream.flush()
+            return
+        event_lines = self._render_event_lines(data)
+        if not event_lines:
+            # Suppressed events write nothing and must not emit a header or
+            # claim a context switch.
+            return
+        out: list[str] = []
+        group = self._context_key(data)
+        if self._visible_context and group != self._stream_context:
+            if self._stream_emitted:
+                out.append("")
+            header = self._context_header(data)
+            if header:
+                out.append(header)
+            self._stream_context = group
+        out.extend(event_lines)
+        self._stream.write("\n".join(out) + "\n")
+        self._stream_emitted = True
         self._stream.flush()
 
     # -- event normalization ------------------------------------------------
@@ -681,7 +742,8 @@ class PrettyRenderer:
                     secondary=secondary,
                 )
 
-        head = f"{glyph} {label}"
+        ts = self._timestamp_column(data)
+        head = f"{ts} {glyph} {label}" if ts else f"{glyph} {label}"
         parts: list[str] = []
         if presentation is None:
             # Fallback: no configured fields — show the outcome word explicitly.
@@ -732,7 +794,9 @@ class PrettyRenderer:
         if not content:
             content = [""]
         first, *rest = content
-        line = f"{glyph} {label}  {first}" if first else f"{glyph} {label}"
+        ts = self._timestamp_column(data)
+        head = f"{ts} {glyph} {label}" if ts else f"{glyph} {label}"
+        line = f"{head}  {first}" if first else head
         if secondary:
             line = f"  {line}"
         indent = "      " if secondary else "    "
@@ -749,6 +813,21 @@ class PrettyRenderer:
             return "running"
         outcome = str(data.get("outcome") or "")
         return _sanitize(outcome if outcome not in ("", "unknown") else "unknown")
+
+    def _timestamp_column(self, data: Mapping[str, Any]) -> str:
+        """Leading ``HH:MM:SS.mmm`` column for the event's own time, or ``""``.
+
+        Reads the canonical envelope timestamps — ``observed_at``, then
+        ``started_at``, then ``ended_at`` — so no consumer configuration is
+        needed. Events without a usable timestamp simply render no column.
+        """
+        if not self._timestamps:
+            return ""
+        raw = data.get("observed_at") or data.get("started_at") or data.get("ended_at")
+        text = _format_timestamp_ms(raw)
+        if not text:
+            return ""
+        return self._dim(_sanitize(text))
 
     def _error_lines(self, data: Mapping[str, Any], *, secondary: bool) -> list[str]:
         """Render the structured error model generically, indented under the event."""

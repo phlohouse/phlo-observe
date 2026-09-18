@@ -111,6 +111,7 @@ from observe_core.propagation import (
 from observe_core.redaction import REDACTED, sanitize_url
 from observe_core.runtime import (
     TelemetryError,
+    add_drain,
     add_enricher,
     configure,
     flush,
@@ -187,6 +188,7 @@ __all__ = [
     "TelemetryError",
     "Visibility",
     "WorkerBackend",
+    "add_drain",
     "add_enricher",
     "all_contracts",
     "asset_id",

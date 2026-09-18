@@ -56,7 +56,10 @@ print(renderer.render_many(events))
 `render()` accepts an `EventEnvelope`, a `CanonicalEvent`, or a plain dict
 (shaped like a canonical envelope). `render_many()` renders a sequence and
 adds context headers (below). `write()`/`write_many()` send the same output
-to the configured stream.
+to the configured stream. `write_event()` renders one event at a time while
+tracking context state across calls — drains and other incremental
+consumers use it so a context header is emitted once per change, not once
+per batch.
 
 ### The fallback
 
@@ -274,6 +277,23 @@ Output is restrained by default — no framework, no layout engine.
   rather than written raw, so event content cannot inject terminal
   sequences and each event stays on its own line(s).
 
+## Timestamps
+
+Pass `timestamps=True` to prefix every event line with the time the event
+carries, rendered as `HH:MM:SS.mmm`:
+
+```text
+── Run: 9d50336a-cb5f-49…
+10:03:28.871 ✓ Job started  Worker: w-3
+10:03:30.544 ✓ Load  destination: raw.events  Rows: 12,481  8.47s
+```
+
+The time comes from the canonical envelope — `observed_at`, falling back
+to `started_at` then `ended_at` — so it needs no per-application
+configuration and works for unregistered events. An event with no usable
+timestamp renders without the column. Context headers carry no timestamp:
+they describe the group, not one event.
+
 ## Supplying application mappings
 
 The intended shape is one presentation module per application — a dict of
@@ -298,3 +318,45 @@ Nothing about the application needs to live in observe-core — the renderer
 mechanics are generic, the event semantics are yours. The canonical
 JSON/JSONL serialization is untouched: pretty output is an additional
 presentation option, not a replacement for the machine format.
+
+## Rendering as a drain
+
+An application that wants pretty output *during* a run — not after —
+implements the `Drain` protocol around its renderer and registers the
+instance programmatically:
+
+```python
+from observe_core import add_drain, configure
+
+
+class PrettyDrain:
+    name = "pretty"
+    is_remote = False
+
+    def __init__(self, stream):
+        self._renderer = PrettyRenderer(
+            rules=PRESENTATION, context=CONTEXT, timestamps=True, stream=stream
+        )
+
+    def emit_batch(self, events):
+        for event in events:
+            self._renderer.write_event(event)  # context state spans batches
+
+    def emit_raw(self, payloads):
+        for payload in payloads:
+            self._renderer.write_event(json.loads(payload))
+
+    def flush(self): ...
+    def close(self): ...
+
+
+runtime = configure(service_name="my-app", drains=[])
+runtime.add_drain(PrettyDrain(sys.stderr))  # or add_drain() before configure()
+```
+
+`runtime.add_drain()` attaches a drain to that runtime;
+`observe_core.add_drain()` registers one on the current runtime and the
+next one built — the programmatic counterpart of `OBSERVE_DRAINS`, for
+drains whose configuration a drain name cannot express. observe-core
+ships no `pretty` drain itself; it lives with the application's own
+presentation rules.
