@@ -3,6 +3,18 @@
 ## [3 packages] - 2026-09-18
 
 ### Added
+- observe-core: per-field suppress predicates on Field ([#9](https://github.com/phlohouse/phlo-observe/issues/9))
+
+### Contributors
+Thanks to our contributors for this release:
+- @iamgp (1 commit)
+
+---
+Full Changelog: https://github.com/phlohouse/phlo-observe/compare/phlo-observer/v0.2.0...v0.3.0
+
+## [3 packages] - 2026-09-18
+
+### Added
 - observe-core: V2 phase 1 — contracts, schema registry, backends, propagation
 - observe-core: emit canonical entities from integrations
 - observe-core: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE ([#7](https://github.com/phlohouse/phlo-observe/issues/7))

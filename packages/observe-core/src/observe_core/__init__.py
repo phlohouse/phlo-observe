@@ -134,7 +134,7 @@ from observe_core.schema_registry import (
 from observe_core.tail import TailSampler
 from observe_core.timestamps import format_rfc3339, utcnow
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "CONTEXT_ARG",
