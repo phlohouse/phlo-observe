@@ -4,9 +4,9 @@
   "release_mode": "release_set",
   "preparation_base": {
     "ref_name": "main",
-    "commit": "360c5da814e4b58ee1b9e2e9e9371da4d2078603"
+    "commit": "0b5ec81cc74afe439cebc9c4dd65dd05bd6b4821"
   },
-  "source_digest": "576b80e0a283652cce78d80862d3de97092808d43720190f3ff5b4a3f9fc50c5",
+  "source_digest": "330f2f9d55d046c17480da8f7b65df15cc21db5adc4a433fa0a86c656302a62b",
   "covered_paths": [
     ".relx/release-manifest.json",
     "CHANGELOG.md",
@@ -184,32 +184,20 @@
       "name": "observe-core",
       "path": "packages/observe-core",
       "selected": true,
-      "selection_reason": "package files changed since observe-core/v0.1.0 and produced a release bump",
-      "current_version": "0.1.0",
-      "next_version": "0.2.0",
+      "selection_reason": "package files changed since observe-core/v0.2.0 and produced a release bump",
+      "current_version": "0.2.0",
+      "next_version": "0.3.0",
       "bump": "minor",
       "baseline": {
         "kind": "package_tag",
-        "reference": "observe-core/v0.1.0",
-        "commit": "0b651959dc360293f90572cbd9b12ea649672e2f"
+        "reference": "observe-core/v0.2.0",
+        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
       },
-      "release_tag": "observe-core/v0.2.0",
+      "release_tag": "observe-core/v0.3.0",
       "changes": [
         {
-          "id": "5bdfabac90c8205a20581a513612163ca7c70c06",
-          "message": "feat(observe-core): V2 phase 1 — contracts, schema registry, backends, propagation\n\n- EventContract registry with typed fields, metadata (description,\n  sensitive, cardinality, deprecated, examples), and off/warn/strict\n  validation wired into the emit path\n- Schema registry: deterministic JSON Schema export and\n  breaking/non-breaking change classification (spec §44)\n- Canonical entity identifiers: <namespace>://<path> URIs with typed\n  helpers (asset/run/table/iceberg/branch/model/source/snapshot/\n  service/incident)\n- V2 envelope: entities, tags, contract ref; additive and omitted when\n  empty so 1.x emissions stay byte-compatible; envelope_version setting\n- RuntimeBackend protocol with worker (default), sync, and capture\n  transports; runtime keeps finalization and delegates transport\n- Context propagation across process boundaries: base64url context\n  envelope via OBSERVE_CONTEXT or --observe-context\n- Policy-based dynamic sampling (ordered rules, run-level rates,\n  failure/critical retention guarantees, recorded decisions) and a\n  bounded tail sampler\n- MetricAggregator + metric()/flush_metrics() for event-shaped metrics\n- SDK health surface: backend, queue depth, counters, spool, tail,\n  aggregation series\n- event-envelope-v2.schema.json; contract tests validate V2 and pin V1"
-        },
-        {
-          "id": "a5942aedcbe4bd5de2218458f6f50d5b6c456479",
-          "message": "feat(sdk): emit canonical entities from integrations\n\n- observe() accepts entities=/tags= kwargs, applied to the builder on\n  enter and carried through decorator wrapping\n- dagster: run://dagster/<run_id> + asset://<key> on materializations\n  and asset checks\n- wap: branch://nessie/<branch> plus table:// and snapshot:// when known\n- iceberg: iceberg://<catalog>/<ns>/<table>, branch://nessie,\n  snapshot://<table>/<id> on commits; branch entity on nessie create\n- dlt: source://dlt/<pipeline>; dbt: run://dbt/<invocation> and\n  model://dbt/<name> on run-results events; trino: service://trino"
-        },
-        {
-          "id": "91a32fa29ce19aac0e31ed3750a9090776267bd0",
-          "message": "feat: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE (#7)"
-        },
-        {
-          "id": "360c5da814e4b58ee1b9e2e9e9371da4d2078603",
-          "message": "feat(observe-core): add generic human-readable event renderer (#8)\n\n* feat(observe-core): add generic human-readable event renderer\n\nCanonical events have strong machine representations but poor human\nscannability. PrettyRenderer renders envelopes as concise text driven\nentirely by consumer-supplied presentation rules — labels, visibility\n(primary/secondary/hidden with failure/warning escalation), field paths,\ngeneric formatters, context grouping, and a structured error layout.\nobserve-core owns layout, status vocabulary and terminal behaviour\n(TTY/NO_COLOR/CI detection, Unicode with ASCII fallback, optional\nminimal colour); event semantics stay in the consuming application, so\nthe same renderer works for any application without modification.\n\nRendering is additive: canonical JSON/JSONL serialization is untouched.\n\n* feat(observe-core): incremental rendering, event timestamps, custom drains\n\n- PrettyRenderer.write_event() renders one event at a time while tracking\n  context state across calls, so incremental consumers (drains,\n  tail-followers) get the same grouping render_many gives a complete\n  sequence: one header per context switch, no header per batch.\n- timestamps=True prefixes each event line with the event time\n  (HH:MM:SS.mmm from canonical observed_at, falling back to started_at\n  then ended_at). Missing or malformed times render no column.\n- Runtime.add_drain()/observe_core.add_drain() are the programmatic\n  counterpart of OBSERVE_DRAINS: applications register Drain instances\n  a drain name cannot express, without mutating the environment.\n- configure_phlo accepts the name,name drain shorthand a filtered\n  OBSERVE_DRAINS remainder produces."
+          "id": "0b5ec81cc74afe439cebc9c4dd65dd05bd6b4821",
+          "message": "feat(observe-core): per-field suppress predicates on Field (#9)\n\nFields render nothing for values a consumer declares degenerate —\nplaceholder identifiers, sentinel names, a zero that reads as \"no\nmeasurement\" — via Field(suppress=predicate). The predicate sees the\nresolved value before formatting, so applications can drop noise like\nframework-generated anonymous job names without a full custom\nformatter or a change to the canonical event."
         }
       ]
     },
@@ -217,107 +205,33 @@
       "name": "phlo-observe",
       "path": "packages/phlo-observe-sdk",
       "selected": true,
-      "selection_reason": "package files changed since phlo-observe/v0.1.0 and produced a release bump",
-      "current_version": "0.1.0",
-      "next_version": "0.2.0",
-      "bump": "minor",
+      "selection_reason": "cascade bump: depends on a package with a version bump",
+      "current_version": "0.2.0",
+      "next_version": "0.2.1",
+      "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observe/v0.1.0",
-        "commit": "0b651959dc360293f90572cbd9b12ea649672e2f"
+        "reference": "phlo-observe/v0.2.0",
+        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
       },
-      "release_tag": "phlo-observe/v0.2.0",
-      "changes": [
-        {
-          "id": "33b0822041a62c371385314f8a79dff75e22f49a",
-          "message": "feat(observer): add V2 lifecycle and registry endpoints, operator CLIs, archive/restore\n\n- POST /v2/insights/{id}/transition + /v2/incidents/{id}/transition:\n  lifecycle states open/acknowledged/resolved/suppressed/expired (15.3)\n- GET /v2/entities: registry listing with kind filter\n- GET/POST /v2/schemas: contract schema registry, auto-registered on\n  ingest when envelopes carry contract.schema_id (8.3)\n- POST/GET /v2/analyses: LLM analysis provenance with evidence IDs\n  (21.4/24.2 observe_agent_analyses, migration 0004)\n- phlo-observer archive/restore: JSONL export + canonical-path re-ingest;\n  reprocess: windowed projection replay (24.3)\n- phlo-observe CLI: doctor, schemas list/validate, events tail --follow,\n  run show/compare, incident show, replay, benchmark (37)"
-        },
-        {
-          "id": "a5942aedcbe4bd5de2218458f6f50d5b6c456479",
-          "message": "feat(sdk): emit canonical entities from integrations\n\n- observe() accepts entities=/tags= kwargs, applied to the builder on\n  enter and carried through decorator wrapping\n- dagster: run://dagster/<run_id> + asset://<key> on materializations\n  and asset checks\n- wap: branch://nessie/<branch> plus table:// and snapshot:// when known\n- iceberg: iceberg://<catalog>/<ns>/<table>, branch://nessie,\n  snapshot://<table>/<id> on commits; branch entity on nessie create\n- dlt: source://dlt/<pipeline>; dbt: run://dbt/<invocation> and\n  model://dbt/<name> on run-results events; trino: service://trino"
-        },
-        {
-          "id": "91a32fa29ce19aac0e31ed3750a9090776267bd0",
-          "message": "feat: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE (#7)"
-        },
-        {
-          "id": "360c5da814e4b58ee1b9e2e9e9371da4d2078603",
-          "message": "feat(observe-core): add generic human-readable event renderer (#8)\n\n* feat(observe-core): add generic human-readable event renderer\n\nCanonical events have strong machine representations but poor human\nscannability. PrettyRenderer renders envelopes as concise text driven\nentirely by consumer-supplied presentation rules — labels, visibility\n(primary/secondary/hidden with failure/warning escalation), field paths,\ngeneric formatters, context grouping, and a structured error layout.\nobserve-core owns layout, status vocabulary and terminal behaviour\n(TTY/NO_COLOR/CI detection, Unicode with ASCII fallback, optional\nminimal colour); event semantics stay in the consuming application, so\nthe same renderer works for any application without modification.\n\nRendering is additive: canonical JSON/JSONL serialization is untouched.\n\n* feat(observe-core): incremental rendering, event timestamps, custom drains\n\n- PrettyRenderer.write_event() renders one event at a time while tracking\n  context state across calls, so incremental consumers (drains,\n  tail-followers) get the same grouping render_many gives a complete\n  sequence: one header per context switch, no header per batch.\n- timestamps=True prefixes each event line with the event time\n  (HH:MM:SS.mmm from canonical observed_at, falling back to started_at\n  then ended_at). Missing or malformed times render no column.\n- Runtime.add_drain()/observe_core.add_drain() are the programmatic\n  counterpart of OBSERVE_DRAINS: applications register Drain instances\n  a drain name cannot express, without mutating the environment.\n- configure_phlo accepts the name,name drain shorthand a filtered\n  OBSERVE_DRAINS remainder produces."
-        }
-      ]
+      "release_tag": "phlo-observe/v0.2.1",
+      "changes": []
     },
     {
       "name": "phlo-observer",
       "path": "services/phlo-observer",
       "selected": true,
-      "selection_reason": "package files changed since phlo-observer/v0.1.0 and produced a release bump",
-      "current_version": "0.1.0",
-      "next_version": "0.2.0",
-      "bump": "minor",
+      "selection_reason": "cascade bump: depends on a package with a version bump",
+      "current_version": "0.2.0",
+      "next_version": "0.2.1",
+      "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observer/v0.1.0",
-        "commit": "0b651959dc360293f90572cbd9b12ea649672e2f"
+        "reference": "phlo-observer/v0.2.0",
+        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
       },
-      "release_tag": "phlo-observer/v0.2.0",
-      "changes": [
-        {
-          "id": "5bdfabac90c8205a20581a513612163ca7c70c06",
-          "message": "feat(observe-core): V2 phase 1 — contracts, schema registry, backends, propagation\n\n- EventContract registry with typed fields, metadata (description,\n  sensitive, cardinality, deprecated, examples), and off/warn/strict\n  validation wired into the emit path\n- Schema registry: deterministic JSON Schema export and\n  breaking/non-breaking change classification (spec §44)\n- Canonical entity identifiers: <namespace>://<path> URIs with typed\n  helpers (asset/run/table/iceberg/branch/model/source/snapshot/\n  service/incident)\n- V2 envelope: entities, tags, contract ref; additive and omitted when\n  empty so 1.x emissions stay byte-compatible; envelope_version setting\n- RuntimeBackend protocol with worker (default), sync, and capture\n  transports; runtime keeps finalization and delegates transport\n- Context propagation across process boundaries: base64url context\n  envelope via OBSERVE_CONTEXT or --observe-context\n- Policy-based dynamic sampling (ordered rules, run-level rates,\n  failure/critical retention guarantees, recorded decisions) and a\n  bounded tail sampler\n- MetricAggregator + metric()/flush_metrics() for event-shaped metrics\n- SDK health surface: backend, queue depth, counters, spool, tail,\n  aggregation series\n- event-envelope-v2.schema.json; contract tests validate V2 and pin V1"
-        },
-        {
-          "id": "1fc730afaa09095ee5c6c684f1ab90aa6c94c39b",
-          "message": "feat(observer): add V2 state engine — entity registry, edges, asset projections, rebuild\n\n- observe_entities, observe_relationships, observe_assets, observe_baselines,\n  observe_insights, observe_incidents, observe_schemas,\n  observe_ingest_failures tables (migration 0003)\n- events gain entities/tags/contract_id columns; runs gain provenance\n- state_engine: pure reducers shared by incremental ingest and rebuild,\n  giving equivalence between the two paths (spec 12.4)\n- projections: entity registry, typed edges (executes/reads_from/\n  writes_to/produces/validates/promotes/part_of/deployed_as), asset\n  freshness/health state, bounded provenance (derived_from, rule,\n  rule_version, derived_at)\n- phlo-observer rebuild-projections [--run <id>]: full or scoped rebuild\n  from canonical events"
-        },
-        {
-          "id": "530b2ebdb1467898787c632b8256d78b7be38584",
-          "message": "feat(observer): add V2 insight layer — baselines, deterministic rules, incident grouping\n\n- observe_baselines: rolling median/MAD/p10-p90/mean over bounded window,\n  partition-aware keys (spec 16)\n- insights.py: six deterministic rules (run-failure, quality-failure,\n  duration-regression 2x median, volume-spike 3x, freshness-breach,\n  recurring-failure) with open/acknowledged/resolved/suppressed/expired\n  lifecycle and dedupe keys (spec 15)\n- incidents.py: entity/run/time-window grouping of error/critical\n  insights; critical insights auto-open incidents (spec 17)\n- ingest path: projections -> evaluate -> record -> group -> resolve ->\n  update baselines (evaluation precedes baseline update so an observation\n  never judges itself)"
-        },
-        {
-          "id": "4fb40f166c84b69c2b07011f78e0cddb9127ac08",
-          "message": "feat(observer): add V2 query API endpoints and investigation bundle\n\n- GET /v2/runs/{id} (+entities), /timeline, /failures, /changes,\n  /impact, /investigate (spec 20/22)\n- GET /v2/assets/{id}, /health (status + freshness + open insights),\n  /history, /lineage (upstream/downstream edges)\n- GET /v2/insights (state/entity filters), /v2/incidents, /v2/incidents/{id}\n- GET /v2/events/{id}/provenance - projections the event contributed to\n- POST /v2/query/compare-runs - side-by-side diff with deltas\n- investigation_bundle: failures, timeline, warnings, changes, comparable\n  runs, impact, ranked candidate causes with evidence ids\n- asset :path routes register after sub-resources so /health etc resolve"
-        },
-        {
-          "id": "db264286ac363035a34a15afc91af6a71f95f3f7",
-          "message": "feat(observer): add V2 operations — search, SSE stream, alert webhooks, quarantine admin\n\n- GET /v2/search: Postgres ILIKE over event name, error message, asset,\n  table, service plus existing structured filters (spec 23)\n- GET /v2/stream: SSE notification channel with bounded subscriber set;\n  run.changed/insight.opened/incident.updated published from ingest (§26)\n- alert_webhook_urls setting: fire-and-forget insight/incident POSTs,\n  tracked task set, never blocks ingest (§34)\n- observe_ingest_failures quarantine: payload-level normalization\n  failures land here; GET /v2/admin/quarantine lists them and\n  POST /v2/admin/quarantine/{id}/replay re-runs the adapter (§34)\n- admin_tokens scope: separate admin authorization with read-token\n  fallback (§19.4 keeps agent reads read-only)\n- new observe-query package: ObserverClient read-only typed client +\n  AGENT_TOOLS dispatch table for the spec 19.2 tool surface"
-        },
-        {
-          "id": "33b0822041a62c371385314f8a79dff75e22f49a",
-          "message": "feat(observer): add V2 lifecycle and registry endpoints, operator CLIs, archive/restore\n\n- POST /v2/insights/{id}/transition + /v2/incidents/{id}/transition:\n  lifecycle states open/acknowledged/resolved/suppressed/expired (15.3)\n- GET /v2/entities: registry listing with kind filter\n- GET/POST /v2/schemas: contract schema registry, auto-registered on\n  ingest when envelopes carry contract.schema_id (8.3)\n- POST/GET /v2/analyses: LLM analysis provenance with evidence IDs\n  (21.4/24.2 observe_agent_analyses, migration 0004)\n- phlo-observer archive/restore: JSONL export + canonical-path re-ingest;\n  reprocess: windowed projection replay (24.3)\n- phlo-observe CLI: doctor, schemas list/validate, events tail --follow,\n  run show/compare, incident show, replay, benchmark (37)"
-        },
-        {
-          "id": "e3cc9e035e4c89b365ef7d8c535803c06da2bcc7",
-          "message": "feat(observer): add WAP branch state projection and retention for V2 tables\n\n- branch:// entities now accumulate lifecycle attributes from WAP/Nessie\n  verbs: create(open+base_branch), validate(validation+validated_at),\n  promote(promoted|promotion_failed+target), reject(rejected),\n  cleanup(cleaned), commit(last_commit_at+last_snapshot_id); merge is\n  last-write-wins and identical on incremental and rebuild paths\n- retention now expires terminal-state insights/incidents on the run\n  window (open items are live signal and never deleted), plus quarantined\n  IngestFailure rows and AgentAnalysis records (24.x retention)"
-        },
-        {
-          "id": "fe68bf8d49cd0f4a8181a8e86c6df931f0b44097",
-          "message": "docs: add V2 docs page and archive/restore roundtrip coverage\n\n- docs/v2.md documents the implemented V2 surface: envelope fields,\n  canonical identifiers, projections/rebuild, baselines/insights/incident\n  lifecycle, /v2 API, observe-query client, SSE stream, alert webhooks,\n  scopes, quarantine, archive/restore, phlo-observe CLI\n- test: archive -> delete -> restore roundtrip through the CLI proves\n  backup/restore works against the canonical ingest path (spec checklist:\n  backup and restore documented and tested)"
-        },
-        {
-          "id": "8f7a8054c92b1e013b3abf9e9e77cd0e36087cc5",
-          "message": "feat(observer): add alert cooldown and dedup\n\nnotify() takes a cooldown_key (insight dedupe key, falling back to the\ninsight id); repeat alerts for the same condition within 300s are\nsuppressed. The key map is bounded at 10k entries; a flush resets\ncooldowns gracefully rather than growing forever."
-        },
-        {
-          "id": "21521df4cb02106d947c6d8063f26b0b1dd350e8",
-          "message": "perf(observer): batch projection and run-state updates in the ingest hot path\n\nV2 projections added per-event and per-entity database round trips to\ningestion, dropping throughput below the CI performance floor. Fold each\naccepted batch in memory, then flush entities, relationships, assets and\nruns with a handful of bulk statements. The shared reducer is unchanged,\nso incremental state still matches a full rebuild."
-        },
-        {
-          "id": "a53514bd13346536923bb3d638b76408923752ce",
-          "message": "fix(observer): add observe-query to the image; fix help assertion on narrow terminals\n\nThe SDK gained a workspace dependency on observe-query but the Dockerfile\nnever copied it, so uv sync failed. The rebuild CLI help test asserted on\nan option flag that Rich wraps on the CI terminal; strip newlines before\nasserting."
-        },
-        {
-          "id": "036e547745068915e3f746ba91248cc1d7d20a79",
-          "message": "test(observer): assert rebuild-projections exposes --run via its params\n\nRich renders an empty options panel in the CI environment, so help-text\nassertions are not portable. Inspect the Typer command's parameters\ninstead."
-        },
-        {
-          "id": "7cdf8a720d146125a5c9959fdee72ede6e641327",
-          "message": "feat(observer): serialize retention across instances; document HA and DR\n\nMultiple observer instances each ran the retention loop, duplicating\ndeletes and contending on row locks. Retention now takes a Postgres\nadvisory transaction lock — holders run the pass, others skip and report\nit. docs/v2.md gains high-availability and disaster-recovery sections,\nand the V2 acceptance checklist reflects the implemented surface."
-        },
-        {
-          "id": "91a32fa29ce19aac0e31ed3750a9090776267bd0",
-          "message": "feat: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE (#7)"
-        }
-      ]
+      "release_tag": "phlo-observer/v0.2.1",
+      "changes": []
     }
   ],
   "required_dependency_changes": []

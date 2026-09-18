@@ -13,7 +13,7 @@ description = "Generic wide-event observability: operation-scoped events, contex
 name = "observe-core"
 readme = "README.md"
 requires-python = ">=3.12"
-version = "0.2.0"
+version = "0.3.0"
 
 [[project.authors]]
 name = "Phlo"
