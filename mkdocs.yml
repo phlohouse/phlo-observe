@@ -33,6 +33,7 @@ nav:
   - V2 Hardening: V2_HARDENING.md
   - Architecture: architecture.md
   - Event model: event-model.md
+  - Pretty rendering: pretty-rendering.md
   - Configuration: configuration.md
   - Integrations: integrations.md
   - Deployment: deployment.md

@@ -211,6 +211,21 @@ class Runtime:
             return MemoryDrain()
         raise TypeError(f"unsupported drain config: {cfg!r}")
 
+    def add_drain(self, drain: Drain) -> None:
+        """Attach a consumer-provided drain instance to this runtime.
+
+        ``settings.drains`` covers the drains observe-core builds from
+        config; this is the extension point for application-provided
+        :class:`Drain` implementations. The drain joins batch delivery
+        immediately — the worker and sync backends read the same list —
+        and is flushed and closed with the configured drains on shutdown.
+        It replays spool segments only if it marks itself ``is_remote``.
+        Call it before emitting for deterministic drain ordering.
+        """
+        if not isinstance(drain, Drain):
+            raise TypeError(f"drain must implement the Drain protocol, got {type(drain).__name__}")
+        self.drains.append(drain)
+
     # -- emit path --------------------------------------------------------------
 
     def emit(self, builder: EventBuilder, exc: BaseException | None = None) -> None:
@@ -576,6 +591,7 @@ class Runtime:
 _runtime: Runtime | None = None
 _runtime_lock = threading.Lock()
 _pending_enrichers: list[Enricher] = []
+_pending_drains: list[Drain] = []
 _atexit_registered = False
 _last_stats: dict[str, Any] = {}
 
@@ -601,6 +617,9 @@ def _new_runtime(
     all_enrichers = [*_pending_enrichers, *(enrichers or [])]
     _pending_enrichers.clear()
     runtime = Runtime(settings, enrichers=all_enrichers, backend=backend)
+    for drain in _pending_drains:
+        runtime.add_drain(drain)
+    _pending_drains.clear()
     if not _atexit_registered:
         atexit.register(_atexit_shutdown)
         _atexit_registered = True
@@ -640,6 +659,25 @@ def add_enricher(enricher: Enricher) -> None:
         _pending_enrichers.append(enricher)
         if _runtime is not None:
             _runtime.enrichers.append(enricher)
+
+
+def add_drain(drain: Drain) -> None:
+    """Register a drain instance; applies to the current and next runtime.
+
+    This is the programmatic counterpart of ``OBSERVE_DRAINS``: where a
+    configured drain name cannot express what the application needs — a
+    drain carrying its own presentation config, streams or credentials —
+    the application builds the :class:`Drain` itself and registers it here
+    or on the :class:`Runtime` returned by :func:`configure`. The instance
+    is shared: one registered before :func:`configure` attaches to the
+    next runtime built.
+    """
+    if not isinstance(drain, Drain):
+        raise TypeError(f"drain must implement the Drain protocol, got {type(drain).__name__}")
+    with _runtime_lock:
+        _pending_drains.append(drain)
+        if _runtime is not None:
+            _runtime.drains.append(drain)
 
 
 def flush(timeout: float = 5.0) -> bool:

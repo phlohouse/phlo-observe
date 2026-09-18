@@ -78,6 +78,10 @@ def configure_phlo(
         {*PHLO_TAIL_TERMINAL_EVENTS, *(overrides.get("tail_terminal_events") or [])}
     )
     drains: list[Any] | None = overrides.pop("drains", None)
+    if isinstance(drains, str):
+        # Accept the same "console,jsonl" shorthand ObserveSettings does, so
+        # a caller filtering OBSERVE_DRAINS can pass the remainder verbatim.
+        drains = list(ObserveSettings(drains=drains).drains)
     endpoint = observer_endpoint or os.environ.get("OBSERVE_HTTP_ENDPOINT")
     if endpoint is not None and not any(_drain_endpoint(d) == endpoint for d in drains or []):
         drains = [
