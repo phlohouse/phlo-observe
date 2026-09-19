@@ -4,9 +4,8 @@ Server-Sent Events fan-out: projection changes publish lightweight
 notifications; clients refetch authoritative state after a notification
 (the stream is a notification channel, not the data API).
 
-In-process pub/sub is the V2 baseline — a single observer process owns the
-notifications it produces. Multi-process fan-out is a §25 bus-graduation
-concern.
+Each process owns a local hub. PostgreSQL LISTEN/NOTIFY forwards committed
+changes from other replicas; local publishers likewise wait for commit.
 """
 
 from __future__ import annotations

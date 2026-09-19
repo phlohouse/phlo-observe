@@ -153,3 +153,123 @@ async def test_notify_reconnects_after_connection_drop(
         assert "run.changed" in kinds, "replica B saw nothing after reconnect"
     finally:
         await bridge.stop()
+
+
+@asyncio_only
+async def test_local_notification_waits_for_committed_state(session_factory, make_event):
+    from phlo_observer.models import Run
+
+    hub = StreamHub()
+    queue = hub.subscribe()
+    async with session_factory() as session, session.begin():
+        await persist_events(session, [make_event(correlation={"run_id": "committed"})], stream=hub)
+        assert queue.empty()
+        async with session_factory() as reader:
+            assert await reader.get(Run, "committed") is None
+    assert queue.get_nowait()["data"]["run_id"] == "committed"
+    async with session_factory() as reader:
+        assert await reader.get(Run, "committed") is not None
+
+
+@asyncio_only
+async def test_local_notification_discards_rollback_and_allows_session_reuse(
+    session_factory, make_event
+):
+    hub = StreamHub()
+    queue = hub.subscribe()
+    async with session_factory() as session:
+        async with session.begin():
+            await persist_events(
+                session, [make_event(correlation={"run_id": "rolled-back"})], stream=hub
+            )
+            await session.rollback()
+        assert queue.empty()
+        async with session.begin():
+            await persist_events(
+                session, [make_event(correlation={"run_id": "survives"})], stream=hub
+            )
+    assert queue.get_nowait()["data"]["run_id"] == "survives"
+    assert queue.empty()
+
+
+@asyncio_only
+async def test_local_notification_discards_enclosing_savepoint_rollback(
+    session_factory, make_event
+):
+    hub = StreamHub()
+    queue = hub.subscribe()
+    async with session_factory() as session, session.begin():
+        await persist_events(session, [make_event(correlation={"run_id": "survives"})], stream=hub)
+        savepoint = await session.begin_nested()
+        await persist_events(
+            session, [make_event(correlation={"run_id": "rolled-back"})], stream=hub
+        )
+        await savepoint.rollback()
+        assert queue.empty()
+    assert queue.get_nowait()["data"]["run_id"] == "survives"
+    assert queue.empty()
+
+
+@asyncio_only
+@pytest.mark.parametrize("rollback", [False, True])
+async def test_alerts_wait_for_outer_commit(session_factory, monkeypatch, rollback):
+    from phlo_observer import alerts
+    from phlo_observer.models import Insight
+
+    delivered = []
+    tasks = set()
+    alerts._last_sent.clear()
+
+    async def capture(url, kind, payload):
+        async with session_factory() as reader:
+            assert await reader.get(Insight, uuid.UUID(payload["insight_id"])) is not None
+        delivered.append(payload)
+
+    monkeypatch.setattr(alerts, "_post", capture)
+    async with session_factory() as session, session.begin():
+        await persist_events(
+            session,
+            wl.dagster_run("alert-commit", wl.T0, outcome="failure"),
+            alert_urls=["https://alerts.example.test"],
+            alert_tasks=tasks,
+        )
+        await asyncio.sleep(0)
+        assert not tasks
+        assert not delivered
+        assert not alerts._last_sent
+        if rollback:
+            await session.rollback()
+    while tasks:
+        await asyncio.gather(*list(tasks))
+    assert bool(delivered) is not rollback
+    assert bool(alerts._last_sent) is not rollback
+
+
+@asyncio_only
+async def test_projection_rollback_discards_pending_notifications(session_factory, monkeypatch):
+    from phlo_observer import alerts, notify
+
+    hub = StreamHub()
+    queue = hub.subscribe()
+    tasks = set()
+    alerts._last_sent.clear()
+
+    async def fail_final_notification(session, payload):
+        raise RuntimeError("fail after local notification intents were collected")
+
+    monkeypatch.setattr(notify, "emit_notify", fail_final_notification)
+    events = wl.dagster_run("projection-rollback", wl.T0, outcome="failure")
+    async with session_factory() as session, session.begin():
+        result = await persist_events(
+            session,
+            events,
+            stream=hub,
+            instance_id="test",
+            alert_urls=["https://alerts.example.test"],
+            alert_tasks=tasks,
+        )
+        assert result.accepted == len(events)
+    await asyncio.sleep(0)
+    assert queue.empty()
+    assert not tasks
+    assert not alerts._last_sent
