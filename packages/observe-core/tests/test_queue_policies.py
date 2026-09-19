@@ -226,6 +226,31 @@ def test_flush_flushes_drains_after_delivery(make_runtime):
         shutdown(2.0)
 
 
+def test_flush_timeout_bounds_hung_drain_flush(make_runtime):
+    """A drain's own flush cannot extend the caller's timeout."""
+    flush_started = threading.Event()
+    release = threading.Event()
+
+    class HungFlushDrain(MemoryDrain):
+        def flush(self) -> None:
+            flush_started.set()
+            release.wait(timeout=10)
+
+    rt = make_runtime(worker_count=1, flush_interval_ms=10)
+    rt.drains.clear()
+    rt.drains.append(HungFlushDrain())
+    rt._backend.delivery.drains = rt.drains
+    try:
+        event("application.hung_flush")
+        started = time.monotonic()
+        assert flush(0.1) is False
+        assert flush_started.is_set()
+        assert time.monotonic() - started < 1.0
+    finally:
+        release.set()
+        shutdown(2.0)
+
+
 def test_critical_event_spooled_when_queue_full(make_runtime, tmp_path):
     gate = threading.Event()
     rt = _stall_runtime(make_runtime, gate, spool_enabled=True, spool_dir=tmp_path / "spool")

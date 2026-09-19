@@ -115,10 +115,11 @@ _STOP = object()
 
 
 class _FlushRequest:
-    __slots__ = ("done",)
+    __slots__ = ("done", "flush_drains")
 
-    def __init__(self) -> None:
+    def __init__(self, *, flush_drains: bool = False) -> None:
         self.done = threading.Event()
+        self.flush_drains = flush_drains
 
 
 class DrainDelivery:
@@ -461,6 +462,8 @@ class WorkerBackend:
                     self._mark_completed(batch_sequences)
                     batch = []
                     batch_sequences = []
+                    if item.flush_drains:
+                        self.delivery.flush_drains()
                     self.stats.incr("flushes")
                     item.done.set()
                     continue
@@ -517,7 +520,14 @@ class WorkerBackend:
                         break
                     self._progress.wait(remaining)
         if ok:
-            self.delivery.flush_drains()
+            request = _FlushRequest(flush_drains=True)
+            try:
+                self._queue.put(request, timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Full:
+                ok = False
+            else:
+                remaining = deadline - time.monotonic()
+                ok = remaining > 0 and request.done.wait(remaining)
         return FlushResult(ok=ok, pending=self._queue.qsize())
 
     def health(self) -> BackendHealth:
