@@ -381,8 +381,11 @@ seeded healthy segments.
   is lock-serialized and safe to leave scheduled on all instances. Event
   expiry follows `received_at`, so producer clock skew cannot pin or
   prematurely drop rows.
-- Alert on `phlo_observer_ingest_errors_total` and quarantine depth, not
-  on individual 422s (per-event errors are normal producer noise).
+- Alert on `phlo_observer_ingest_batches_total{status="rejected"}`,
+  quarantine depth, and `phlo_observer_projection_pending_batches > 0`.
+  Projection failures preserve canonical events and create durable repair
+  records. Inspect `/v2/projections/status`, correct the cause, then run
+  `phlo-observer repair-projections` during a maintenance window.
 - Treat SSE consumers as hint-driven: reconnect + refetch, never depend
   on message delivery for correctness.
 - Backup = standard `pg_dump`/PITR; restore then `rebuild-projections`.
