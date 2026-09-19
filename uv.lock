@@ -982,7 +982,7 @@ wheels = [
 
 [[package]]
 name = "observe-core"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "packages/observe-core" }
 dependencies = [
     { name = "httpx" },
@@ -1015,7 +1015,7 @@ provides-extras = ["all", "otlp"]
 
 [[package]]
 name = "observe-query"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/observe-query" }
 dependencies = [
     { name = "httpx" },
@@ -1249,7 +1249,7 @@ wheels = [
 
 [[package]]
 name = "phlo-observe"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "packages/phlo-observe-sdk" }
 dependencies = [
     { name = "observe-core" },
@@ -1329,7 +1329,7 @@ dev = [
 
 [[package]]
 name = "phlo-observer"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "services/phlo-observer" }
 dependencies = [
     { name = "alembic" },
