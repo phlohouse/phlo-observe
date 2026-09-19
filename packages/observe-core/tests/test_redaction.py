@@ -10,8 +10,17 @@ import respx
 from observe_core import ObserveSettings, configure, event, flush, observe, shutdown
 from observe_core.drains.jsonl import JsonlDrain
 from observe_core.drains.memory import MemoryDrain
+from observe_core.models import ErrorInfo
 from observe_core.redaction import REDACTED, Redactor, sanitize_url
 from observe_core.runtime import Runtime
+
+
+def _nested_secret(*, key: str = "password", value: str = "deep-secret") -> dict:
+    """Keep a secret at the normalization limit but beyond envelope traversal."""
+    nested: dict = {key: value}
+    for _ in range(7):
+        nested = {"nested": nested}
+    return nested
 
 
 def _data(drain: MemoryDrain) -> list[dict]:
@@ -94,6 +103,75 @@ def test_redaction_reaches_drain(captured: tuple[Runtime, MemoryDrain]):
     assert ev["attributes"]["password"] == REDACTED
     assert ev["attributes"]["rows"] == 10
     assert "hunter2" not in json.dumps(ev)
+
+
+def test_runtime_redacts_deep_error_details_at_default_depth(captured):
+    runtime, drain = captured
+    assert runtime.settings.max_depth == 8
+    event(
+        "application.error_info",
+        error=ErrorInfo(message="failed", details=_nested_secret()),
+    )
+    assert flush(2.0)
+    details = drain.events[0].data["error"]["details"]
+    for _ in range(7):
+        details = details["nested"]
+    assert details["password"] == REDACTED
+    assert b"deep-secret" not in drain.events[0].payload
+
+
+def test_runtime_redacts_normalized_values_before_envelope_depth_limit(make_runtime):
+    """Secrets in every arbitrary normalized section are redacted at capture."""
+    # The seventh nested mapping is retained by normalization (limit nine),
+    # but reaches beyond the envelope-wide redactor limit after wrapping.
+    runtime = make_runtime(max_depth=9)
+    event(
+        "application.capture",
+        attributes={
+            "payload": _nested_secret(),
+            "value_payload": _nested_secret(key="note", value="Bearer abcdef1234567890"),
+        },
+        correlation={"context_value": _nested_secret()},
+    )
+    with observe("application.error") as operation:
+        operation.error = {"message": "failed", "details": _nested_secret()}
+    event(
+        "application.error_info",
+        error=ErrorInfo(message="failed", details=_nested_secret()),
+    )
+    flush(2.0)
+
+    events = [item.data for item in runtime.drains[0].events]
+    assert (
+        events[0]["attributes"]["payload"]["nested"]["nested"]["nested"]["nested"]["nested"][
+            "nested"
+        ]["nested"]["password"]
+        == REDACTED
+    )
+    assert (
+        events[0]["attributes"]["value_payload"]["nested"]["nested"]["nested"]["nested"]["nested"][
+            "nested"
+        ]["nested"]["note"]
+        == REDACTED
+    )
+    assert (
+        events[0]["correlation"]["extra"]["context_value"]["nested"]["nested"]["nested"]["nested"][
+            "nested"
+        ]["nested"]["nested"]["password"]
+        == REDACTED
+    )
+    assert (
+        events[1]["error"]["details"]["nested"]["nested"]["nested"]["nested"]["nested"]["nested"][
+            "nested"
+        ]["password"]
+        == REDACTED
+    )
+    assert (
+        events[2]["error"]["details"]["nested"]["nested"]["nested"]["nested"]["nested"]["nested"][
+            "nested"
+        ]["password"]
+        == REDACTED
+    )
 
 
 def test_secrets_never_reach_jsonl_file(tmp_path: Path):

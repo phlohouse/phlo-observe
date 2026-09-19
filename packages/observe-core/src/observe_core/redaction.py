@@ -153,6 +153,26 @@ class Redactor:
         self._redact(data, path=(), depth=0, extra_paths=extra_paths)
         return data
 
+    def redact_value(
+        self,
+        value: Any,
+        *,
+        path: tuple[str, ...] = (),
+        extra_paths: tuple[tuple[str, ...], ...] = (),
+    ) -> Any:
+        """Redact one normalized value with a fresh traversal depth budget.
+
+        Runtime normalization happens before values are placed in the
+        envelope.  Redacting those values at their eventual envelope depth
+        would spend part of the bounded traversal budget on the envelope
+        fields themselves, allowing secrets near the normalization limit to
+        survive.  Direct callers of :meth:`redact_event` retain the original
+        envelope-wide depth bound.
+        """
+        if self.enabled:
+            self._redact(value, path=path, depth=0, extra_paths=extra_paths)
+        return value
+
     def _redact(
         self,
         node: Any,

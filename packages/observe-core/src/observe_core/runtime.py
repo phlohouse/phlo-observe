@@ -346,6 +346,9 @@ class Runtime:
                 max_depth=self.settings.max_depth,
             ),
         )
+        # Normalize and redact arbitrary correlation values before the
+        # correlation model adds its envelope depth to the traversal path.
+        self.redactor.redact_value(correlation.extra, path=("correlation", "extra"))
         ambient_svc = ambient_service()
         # Contract validation (spec §7.2): ``warn`` (the production default)
         # records violations under attributes._observe without failing
@@ -376,14 +379,13 @@ class Runtime:
             # ``error.details`` accepts arbitrary values; normalize them like
             # attributes so one unserializable detail cannot drop the event —
             # critical failure records must not vanish over a bad detail.
-            error = error.model_copy(
-                update={
-                    "details": normalize_value(error.details, max_depth=self.settings.max_depth)
-                }
-            )
+            details = normalize_value(error.details, max_depth=self.settings.max_depth)
+            self.redactor.redact_value(details, path=("error", "details"))
+            error = error.model_copy(update={"details": details})
         elif isinstance(error, dict):
             # Callers may assign a raw error dict; normalize it whole.
             error = normalize_value(error, max_depth=self.settings.max_depth)
+            self.redactor.redact_value(error, path=("error",))
         contract_ref = None
         if contract_spec is not None:
             contract_ref = ContractRef(
@@ -404,6 +406,12 @@ class Runtime:
                 if source is not None
                 else SourceInfo(producer=bound_producer)
             )
+        attributes = normalize_value(builder.attributes, max_depth=self.settings.max_depth)
+        self.redactor.redact_value(attributes, path=("attributes",))
+        entities = normalize_value(builder.entities, max_depth=2)
+        self.redactor.redact_value(entities, path=("entities",))
+        tags = normalize_value(builder.tags, max_depth=2)
+        self.redactor.redact_value(tags, path=("tags",))
         envelope = EventEnvelope(
             schema_version=self.settings.envelope_version,
             event_id=new_event_id(),
@@ -424,11 +432,11 @@ class Runtime:
                 "host": ambient_svc.get("host") or self.settings.host,
             },
             correlation=correlation,
-            attributes=normalize_value(builder.attributes, max_depth=self.settings.max_depth),
+            attributes=attributes,
             error=error,
             source=source,
-            entities=normalize_value(builder.entities, max_depth=2),
-            tags=normalize_value(builder.tags, max_depth=2),
+            entities=entities,
+            tags=tags,
             contract=contract_ref,
         )
         data = envelope.to_canonical_dict()
