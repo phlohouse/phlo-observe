@@ -11,7 +11,7 @@ merge wholesale and silently lose it.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from typing import Any
 
@@ -36,59 +36,104 @@ from phlo_observer.models import (
 
 
 class LifecycleRebuildError(RuntimeError):
-    """Rebuild refused to guess the identity of manual lifecycle rows."""
+    """Rebuild cannot preserve existing lifecycle identities without guessing."""
 
 
 def _producer_ids(row: Insight) -> set[str]:
-    return {
-        str(item.get("eid"))
+    # An immutable canonical event ID identifies its exact event position.
+    # Prefer producing events: a finding's broader evidence can overlap a
+    # different episode. Evidence is only a conservative legacy fallback.
+    producers = {
+        str(item["eid"])
         for item in (row.attributes or {}).get("producers", [])
         if isinstance(item, dict) and item.get("eid")
-    } | {str(item) for item in row.evidence_event_ids or []}
+    }
+    return producers or {str(item) for item in row.evidence_event_ids or []}
 
 
 async def _snapshot_lifecycle(
     session: AsyncSession,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    insights_rows = (await session.execute(select(Insight))).scalars().all()
-    incident_rows = (await session.execute(select(Incident))).scalars().all()
-    journal_ids = {
-        record.target_id
-        for record in (await session.execute(select(LifecycleRecord))).scalars().all()
+    journal: dict[tuple[str, Any], LifecycleRecord] = {}
+    for record in (await session.execute(select(LifecycleRecord))).scalars():
+        key = (record.target_type, record.target_id)
+        previous = journal.get(key)
+        if previous is None or record.transitioned_at > previous.transitioned_at:
+            journal[key] = record
+
+    snapshots: list[list[dict[str, Any]]] = []
+    for kind, model, id_field in (
+        ("insight", Insight, "insight_id"),
+        ("incident", Incident, "incident_id"),
+    ):
+        snapshot = []
+        for row in (await session.execute(select(model))).scalars():
+            columns = {
+                column.name: deepcopy(getattr(row, column.name))
+                for column in model.__table__.columns
+            }
+            identity = columns[id_field]
+            record = journal.get((kind, identity))
+            attrs = columns["attributes"] or {}
+            manual = (
+                columns["state"] in {"acknowledged", "suppressed", "expired"}
+                or (kind == "incident" and columns["state"] == "resolved")
+                or (columns["state"] == "resolved" and attrs.get("resolved_manually", False))
+                or (record is not None and record.state == columns["state"])
+            )
+            if manual and record is None:
+                session.add(
+                    LifecycleRecord(
+                        target_type=kind,
+                        target_id=identity,
+                        state=columns["state"],
+                        transitioned_at=columns["updated_at"],
+                        record_metadata={"legacy_snapshot": True},
+                    )
+                )
+            snapshot.append(
+                {
+                    "id": identity,
+                    "columns": columns,
+                    "manual": manual,
+                    "producers": _producer_ids(row) if isinstance(row, Insight) else set(),
+                }
+            )
+        snapshots.append(snapshot)
+    return snapshots[0], snapshots[1]
+
+
+def _unique_matches(
+    old_rows: list[dict[str, Any]],
+    new_rows: list[Any],
+    matches: Callable[[dict[str, Any], Any], bool],
+    kind: str,
+) -> dict[Any, Any]:
+    """Build the complete graph before changing any primary keys."""
+    result = {}
+    claimed: set[Any] = set()
+    for old in old_rows:
+        candidates = [row for row in new_rows if matches(old, row)]
+        if len(candidates) > 1 or (candidates and candidates[0] in claimed):
+            raise LifecycleRebuildError(
+                f"ambiguous {kind} lifecycle identity for {old['id']}; "
+                "rebuild refused to merge or split existing records"
+            )
+        if candidates:
+            result[old["id"]] = candidates[0]
+            claimed.add(candidates[0])
+    return result
+
+
+def _member_positions(columns: dict[str, Any]) -> set[tuple[str, str]]:
+    return {
+        (str(member.get("iid") or ""), str(member["key"][1]))
+        for member in (columns.get("attributes") or {}).get("members", [])
+        if isinstance(member, dict)
+        and isinstance(member.get("key"), list)
+        and len(member["key"]) == 2
+        and member["key"][1]
     }
-    return (
-        [
-            {
-                "id": row.insight_id,
-                "rule_id": row.rule_id,
-                "rule_version": row.rule_version,
-                "dedupe_key": row.dedupe_key,
-                "entity_id": row.entity_id,
-                "state": row.state,
-                "created_at": row.created_at,
-                "updated_at": row.updated_at,
-                "manual": row.state != "open"
-                or bool((row.attributes or {}).get("resolved_manually"))
-                or row.insight_id in journal_ids,
-                "producers": _producer_ids(row),
-                "attributes": deepcopy(row.attributes or {}),
-            }
-            for row in insights_rows
-        ],
-        [
-            {
-                "id": row.incident_id,
-                "title": row.title,
-                "state": row.state,
-                "resolved_at": row.resolved_at,
-                "updated_at": row.updated_at,
-                "manual": row.state != "open",
-                "members": set(row.insight_ids or []),
-                "attributes": deepcopy(row.attributes or {}),
-            }
-            for row in incident_rows
-        ],
-    )
 
 
 async def _restore_lifecycle(
@@ -96,86 +141,93 @@ async def _restore_lifecycle(
     insight_snapshot: list[dict[str, Any]],
     incident_snapshot: list[dict[str, Any]],
 ) -> None:
-    """Restore operator-owned identity/state after deterministic replay."""
+    """Reconcile derived facts with durable identities and operator decisions.
+
+    Unknown or expired evidence never authorizes deleting an existing row.
+    Ambiguous merge/split histories abort the caller's transaction instead
+    of assigning a human decision to a different episode.
+    """
     current = list((await session.execute(select(Insight))).scalars())
-    graph: dict[Any, list[Insight]] = {}
-    reverse: dict[Any, list[Any]] = {}
+
+    def same_insight(old: dict[str, Any], fresh: Insight) -> bool:
+        columns = old["columns"]
+        return all(
+            getattr(fresh, key) == columns[key]
+            for key in ("rule_id", "rule_version", "dedupe_key", "entity_id")
+        ) and bool(old["producers"] & _producer_ids(fresh))
+
+    matches = _unique_matches(insight_snapshot, current, same_insight, "insight")
+    mappings = {str(fresh.insight_id): str(old_id) for old_id, fresh in matches.items()}
+    final_open: set[str] = set()
+    old_by_fresh = {fresh: old for old in insight_snapshot if (fresh := matches.get(old["id"]))}
+    for fresh in current:
+        old = old_by_fresh.get(fresh)
+        state = old["columns"]["state"] if old and old["manual"] else fresh.state
+        if state == "open" and fresh.dedupe_key:
+            if fresh.dedupe_key in final_open:
+                raise LifecycleRebuildError("rebuild would duplicate an open insight episode")
+            final_open.add(fresh.dedupe_key)
     for old in insight_snapshot:
-        candidates = [
-            fresh
-            for fresh in current
-            if fresh.rule_id == old["rule_id"]
-            and fresh.rule_version == old["rule_version"]
-            and fresh.dedupe_key == old["dedupe_key"]
-            and fresh.entity_id == old["entity_id"]
-            and old["producers"] & _producer_ids(fresh)
-        ]
-        graph[old["id"]] = candidates
-        for fresh in candidates:
-            reverse.setdefault(fresh.insight_id, []).append(old["id"])
-    if any(len(v) > 1 for v in graph.values()) or any(len(v) > 1 for v in reverse.values()):
-        raise LifecycleRebuildError("ambiguous lifecycle insight identity; rebuild rolled back")
-    mappings: dict[str, str] = {}
+        if old["id"] not in matches:
+            columns = old["columns"]
+            if columns["state"] == "open" and columns["dedupe_key"]:
+                if columns["dedupe_key"] in final_open:
+                    raise LifecycleRebuildError(
+                        f"cannot match retained insight {old['id']} to replayed evidence"
+                    )
+                final_open.add(columns["dedupe_key"])
+
     for old in insight_snapshot:
-        candidates = graph[old["id"]]
-        if candidates:
-            fresh = candidates[0]
-            mappings[str(fresh.insight_id)] = str(old["id"])
-            fresh.insight_id = old["id"]
-            if old["manual"]:
-                fresh.state = old["state"]
-                fresh.created_at = old["created_at"]
-                fresh.updated_at = old["updated_at"]
-                if old["attributes"].get("resolved_manually"):
-                    fresh.attributes = {
-                        **(fresh.attributes or {}),
-                        "resolved_manually": True,
-                    }
-        elif old["manual"]:
-            session.add(
-                Insight(
-                    insight_id=old["id"],
-                    rule_id=old["rule_id"],
-                    rule_version=old["rule_version"],
-                    title="preserved lifecycle record",
-                    severity="warn",
-                    state=old["state"],
-                    entity_id=old["entity_id"],
-                    evidence_event_ids=[],
-                    evidence_metric_ids=[],
-                    recommended_action=None,
-                    recommended_action_verified=0,
-                    created_at=old["created_at"],
-                    updated_at=old["updated_at"],
-                    dedupe_key=old["dedupe_key"],
-                    attributes=old["attributes"],
-                )
-            )
+        fresh = matches.get(old["id"])
+        columns = old["columns"]
+        if fresh is None:
+            session.add(Insight(**columns))
+            continue
+        fresh.insight_id = old["id"]
+        fresh.created_at = columns["created_at"]
+        if old["manual"]:
+            fresh.state = columns["state"]
+            fresh.updated_at = columns["updated_at"]
+            if columns["state"] == "resolved" and columns["attributes"].get("resolved_manually"):
+                fresh.attributes = {**(fresh.attributes or {}), "resolved_manually": True}
     await session.flush()
+
     incidents = list((await session.execute(select(Incident))).scalars())
     for incident in incidents:
-        members = (incident.attributes or {}).get("members") or []
-        for member in members:
-            if str(member.get("iid")) in mappings:
-                member["iid"] = mappings[str(member["iid"])]
-        incident.attributes = {**(incident.attributes or {}), "members": members}
-        incident.insight_ids = [m.get("iid") for m in members if m.get("iid")]
+        # Deep-copy JSON before mutation so SQLAlchemy sees a changed value.
+        attrs = deepcopy(incident.attributes or {})
+        for member in attrs.get("members", []):
+            member["iid"] = mappings.get(str(member.get("iid")), member.get("iid"))
+        incident.attributes = attrs
+        incident.insight_ids = sorted(
+            {mappings.get(str(iid), str(iid)) for iid in incident.insight_ids or []}
+        )
+
+    def same_incident(old: dict[str, Any], fresh: Incident) -> bool:
+        old_positions = _member_positions(old["columns"])
+        new_positions = _member_positions({"attributes": fresh.attributes})
+        if old_positions and new_positions:
+            return bool(old_positions & new_positions)
+        # Legacy incidents lack event-position bookkeeping. Require their
+        # complete membership to agree rather than guessing on a shared ID.
+        old_ids = set(old["columns"]["insight_ids"] or [])
+        return bool(old_ids) and old_ids == set(fresh.insight_ids or [])
+
+    incident_matches = _unique_matches(incident_snapshot, incidents, same_incident, "incident")
     for old in incident_snapshot:
-        old_members = {mappings.get(str(i), str(i)) for i in old["members"]}
-        candidates = [
-            incident for incident in incidents if set(incident.insight_ids or []) == old_members
-        ]
-        if len(candidates) > 1:
-            raise LifecycleRebuildError(
-                "ambiguous lifecycle incident identity; rebuild rolled back"
-            )
-        if candidates:
-            fresh = candidates[0]
-            fresh.incident_id = old["id"]
-            if old["manual"]:
-                fresh.state = old["state"]
-                fresh.updated_at = old["updated_at"]
-                fresh.resolved_at = old["resolved_at"]
+        fresh = incident_matches.get(old["id"])
+        columns = old["columns"]
+        if fresh is None:
+            session.add(Incident(**columns))
+            continue
+        fresh.incident_id = old["id"]
+        if old["manual"]:
+            fresh.state = columns["state"]
+            fresh.updated_at = columns["updated_at"]
+            fresh.resolved_at = columns["resolved_at"]
+            fresh.timeline = columns["timeline"]
+            fresh.impact = columns["impact"]
+    await session.flush()
 
 
 _PROJECTION_LOCK_KEY = 0x70686C70

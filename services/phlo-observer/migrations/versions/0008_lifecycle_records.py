@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0008"
 down_revision: str | None = "0007"
@@ -19,7 +20,7 @@ def upgrade() -> None:
         sa.Column("target_id", sa.UUID(), nullable=False),
         sa.Column("state", sa.String(length=16), nullable=False),
         sa.Column("transitioned_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("metadata", sa.JSON(), nullable=False),
+        sa.Column("metadata", postgresql.JSONB(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(

@@ -39,7 +39,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from phlo_observer import __version__, notify, projections, query_v2
-from phlo_observer import models as observer_models
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_admin_token, require_ingest_token, require_read_token
@@ -60,6 +59,7 @@ from phlo_observer.models import (
     Incident,
     IngestFailure,
     Insight,
+    LifecycleRecord,
     Relationship,
     Run,
     SchemaRecord,
@@ -80,7 +80,6 @@ from phlo_observer.stream import StreamHub, sse_encode
 from phlo_observer.timeline import event_by_id, run_timeline
 
 logger = logging.getLogger("phlo_observer")
-_LifecycleRecord = vars(observer_models)["LifecycleRecord"]
 
 _UNAUTHENTICATED = {
     "/healthz",
@@ -835,10 +834,14 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             row.state = target
             changed_at = utcnow()
             row.updated_at = changed_at
+            attributes = dict(row.attributes or {})
             if target == "resolved":
-                row.attributes = {**(row.attributes or {}), "resolved_manually": True}
+                attributes["resolved_manually"] = True
+            else:
+                attributes.pop("resolved_manually", None)
+            row.attributes = attributes
             session.add(
-                _LifecycleRecord(
+                LifecycleRecord(
                     target_type="insight",
                     target_id=row.insight_id,
                     state=target,
@@ -886,7 +889,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
             row.updated_at = changed_at
             row.resolved_at = changed_at if target == "resolved" else None
             session.add(
-                _LifecycleRecord(
+                LifecycleRecord(
                     target_type="incident",
                     target_id=row.incident_id,
                     state=target,
