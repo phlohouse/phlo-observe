@@ -33,6 +33,7 @@ class _FirstCallSlowDrain(MemoryDrain):
         super().__init__()
         self.gate = gate
         self.entered = entered
+        self.second_entered = threading.Event()
         self.calls = 0
 
     def emit_batch(self, events: Sequence[CanonicalEvent]) -> None:
@@ -40,6 +41,8 @@ class _FirstCallSlowDrain(MemoryDrain):
         if self.calls == 1:
             self.entered.set()
             self.gate.wait(timeout=10)
+        elif self.calls == 2:
+            self.second_entered.set()
         super().emit_batch(events)
 
 
@@ -140,6 +143,84 @@ def test_flush_waits_for_all_workers_and_supports_concurrent_calls(make_runtime)
         for thread in threads:
             thread.join(2.0)
         assert results == [True, True]
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
+def test_flush_does_not_count_post_snapshot_event(make_runtime):
+    """A later event cannot satisfy an earlier flush watermark."""
+    from observe_core.backends import _FlushRequest
+
+    gate = threading.Event()
+    entered = threading.Event()
+    rt = make_runtime(worker_count=2, queue_capacity=20, flush_interval_ms=10)
+    slow = _FirstCallSlowDrain(gate, entered)
+    rt.drains.clear()
+    rt.drains.append(slow)
+    rt._backend.delivery.drains = rt.drains
+    result: dict[str, object] = {}
+    try:
+        event("warmup.fill")
+        assert entered.wait(2.0)
+
+        marker_seen = threading.Event()
+        original_put = rt._backend._queue.put
+
+        def put(item, *args, **kwargs):
+            if isinstance(item, _FlushRequest):
+                marker_seen.set()
+            return original_put(item, *args, **kwargs)
+
+        rt._backend._queue.put = put
+        thread = threading.Thread(target=lambda: result.setdefault("flush", rt.backend.flush(2.0)))
+        thread.start()
+        assert marker_seen.wait(2.0), "flush markers were not queued"
+        event("application.post_snapshot")
+        assert slow.second_entered.wait(2.0)
+        assert thread.is_alive()
+
+        gate.set()
+        thread.join(2.0)
+        assert not thread.is_alive()
+        assert result["flush"].ok is True
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
+def test_flush_flushes_drains_after_delivery(make_runtime):
+    """Drain buffering is flushed only after all pre-barrier delivery."""
+    gate = threading.Event()
+    entered = threading.Event()
+    calls: list[str] = []
+
+    class BufferedDrain(MemoryDrain):
+        def emit_batch(self, events: Sequence[CanonicalEvent]) -> None:
+            entered.set()
+            gate.wait(timeout=10)
+            calls.append("emit")
+            super().emit_batch(events)
+
+        def flush(self) -> None:
+            calls.append("flush")
+
+    rt = make_runtime(worker_count=1, flush_interval_ms=10)
+    rt.drains.clear()
+    rt.drains.append(BufferedDrain())
+    rt._backend.delivery.drains = rt.drains
+    try:
+        event("application.buffered")
+        assert entered.wait(2.0)
+        result: dict[str, object] = {}
+        thread = threading.Thread(target=lambda: result.setdefault("flush", rt.backend.flush(2.0)))
+        thread.start()
+        time.sleep(0.02)
+        assert calls == []
+        gate.set()
+        thread.join(2.0)
+        assert result["flush"].ok is True
+        assert calls == ["emit", "flush"]
     finally:
         gate.set()
         shutdown(2.0)
