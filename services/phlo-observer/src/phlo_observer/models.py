@@ -316,6 +316,23 @@ class Incident(Base):
     __table_args__ = (Index("ix_observe_incidents_state", "state"),)
 
 
+class LifecycleRecord(Base):
+    """Durable operator lifecycle decision independent of projections."""
+
+    __tablename__ = "observe_lifecycle_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    target_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    transitioned_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    record_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JsonColumn, nullable=False, default=dict
+    )
+
+    __table_args__ = (Index("ix_lifecycle_target", "target_type", "target_id"),)
+
+
 class SchemaRecord(Base):
     """Registered contract/schema version (spec §8.3)."""
 

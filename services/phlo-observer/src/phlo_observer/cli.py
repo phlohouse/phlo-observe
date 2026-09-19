@@ -142,7 +142,7 @@ def rebuild_projections_cmd(
     import asyncio
 
     from phlo_observer.db import make_engine, make_sessionmaker
-    from phlo_observer.projections import rebuild_projections
+    from phlo_observer.projections import LifecycleRebuildError, rebuild_projections
 
     settings = _settings()
 
@@ -155,7 +155,11 @@ def rebuild_projections_cmd(
         finally:
             await engine.dispose()
 
-    counts = asyncio.run(_rebuild())
+    try:
+        counts = asyncio.run(_rebuild())
+    except LifecycleRebuildError as exc:
+        typer.echo(f"rebuild refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     scope = f"run {run}" if run else "all events"
     typer.echo(
         f"rebuilt projections for {scope}: "

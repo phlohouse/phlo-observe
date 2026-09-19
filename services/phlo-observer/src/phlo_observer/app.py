@@ -38,7 +38,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from phlo_observer import __version__, notify, query_v2
+from phlo_observer import __version__, notify, projections, query_v2
 from phlo_observer.adapters import ADAPTERS, AdapterError, RawPayload
 from phlo_observer.adapters.base import NormalizedBatch, record_normalization
 from phlo_observer.auth import require_admin_token, require_ingest_token, require_read_token
@@ -59,6 +59,7 @@ from phlo_observer.models import (
     Incident,
     IngestFailure,
     Insight,
+    LifecycleRecord,
     Relationship,
     Run,
     SchemaRecord,
@@ -816,6 +817,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         if target not in _INSIGHT_TRANSITIONS:
             raise _http_error(400, f"state must be one of {sorted(_INSIGHT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
+            await projections.lock_projection_writes(session)
             try:
                 iid = uuid.UUID(insight_id)
             except ValueError:
@@ -830,9 +832,23 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     409, f"cannot transition insight from {row.state!r} to {target!r}"
                 )
             row.state = target
-            row.updated_at = utcnow()
+            changed_at = utcnow()
+            row.updated_at = changed_at
+            attributes = dict(row.attributes or {})
             if target == "resolved":
-                row.attributes = {**(row.attributes or {}), "resolved_manually": True}
+                attributes["resolved_manually"] = True
+            else:
+                attributes.pop("resolved_manually", None)
+            row.attributes = attributes
+            session.add(
+                LifecycleRecord(
+                    target_type="insight",
+                    target_id=row.insight_id,
+                    state=target,
+                    transitioned_at=changed_at,
+                    record_metadata={"attributes": row.attributes or {}},
+                )
+            )
             try:
                 # Reopening can collide with another open insight sharing the
                 # dedupe key — the partial unique index decides, not us.
@@ -854,6 +870,7 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         if target not in _INCIDENT_TRANSITIONS:
             raise _http_error(400, f"state must be one of {sorted(_INCIDENT_TRANSITIONS)}")
         async with request.app.state.session_factory() as session, session.begin():
+            await projections.lock_projection_writes(session)
             try:
                 iid = uuid.UUID(incident_id)
             except ValueError:
@@ -868,8 +885,18 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                     409, f"cannot transition incident from {row.state!r} to {target!r}"
                 )
             row.state = target
-            row.updated_at = utcnow()
-            row.resolved_at = utcnow() if target == "resolved" else None
+            changed_at = utcnow()
+            row.updated_at = changed_at
+            row.resolved_at = changed_at if target == "resolved" else None
+            session.add(
+                LifecycleRecord(
+                    target_type="incident",
+                    target_id=row.incident_id,
+                    state=target,
+                    transitioned_at=changed_at,
+                    record_metadata={},
+                )
+            )
             return {"incident_id": incident_id, "state": target}
 
     @app.get("/v2/entities", dependencies=[Depends(require_read_token)])

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from observe_core.timestamps import utcnow
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -19,9 +19,11 @@ from phlo_observer.models import (
     Incident,
     IngestFailure,
     Insight,
+    LifecycleRecord,
     RawEvent,
     Run,
 )
+from phlo_observer.projections import lock_projection_writes
 from phlo_observer.settings import ObserverSettings
 
 _TERMINAL_INSIGHT_STATES = ("resolved", "suppressed", "expired")
@@ -61,6 +63,7 @@ async def run_retention_once(
             # Another instance holds the retention lock; it releases on commit.
             report.skipped = True
             return report
+        await lock_projection_writes(session)
         raw_cutoff = now  # expires_at was stamped at insert
         result = await session.execute(delete(RawEvent).where(RawEvent.expires_at <= raw_cutoff))
         report.raw_events = _rowcount(result)
@@ -78,6 +81,19 @@ async def run_retention_once(
         # items are live signal and never deleted by retention. Quarantined
         # payloads and recorded analyses expire on the same window so failed
         # payloads cannot be replayed forever.
+        for kind, model, identity, states in (
+            ("insight", Insight, Insight.insight_id, _TERMINAL_INSIGHT_STATES),
+            ("incident", Incident, Incident.incident_id, _TERMINAL_INCIDENT_STATES),
+        ):
+            expired = select(identity).where(
+                model.state.in_(states), model.updated_at <= run_cutoff
+            )
+            await session.execute(
+                delete(LifecycleRecord).where(
+                    LifecycleRecord.target_type == kind,
+                    LifecycleRecord.target_id.in_(expired),
+                )
+            )
         result = await session.execute(
             delete(Insight).where(
                 Insight.state.in_(_TERMINAL_INSIGHT_STATES),
