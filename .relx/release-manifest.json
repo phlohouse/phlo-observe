@@ -4,9 +4,9 @@
   "release_mode": "release_set",
   "preparation_base": {
     "ref_name": "main",
-    "commit": "0b5ec81cc74afe439cebc9c4dd65dd05bd6b4821"
+    "commit": "303b432912c9ec391501af096040e805419d35a6"
   },
-  "source_digest": "330f2f9d55d046c17480da8f7b65df15cc21db5adc4a433fa0a86c656302a62b",
+  "source_digest": "8512dff52932f1ce7bc37910677b7f269d5362395f5d8480b0a181c4e751c687",
   "covered_paths": [
     ".relx/release-manifest.json",
     "CHANGELOG.md",
@@ -72,6 +72,12 @@
     "packages/observe-core/tests/test_serialization.py",
     "packages/observe-core/tests/test_spool.py",
     "packages/observe-core/tests/test_v2.py",
+    "packages/observe-query/README.md",
+    "packages/observe-query/pyproject.toml",
+    "packages/observe-query/src/observe_query/__init__.py",
+    "packages/observe-query/src/observe_query/client.py",
+    "packages/observe-query/src/observe_query/tools.py",
+    "packages/observe-query/tests/test_client.py",
     "packages/phlo-observe-sdk/README.md",
     "packages/phlo-observe-sdk/pyproject.toml",
     "packages/phlo-observe-sdk/src/phlo_observe/__init__.py",
@@ -106,6 +112,8 @@
     "services/phlo-observer/migrations/versions/0005_events_received_at_index.py",
     "services/phlo-observer/migrations/versions/0006_fold_state.py",
     "services/phlo-observer/migrations/versions/0007_insight_open_dedupe.py",
+    "services/phlo-observer/migrations/versions/0008_lifecycle_records.py",
+    "services/phlo-observer/migrations/versions/0009_projection_failures.py",
     "services/phlo-observer/pyproject.toml",
     "services/phlo-observer/src/phlo_observer/__init__.py",
     "services/phlo-observer/src/phlo_observer/adapters/__init__.py",
@@ -130,6 +138,7 @@
     "services/phlo-observer/src/phlo_observer/notify.py",
     "services/phlo-observer/src/phlo_observer/projections.py",
     "services/phlo-observer/src/phlo_observer/query_v2.py",
+    "services/phlo-observer/src/phlo_observer/repair.py",
     "services/phlo-observer/src/phlo_observer/retention.py",
     "services/phlo-observer/src/phlo_observer/settings.py",
     "services/phlo-observer/src/phlo_observer/state_engine.py",
@@ -163,11 +172,13 @@
     "services/phlo-observer/tests/test_insight_quality.py",
     "services/phlo-observer/tests/test_insights.py",
     "services/phlo-observer/tests/test_lifecycle.py",
+    "services/phlo-observer/tests/test_lifecycle_preservation.py",
     "services/phlo-observer/tests/test_notify.py",
     "services/phlo-observer/tests/test_observatory.py",
     "services/phlo-observer/tests/test_operations.py",
     "services/phlo-observer/tests/test_order_convergence.py",
     "services/phlo-observer/tests/test_otlp_roundtrip.py",
+    "services/phlo-observer/tests/test_projection_repair.py",
     "services/phlo-observer/tests/test_queries.py",
     "services/phlo-observer/tests/test_resilience.py",
     "services/phlo-observer/tests/test_state_engine.py",
@@ -184,20 +195,49 @@
       "name": "observe-core",
       "path": "packages/observe-core",
       "selected": true,
-      "selection_reason": "package files changed since observe-core/v0.2.0 and produced a release bump",
-      "current_version": "0.2.0",
-      "next_version": "0.3.0",
-      "bump": "minor",
+      "selection_reason": "package files changed since observe-core/v0.3.0 and produced a release bump",
+      "current_version": "0.3.0",
+      "next_version": "0.3.1",
+      "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "observe-core/v0.2.0",
-        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
+        "reference": "observe-core/v0.3.0",
+        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
       },
-      "release_tag": "observe-core/v0.3.0",
+      "release_tag": "observe-core/v0.3.1",
       "changes": [
         {
-          "id": "0b5ec81cc74afe439cebc9c4dd65dd05bd6b4821",
-          "message": "feat(observe-core): per-field suppress predicates on Field (#9)\n\nFields render nothing for values a consumer declares degenerate —\nplaceholder identifiers, sentinel names, a zero that reads as \"no\nmeasurement\" — via Field(suppress=predicate). The predicate sees the\nresolved value before formatting, so applications can drop noise like\nframework-generated anonymous job names without a full custom\nformatter or a change to the canonical event."
+          "id": "b0a837115d542c5cceb9ebe29de1d37c2636d169",
+          "message": "fix(observe-core): redact deeply nested error details (#11)"
+        },
+        {
+          "id": "1ee55465d592afd044c774b80c303372e3dface0",
+          "message": "fix(observe-core): retain spool delivery per destination (#12)\n\n* Fix per-destination spool replay\n\n* Harden shared destination spool capacity\n\n* fix(observe-core): serialize destination spool ownership"
+        },
+        {
+          "id": "1e79d10cb7902355ffab4e4aa5ffce1adaa5397e",
+          "message": "fix(observe-core): wait for all pre-flush deliveries (#14)\n\n* fix worker flush completion barrier\n\n* harden worker flush watermark\n\n* bound drain flush timeout"
+        }
+      ]
+    },
+    {
+      "name": "observe-query",
+      "path": "packages/observe-query",
+      "selected": true,
+      "selection_reason": "package files changed since the start of history and produced a release bump",
+      "current_version": "0.1.0",
+      "next_version": "0.2.0",
+      "bump": "minor",
+      "baseline": {
+        "kind": "first_release",
+        "reference": null,
+        "commit": null
+      },
+      "release_tag": "observe-query/v0.2.0",
+      "changes": [
+        {
+          "id": "db264286ac363035a34a15afc91af6a71f95f3f7",
+          "message": "feat(observer): add V2 operations — search, SSE stream, alert webhooks, quarantine admin\n\n- GET /v2/search: Postgres ILIKE over event name, error message, asset,\n  table, service plus existing structured filters (spec 23)\n- GET /v2/stream: SSE notification channel with bounded subscriber set;\n  run.changed/insight.opened/incident.updated published from ingest (§26)\n- alert_webhook_urls setting: fire-and-forget insight/incident POSTs,\n  tracked task set, never blocks ingest (§34)\n- observe_ingest_failures quarantine: payload-level normalization\n  failures land here; GET /v2/admin/quarantine lists them and\n  POST /v2/admin/quarantine/{id}/replay re-runs the adapter (§34)\n- admin_tokens scope: separate admin authorization with read-token\n  fallback (§19.4 keeps agent reads read-only)\n- new observe-query package: ObserverClient read-only typed client +\n  AGENT_TOOLS dispatch table for the spec 19.2 tool surface"
         }
       ]
     },
@@ -206,32 +246,45 @@
       "path": "packages/phlo-observe-sdk",
       "selected": true,
       "selection_reason": "cascade bump: depends on a package with a version bump",
-      "current_version": "0.2.0",
-      "next_version": "0.2.1",
+      "current_version": "0.2.1",
+      "next_version": "0.2.2",
       "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observe/v0.2.0",
-        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
+        "reference": "phlo-observe/v0.2.1",
+        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
       },
-      "release_tag": "phlo-observe/v0.2.1",
+      "release_tag": "phlo-observe/v0.2.2",
       "changes": []
     },
     {
       "name": "phlo-observer",
       "path": "services/phlo-observer",
       "selected": true,
-      "selection_reason": "cascade bump: depends on a package with a version bump",
-      "current_version": "0.2.0",
-      "next_version": "0.2.1",
+      "selection_reason": "package files changed since phlo-observer/v0.2.1 and produced a release bump",
+      "current_version": "0.2.1",
+      "next_version": "0.2.2",
       "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observer/v0.2.0",
-        "commit": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1"
+        "reference": "phlo-observer/v0.2.1",
+        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
       },
-      "release_tag": "phlo-observer/v0.2.1",
-      "changes": []
+      "release_tag": "phlo-observer/v0.2.2",
+      "changes": [
+        {
+          "id": "79e260f25a6c7e193912a1d1c6cbd3a945454511",
+          "message": "fix(observer): preserve lifecycle decisions and identities during rebuild (#15)\n\n* Preserve lifecycle state across projection rebuilds\n\n* Harden lifecycle identity matching\n\n* Preserve lifecycle identities and refuse ambiguous replay\n\n* Close replayed episodes before restoring reopened state"
+        },
+        {
+          "id": "f0cd80124c6de4f457cba1911c2814a0c22fee98",
+          "message": "fix(observer): publish local notifications only after commit (#16)"
+        },
+        {
+          "id": "46b0d06f78a6e63aa2e561f0586627d7cd4fc4d3",
+          "message": "fix(observer): track and repair durable projection gaps (#17)"
+        }
+      ]
     }
   ],
   "required_dependency_changes": []

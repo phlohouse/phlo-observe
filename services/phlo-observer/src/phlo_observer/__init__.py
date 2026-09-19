@@ -1,3 +1,3 @@
 """phlo-observer: ingestion, normalization, correlation and query service."""
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
