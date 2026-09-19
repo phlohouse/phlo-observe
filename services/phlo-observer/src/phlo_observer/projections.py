@@ -19,7 +19,6 @@ from observe_core.timestamps import utcnow
 from sqlalchemy import delete, func, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import make_transient
 
 from phlo_observer import insights
 from phlo_observer import state_engine as se
@@ -30,6 +29,7 @@ from phlo_observer.models import (
     Event,
     Incident,
     Insight,
+    LifecycleRecord,
     Relationship,
     Run,
 )
@@ -52,20 +52,40 @@ async def _snapshot_lifecycle(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     insights_rows = (await session.execute(select(Insight))).scalars().all()
     incident_rows = (await session.execute(select(Incident))).scalars().all()
+    journal_ids = {
+        record.target_id
+        for record in (await session.execute(select(LifecycleRecord))).scalars().all()
+    }
     return (
         [
             {
-                "row": row,
+                "id": row.insight_id,
+                "rule_id": row.rule_id,
+                "rule_version": row.rule_version,
+                "dedupe_key": row.dedupe_key,
+                "entity_id": row.entity_id,
                 "state": row.state,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
                 "manual": row.state != "open"
-                or bool((row.attributes or {}).get("resolved_manually")),
+                or bool((row.attributes or {}).get("resolved_manually"))
+                or row.insight_id in journal_ids,
                 "producers": _producer_ids(row),
                 "attributes": deepcopy(row.attributes or {}),
             }
             for row in insights_rows
         ],
         [
-            {"row": row, "manual": row.state != "open", "members": set(row.insight_ids or [])}
+            {
+                "id": row.incident_id,
+                "title": row.title,
+                "state": row.state,
+                "resolved_at": row.resolved_at,
+                "updated_at": row.updated_at,
+                "manual": row.state != "open",
+                "members": set(row.insight_ids or []),
+                "attributes": deepcopy(row.attributes or {}),
+            }
             for row in incident_rows
         ],
     )
@@ -78,41 +98,59 @@ async def _restore_lifecycle(
 ) -> None:
     """Restore operator-owned identity/state after deterministic replay."""
     current = list((await session.execute(select(Insight))).scalars())
-    mappings: dict[str, str] = {}
-    used: set[Any] = set()
-    for old in (item for item in insight_snapshot if item["manual"]):
-        row = old["row"]
+    graph: dict[Any, list[Insight]] = {}
+    reverse: dict[Any, list[Any]] = {}
+    for old in insight_snapshot:
         candidates = [
             fresh
             for fresh in current
-            if fresh.rule_id == row.rule_id
-            and fresh.rule_version == row.rule_version
-            and fresh.dedupe_key == row.dedupe_key
-            and fresh.entity_id == row.entity_id
+            if fresh.rule_id == old["rule_id"]
+            and fresh.rule_version == old["rule_version"]
+            and fresh.dedupe_key == old["dedupe_key"]
+            and fresh.entity_id == old["entity_id"]
             and old["producers"] & _producer_ids(fresh)
         ]
-        candidates = [fresh for fresh in candidates if fresh.insight_id not in used]
-        if len(candidates) > 1:
-            raise LifecycleRebuildError(
-                f"ambiguous manual insight episode {row.insight_id}; rebuild rolled back"
-            )
+        graph[old["id"]] = candidates
+        for fresh in candidates:
+            reverse.setdefault(fresh.insight_id, []).append(old["id"])
+    if any(len(v) > 1 for v in graph.values()) or any(len(v) > 1 for v in reverse.values()):
+        raise LifecycleRebuildError("ambiguous lifecycle insight identity; rebuild rolled back")
+    mappings: dict[str, str] = {}
+    for old in insight_snapshot:
+        candidates = graph[old["id"]]
         if candidates:
             fresh = candidates[0]
-            used.add(fresh.insight_id)
-            mappings[str(fresh.insight_id)] = str(row.insight_id)
-            fresh.insight_id = row.insight_id
-            fresh.state = row.state
-            fresh.created_at = row.created_at
-            fresh.updated_at = row.updated_at
-            fresh.attributes = deepcopy(row.attributes or {}) | {
-                k: v for k, v in (fresh.attributes or {}).items() if k not in row.attributes
-            }
-        else:
-            # Evidence may have expired; retaining an evidenced operator row is
-            # safer than silently discarding a human decision.
-            make_transient(row)
-            session.add(row)
-            mappings[str(row.insight_id)] = str(row.insight_id)
+            mappings[str(fresh.insight_id)] = str(old["id"])
+            fresh.insight_id = old["id"]
+            if old["manual"]:
+                fresh.state = old["state"]
+                fresh.created_at = old["created_at"]
+                fresh.updated_at = old["updated_at"]
+                if old["attributes"].get("resolved_manually"):
+                    fresh.attributes = {
+                        **(fresh.attributes or {}),
+                        "resolved_manually": True,
+                    }
+        elif old["manual"]:
+            session.add(
+                Insight(
+                    insight_id=old["id"],
+                    rule_id=old["rule_id"],
+                    rule_version=old["rule_version"],
+                    title="preserved lifecycle record",
+                    severity="warn",
+                    state=old["state"],
+                    entity_id=old["entity_id"],
+                    evidence_event_ids=[],
+                    evidence_metric_ids=[],
+                    recommended_action=None,
+                    recommended_action_verified=0,
+                    created_at=old["created_at"],
+                    updated_at=old["updated_at"],
+                    dedupe_key=old["dedupe_key"],
+                    attributes=old["attributes"],
+                )
+            )
     await session.flush()
     incidents = list((await session.execute(select(Incident))).scalars())
     for incident in incidents:
@@ -122,25 +160,22 @@ async def _restore_lifecycle(
                 member["iid"] = mappings[str(member["iid"])]
         incident.attributes = {**(incident.attributes or {}), "members": members}
         incident.insight_ids = [m.get("iid") for m in members if m.get("iid")]
-    for old in (item for item in incident_snapshot if item["manual"]):
-        row = old["row"]
+    for old in incident_snapshot:
         old_members = {mappings.get(str(i), str(i)) for i in old["members"]}
         candidates = [
             incident for incident in incidents if set(incident.insight_ids or []) == old_members
         ]
         if len(candidates) > 1:
             raise LifecycleRebuildError(
-                f"ambiguous manual incident episode {row.incident_id}; rebuild rolled back"
+                "ambiguous lifecycle incident identity; rebuild rolled back"
             )
         if candidates:
             fresh = candidates[0]
-            fresh.incident_id = row.incident_id
-            fresh.state = row.state
-            fresh.updated_at = row.updated_at
-            fresh.resolved_at = row.resolved_at
-        else:
-            make_transient(row)
-            session.add(row)
+            fresh.incident_id = old["id"]
+            if old["manual"]:
+                fresh.state = old["state"]
+                fresh.updated_at = old["updated_at"]
+                fresh.resolved_at = old["resolved_at"]
 
 
 _PROJECTION_LOCK_KEY = 0x70686C70

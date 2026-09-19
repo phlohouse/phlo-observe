@@ -34,6 +34,13 @@ observe()/event() call
   -> background worker batches
   -> drains: console / JSONL / HTTP(observer) / OTLP
   -> critical events also append to local spool; replayed on next flush
+
+Projection rebuilds preserve insight and incident identities by matching the
+complete producer and membership timelines under the shared projection lock.
+Operator lifecycle decisions are journaled separately from derived rows. If a
+manual history can map to more than one regenerated episode (or vice versa),
+the rebuild fails and rolls back rather than guessing; capped or expired
+evidence is retained conservatively for operator review.
 ```
 
 ## External telemetry ingestion

@@ -16,7 +16,8 @@ import pytest
 import workloads as wl
 from observe_core.timestamps import utcnow
 from phlo_observer.cli import app as cli_app
-from phlo_observer.models import Event, RawEvent
+from phlo_observer.models import Event, Incident, Insight, RawEvent
+from phlo_observer.projections import rebuild_projections
 from phlo_observer.retention import run_retention_once
 from phlo_observer.settings import ObserverSettings
 from sqlalchemy import func, select, text
@@ -24,6 +25,38 @@ from test_equivalence import _snapshot, diff_snapshots
 from typer.testing import CliRunner
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_full_rebuild_preserves_open_lifecycle_ids_and_members(
+    client: Any, session_factory: Any
+) -> None:
+    """Derived rows keep identity across repeated rebuilds."""
+    event = {
+        "schema_version": "1.0",
+        "event_id": str(uuid.uuid4()),
+        "event": "pipeline.run",
+        "category": "pipeline",
+        "outcome": "failure",
+        "severity": "critical",
+        "delivery": "telemetry",
+        "observed_at": "2025-01-01T00:00:00Z",
+        "service": {"name": "test"},
+        "correlation": {"run_id": "stable-run"},
+        "attributes": {},
+    }
+    response = await client.post("/v1/events", json=event)
+    assert response.status_code == 202
+    async with session_factory() as session:
+        insight = await session.scalar(select(Insight))
+        incident = await session.scalar(select(Incident))
+        assert insight and incident
+        ids = (insight.insight_id, incident.incident_id, list(incident.insight_ids or []))
+    async with session_factory() as session, session.begin():
+        await rebuild_projections(session)
+    async with session_factory() as session:
+        rebuilt = (await session.scalar(select(Insight)), await session.scalar(select(Incident)))
+        assert rebuilt[0] and rebuilt[1]
+        assert (rebuilt[0].insight_id, rebuilt[1].incident_id, rebuilt[1].insight_ids) == ids
 
 
 async def test_archive_delete_restore_rebuild_roundtrip(
