@@ -14,6 +14,7 @@ prek install          # git pre-commit hooks (ruff, ty, lock check)
 
 - `packages/observe-core` — generic event library (`observe_core`)
 - `packages/phlo-observe-sdk` — Phlo SDK (`phlo_observe`)
+- `packages/observe-query` — read client and agent tools (`observe_query`)
 - `services/phlo-observer` — ingestion/query service (`phlo_observer`)
 - `schemas/` — canonical JSON Schemas
 - `tests/` — cross-component contract, integration and performance tests

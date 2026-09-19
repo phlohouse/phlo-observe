@@ -84,7 +84,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["packages/observe-core/src", "packages/phlo-observe-sdk/src", "services/phlo-observer/src"]
+source = ["packages/observe-core/src", "packages/observe-query/src", "packages/phlo-observe-sdk/src", "services/phlo-observer/src"]
 branch = true
 
 [tool.coverage.report]

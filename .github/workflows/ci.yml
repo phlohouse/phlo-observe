@@ -31,12 +31,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [core, sdk, contract, integration, performance]
+        suite: [core, sdk, query, contract, integration, performance]
         include:
           - suite: core
             testpaths: packages/observe-core/tests
           - suite: sdk
             testpaths: packages/phlo-observe-sdk/tests
+          - suite: query
+            testpaths: packages/observe-query/tests
           - suite: contract
             testpaths: tests/contract
           - suite: integration

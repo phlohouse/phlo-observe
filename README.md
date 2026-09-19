@@ -2,13 +2,16 @@
 
 A coherent observability system for Phlo and related Python applications.
 
-V1 is intentionally split into three components:
+The system has four components:
 
 - **`observe-core`** — generic wide-event observability, context propagation, structured errors, buffering, redaction, sampling and drains.
 - **`phlo-observe-sdk`** — Phlo-specific contexts and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino.
+- **`observe-query`** — read-only query client and agent tools for investigation.
 - **`phlo-observer`** — central ingestion, normalization, correlation, persistence and query service for Observatory and downstream telemetry systems.
 
-The implementation contract is in [`docs/V1_SPEC.md`](docs/V1_SPEC.md).
+The implementation contracts are in [`docs/V1_SPEC.md`](docs/V1_SPEC.md) and
+[`docs/V2_SPEC.md`](docs/V2_SPEC.md). See [V2 features](docs/v2.md) for the
+query API, state engine, insights, and operator workflows.
 
 ## First event in under five minutes
 
@@ -63,6 +66,7 @@ normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
 
 - `packages/observe-core` — generic library (context, queue, drains, spool)
 - `packages/phlo-observe-sdk` — Phlo contexts + integrations
+- `packages/observe-query` — read-only query client + agent tools
 - `services/phlo-observer` — FastAPI + Postgres service + Alembic migrations
 - `schemas/` — canonical JSON Schemas
 - `tests/{contract,integration,performance}` — cross-component suites
@@ -70,8 +74,10 @@ normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
 
 ## Status
 
-V1 implemented: core pipeline, SDK integrations, and the observer service are
-tested (250+ tests incl. real-Postgres + live-HTTP end-to-end) and CI-gated.
+V1 and V2 are implemented. CI covers all four packages, schema contracts,
+real-Postgres integration tests, live-HTTP end-to-end tests, and performance
+checks. The [hardening report](docs/V2_HARDENING.md) records measured behavior
+and operational limitations.
 
 ## Audit versus observability
 
