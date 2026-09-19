@@ -169,6 +169,39 @@ def rebuild_projections_cmd(
     )
 
 
+@app.command(name="repair-projections")
+def repair_projections_cmd() -> None:
+    """Repair recorded projection gaps with a full maintenance rebuild.
+
+    Derived-state writes wait for the rebuild. Records clear only on a
+    successful commit; expired evidence or ambiguous lifecycle identities
+    leave the pending failures intact for operator investigation.
+    """
+    import asyncio
+    import json
+
+    from phlo_observer.db import make_engine, make_sessionmaker
+    from phlo_observer.repair import repair_projections
+
+    settings = _settings()
+
+    async def repair() -> dict:
+        engine = make_engine(settings)
+        try:
+            factory = make_sessionmaker(engine)
+            async with factory() as session, session.begin():
+                return await repair_projections(session)
+        finally:
+            await engine.dispose()
+
+    try:
+        report = asyncio.run(repair())
+    except (ValueError, RuntimeError) as exc:
+        typer.echo(f"repair failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(report, sort_keys=True))
+
+
 @app.command()
 def archive(
     out: Annotated[Path, typer.Argument(help="Output file (JSONL of canonical events)")],

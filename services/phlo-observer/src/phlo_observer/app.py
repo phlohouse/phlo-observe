@@ -51,6 +51,9 @@ from phlo_observer.metrics import (
     INGEST_EVENTS,
     NORMALIZATION_DURATION,
     PERSIST_DURATION,
+    PROJECTION_OLDEST_AGE,
+    PROJECTION_PENDING_BATCHES,
+    PROJECTION_PENDING_EVENTS,
     QUEUE_DEPTH,
 )
 from phlo_observer.models import (
@@ -64,6 +67,7 @@ from phlo_observer.models import (
     Run,
     SchemaRecord,
 )
+from phlo_observer.repair import projection_status
 from phlo_observer.retention import retention_loop
 from phlo_observer.settings import ObserverSettings, load_settings
 from phlo_observer.store import (
@@ -1262,6 +1266,12 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
                 }
             )
 
+    @app.get("/v2/projections/status", dependencies=[Depends(require_read_token)])
+    async def projection_status_endpoint(request: Request) -> dict[str, Any]:
+        """Report durable projection gaps separately from ingest readiness."""
+        async with request.app.state.session_factory() as session:
+            return await projection_status(session)
+
     metrics_deps = [] if settings.metrics_public else [Depends(require_read_token)]
 
     @app.get("/metrics", dependencies=metrics_deps)
@@ -1273,6 +1283,12 @@ def create_app(settings: ObserverSettings | None = None) -> FastAPI:
         # used for self-observation; report its depth (0 when disabled).
         runtime = getattr(request.app.state, "observe_runtime", None)
         QUEUE_DEPTH.set(runtime.queue_depth() if runtime is not None else 0)
+        async with request.app.state.session_factory() as session:
+            projection_health = await projection_status(session)
+        PROJECTION_PENDING_BATCHES.set(projection_health["pending_batches"])
+        PROJECTION_PENDING_EVENTS.set(projection_health["pending_events"])
+        oldest = projection_health["oldest_failure_at"]
+        PROJECTION_OLDEST_AGE.set(max(0.0, (utcnow() - oldest).total_seconds()) if oldest else 0)
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
     return app

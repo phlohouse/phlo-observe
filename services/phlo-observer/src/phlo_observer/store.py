@@ -25,7 +25,7 @@ from sqlalchemy.orm import Session, SessionTransaction
 
 from phlo_observer import alerts, insights, metrics, notify, projections
 from phlo_observer.correlate import correlation_method
-from phlo_observer.models import Event, RawEvent, Run, SchemaRecord
+from phlo_observer.models import Event, ProjectionFailure, RawEvent, Run, SchemaRecord
 
 logger = logging.getLogger("phlo_observer.store")
 
@@ -487,9 +487,18 @@ async def persist_events(
                     stream, pending_notifications, pending_alerts, alert_urls, alert_tasks
                 ),
             )
-        except Exception:
-            # Fail-open covers code bugs too, not just DB errors: derived
-            # state is rebuildable, durable events must not be lost.
+        except Exception as exc:
+            # Preserve canonical events and record the gap in the same outer
+            # transaction. Duplicate delivery cannot repair skipped folds.
+            session.add(
+                ProjectionFailure(
+                    occurred_at=received_at,
+                    event_ids=list(result.event_ids),
+                    event_count=len(accepted_rows),
+                    error_type=type(exc).__name__[:128],
+                )
+            )
+            _after_commit(session, metrics.PROJECTION_FAILURES.inc)
             logger.warning(
                 "correlation/projection update failed for %d events",
                 len(accepted_rows),

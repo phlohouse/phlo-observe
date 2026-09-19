@@ -390,3 +390,17 @@ class IngestFailure(Base):
     replayed_at: Mapped[Any | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_observe_ingest_failures_received", "received_at"),)
+
+
+class ProjectionFailure(Base):
+    """Durable batch whose canonical events outlived a failed projection pass."""
+
+    __tablename__ = "observe_projection_failures"
+
+    failure_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    occurred_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_ids: Mapped[list[str]] = mapped_column(JsonColumn, nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    error_type: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    __table_args__ = (Index("ix_projection_failures_occurred", "occurred_at"),)

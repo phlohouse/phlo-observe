@@ -62,3 +62,20 @@ QUEUE_DEPTH = Gauge(
     "phlo_observer_queue_depth",
     "Internal ingestion queue depth",
 )
+
+PROJECTION_FAILURES = Counter(
+    "phlo_observer_projection_failures_total",
+    "Committed batches whose derived-state update failed",
+)
+PROJECTION_PENDING_BATCHES = Gauge(
+    "phlo_observer_projection_pending_batches",
+    "Durable failed batches awaiting explicit projection repair",
+)
+PROJECTION_PENDING_EVENTS = Gauge(
+    "phlo_observer_projection_pending_events",
+    "Events in durable failed batches awaiting projection repair",
+)
+PROJECTION_OLDEST_AGE = Gauge(
+    "phlo_observer_projection_oldest_failure_age_seconds",
+    "Age of the oldest outstanding projection failure, zero when current",
+)
