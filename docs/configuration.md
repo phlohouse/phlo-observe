@@ -72,6 +72,23 @@ Security notes:
 | `SPOOL_MAX_BYTES` / `SPOOL_SEGMENT_MAX_BYTES` | `1 GiB` / `32 MiB` | bounded spool |
 | `SPOOL_ON_FULL` | `drop_oldest` | `drop_oldest` / `drop_newest` |
 | `SPOOL_REPLAY_INTERVAL_S` | `30` | how often the worker replays the spool to remote drains |
+
+Critical-event replay is durable per remote destination. Each destination gets a
+stable, opaque SHA-256 directory derived from its drain identity; endpoint URLs
+and credentials never appear in spool filenames. The configured
+`SPOOL_MAX_BYTES` budget is shared across destination directories, so fan-out
+cannot multiply the disk bound. Events admitted while the queue is full are
+written to every configured remote destination spool. Events rejected by one
+remote drain are written only to that drain's spool, so a healthy destination
+cannot consume another destination's backlog.
+
+The old root-level `seg-*.jsonl` layout is a legacy spool with no destination
+identity. It is retained for explicit `Spool.replay(...)` or the replay CLI,
+but automatic runtime replay does not guess an endpoint for it. Removing or
+reconfiguring a destination changes its identity; its old directory remains
+on disk for operator recovery and is never replayed to the replacement
+endpoint. Inspect and migrate such segments only after confirming the intended
+destination.
 | `CAPTURE_STACKTRACE` | `true` | include tracebacks on error events; `observe(capture_stacktrace=...)` overrides per operation |
 | `MAX_EVENT_BYTES` / `MAX_DEPTH` | `262144` / `8` | event size cap + normalization depth |
 | `REDACT_KEYS` | — | extra exact key names to redact (case-insensitive; comma-separated or JSON list) |
