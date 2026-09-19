@@ -295,6 +295,9 @@ class WorkerBackend:
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=settings.queue_capacity)
         self._stop = threading.Event()
         self._closed = False
+        self._progress = threading.Condition()
+        self._admitted = 0
+        self._completed = 0
         self._workers = [
             threading.Thread(target=self._worker_loop, name=f"observe-core-{i}", daemon=True)
             for i in range(max(1, settings.worker_count))
@@ -312,12 +315,14 @@ class WorkerBackend:
 
     def emit(self, event: CanonicalEvent) -> EmitResult:
         """Enqueue a canonical event, applying the configured drop policy."""
-        try:
-            self._queue.put_nowait(event)
-            self.stats.incr("enqueued")
-            return EmitResult(accepted=True, enqueued=True)
-        except queue.Full:
-            pass
+        with self._progress:
+            try:
+                self._queue.put_nowait(event)
+                self._admitted += 1
+                self.stats.incr("enqueued")
+                return EmitResult(accepted=True, enqueued=True)
+            except queue.Full:
+                pass
         if event.delivery == Delivery.CRITICAL:
             return self._spool_critical(event)
         if self.settings.drop_policy == "drop_oldest":
@@ -333,17 +338,26 @@ class WorkerBackend:
                         if evicted.delivery == Delivery.DEBUG
                         else "dropped_telemetry"
                     )
-            try:
-                self._queue.put_nowait(event)
-                self.stats.incr("enqueued")
-                return EmitResult(accepted=True, enqueued=True)
-            except queue.Full:
-                if event.delivery == Delivery.CRITICAL:
-                    return self._spool_critical(event)
-                self._drop_noncritical(event.delivery)
-                return EmitResult(accepted=False, dropped=True, reason="queue_full")
+                self._mark_completed()
+            with self._progress:
+                try:
+                    self._queue.put_nowait(event)
+                    self._admitted += 1
+                    self.stats.incr("enqueued")
+                    return EmitResult(accepted=True, enqueued=True)
+                except queue.Full:
+                    if event.delivery == Delivery.CRITICAL:
+                        return self._spool_critical(event)
+                    self._drop_noncritical(event.delivery)
+                    return EmitResult(accepted=False, dropped=True, reason="queue_full")
         self._drop_noncritical(event.delivery)
         return EmitResult(accepted=False, dropped=True, reason="queue_full")
+
+    def _mark_completed(self, count: int = 1) -> None:
+        """Advance the completion barrier for delivered or evicted events."""
+        with self._progress:
+            self._completed += count
+            self._progress.notify_all()
 
     def _drop_noncritical(self, delivery: Delivery) -> None:
         from observe_core.runtime import TelemetryError  # noqa: PLC0415
@@ -413,10 +427,12 @@ class WorkerBackend:
                     break
                 if item is _STOP:
                     self.delivery.deliver(batch)
+                    self._mark_completed(len(batch))
                     self.delivery.flush_drains()
                     return
                 if isinstance(item, _FlushRequest):
                     self.delivery.deliver(batch)
+                    self._mark_completed(len(batch))
                     batch = []
                     self.delivery.flush_drains()
                     self.stats.incr("flushes")
@@ -425,6 +441,7 @@ class WorkerBackend:
                 batch.append(item)
             if batch:
                 self.delivery.deliver(batch)
+                self._mark_completed(len(batch))
                 batch = []
             self.delivery.maybe_replay()
             if self._stop.is_set() and self._queue.empty():
@@ -447,6 +464,8 @@ class WorkerBackend:
             return FlushResult(ok=True)
         budget = 5.0 if timeout is None else timeout
         deadline = time.monotonic() + budget
+        with self._progress:
+            target = self._admitted
         requests = []
         for _ in self._workers:
             req = _FlushRequest()
@@ -457,6 +476,14 @@ class WorkerBackend:
             requests.append(req)
         remaining = deadline - time.monotonic()
         ok = all(req.done.wait(max(0.0, remaining)) for req in requests)
+        if ok:
+            with self._progress:
+                while self._completed < target:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        ok = False
+                        break
+                    self._progress.wait(remaining)
         return FlushResult(ok=ok, pending=self._queue.qsize())
 
     def health(self) -> BackendHealth:

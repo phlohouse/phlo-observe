@@ -26,6 +26,23 @@ class _SlowDrain(MemoryDrain):
         self.gate.wait(timeout=10)
 
 
+class _FirstCallSlowDrain(MemoryDrain):
+    """Block only the first worker delivery, allowing the second to run."""
+
+    def __init__(self, gate: threading.Event, entered: threading.Event) -> None:
+        super().__init__()
+        self.gate = gate
+        self.entered = entered
+        self.calls = 0
+
+    def emit_batch(self, events: Sequence[CanonicalEvent]) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            self.entered.set()
+            self.gate.wait(timeout=10)
+        super().emit_batch(events)
+
+
 def _stall_runtime(make_runtime, gate: threading.Event, **kw) -> Runtime:
     """Runtime whose worker is wedged inside a slow drain."""
     kw.setdefault("queue_capacity", 5)
@@ -88,6 +105,41 @@ def test_drop_oldest_preserves_flush_sentinels(make_runtime):
         assert not req.done.is_set()
         gate.set()
         assert req.done.wait(5.0), "flush sentinel was lost to drop_oldest"
+    finally:
+        gate.set()
+        shutdown(2.0)
+
+
+def test_flush_waits_for_all_workers_and_supports_concurrent_calls(make_runtime):
+    """Flush barriers include an event held by another worker."""
+    gate = threading.Event()
+    entered = threading.Event()
+    rt = make_runtime(worker_count=2, queue_capacity=20, flush_interval_ms=10)
+    slow = _FirstCallSlowDrain(gate, entered)
+    rt.drains.clear()
+    rt.drains.append(slow)
+    rt._backend.delivery.drains = rt.drains
+    try:
+        event("warmup.fill")
+        assert entered.wait(2.0)
+        event("application.log")
+
+        results: list[bool] = []
+        threads = [threading.Thread(target=lambda: results.append(flush(0.1))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(1.0)
+        assert results == [False, False]
+
+        gate.set()
+        results.clear()
+        threads = [threading.Thread(target=lambda: results.append(flush(2.0))) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2.0)
+        assert results == [True, True]
     finally:
         gate.set()
         shutdown(2.0)
