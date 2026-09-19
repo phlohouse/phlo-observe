@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import datetime as dt
@@ -9,15 +10,18 @@ import hashlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from observe_core.models import EventEnvelope
 from observe_core.timestamps import parse_rfc3339, utcnow
 from sqlalchemy import asc, select
+from sqlalchemy import event as sa_event
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session, SessionTransaction
 
 from phlo_observer import alerts, insights, metrics, notify, projections
 from phlo_observer.correlate import correlation_method
@@ -193,6 +197,75 @@ async def _link_traces(session: AsyncSession, correlated: list[Event]) -> None:
             row.correlation_method = "trace_id"
 
 
+def _after_commit(session: AsyncSession, callback: Callable[[], None]) -> None:
+    """Defer external effects until the owning transaction commits.
+
+    Register only after the projection savepoint succeeds. A nested commit
+    must not dispatch effects, and closing or rolling back the outer
+    transaction must discard them even when the session is reused.
+    """
+    sync = session.sync_session
+    key = "phlo_observer_commit_callbacks"
+    if not sync.info.get("phlo_observer_commit_listeners"):
+
+        def committed(current: Session) -> None:
+            if current.in_nested_transaction():
+                return
+            for _, pending in current.info.pop(key, []):
+                try:
+                    pending()
+                except Exception:
+                    logger.exception("post-commit notification failed")
+
+        def ended(current: Session, transaction: SessionTransaction) -> None:
+            if transaction.parent is None:
+                current.info.pop(key, None)
+
+        def rolled_back(current: Session, transaction: SessionTransaction) -> None:
+            def survives(owner: SessionTransaction) -> bool:
+                ancestor: SessionTransaction | None = owner
+                while ancestor is not None:
+                    if ancestor is transaction:
+                        return False
+                    ancestor = ancestor.parent
+                return True
+
+            current.info[key] = [
+                (owner, pending) for owner, pending in current.info.get(key, []) if survives(owner)
+            ]
+
+        sa_event.listen(sync, "after_soft_rollback", rolled_back)
+        sa_event.listen(sync, "after_commit", committed)
+        sa_event.listen(sync, "after_transaction_end", ended)
+        sync.info["phlo_observer_commit_listeners"] = True
+    owner = sync.get_nested_transaction() or sync.get_transaction()
+    if owner is None:
+        raise RuntimeError("notification requires an active transaction")
+    sync.info.setdefault(key, []).append((owner, callback))
+
+
+def _dispatch_notifications(
+    stream: Any,
+    messages: list[dict[str, Any]],
+    alert_intents: list[tuple[dict[str, Any], str]],
+    alert_urls: list[str] | None,
+    alert_tasks: set[Any] | None,
+) -> None:
+    """Publish committed changes locally and schedule best-effort alerts."""
+    if stream is not None:
+        for message in messages:
+            stream.publish(message["kind"], message["data"])
+    if alert_urls and alert_tasks is not None:
+        for payload, cooldown_key in alert_intents:
+            task = asyncio.create_task(
+                alerts.notify(
+                    alert_urls, "insight", payload, tasks=alert_tasks, cooldown_key=cooldown_key
+                )
+            )
+            alert_tasks.add(task)
+            task.add_done_callback(alert_tasks.discard)
+
+
 async def persist_events(
     session: AsyncSession,
     event_dicts: list[dict[str, Any]],
@@ -324,10 +397,9 @@ async def persist_events(
                 # after commit (spec §26/§38). ``instance_id`` tags the origin
                 # so the publishing instance doesn't double-deliver.
                 pending_notifications: list[dict[str, Any]] = []
+                pending_alerts: list[tuple[dict[str, Any], str]] = []
 
                 def _publish(kind: str, data: dict[str, Any]) -> None:
-                    if stream is not None:
-                        stream.publish(kind, data)
                     pending_notifications.append({"kind": kind, "data": data})
 
                 # A replica with no local subscribers still emits notifications
@@ -359,18 +431,17 @@ async def persist_events(
                                 },
                             )
                         if alert_urls and alert_tasks is not None:
-                            await alerts.notify(
-                                alert_urls,
-                                "insight",
-                                {
-                                    "insight_id": str(insight.insight_id),
-                                    "rule": insight.rule_id,
-                                    "title": insight.title,
-                                    "severity": insight.severity,
-                                    "entity": insight.entity_id,
-                                },
-                                tasks=alert_tasks,
-                                cooldown_key=insight.dedupe_key or str(insight.insight_id),
+                            pending_alerts.append(
+                                (
+                                    {
+                                        "insight_id": str(insight.insight_id),
+                                        "rule": insight.rule_id,
+                                        "title": insight.title,
+                                        "severity": insight.severity,
+                                        "entity": insight.entity_id,
+                                    },
+                                    insight.dedupe_key or str(insight.insight_id),
+                                )
                             )
 
                 for event in ordered_events:
@@ -410,6 +481,12 @@ async def persist_events(
                     if packed is not None:
                         await notify.emit_notify(session, packed)
                 await session.flush()
+            _after_commit(
+                session,
+                lambda: _dispatch_notifications(
+                    stream, pending_notifications, pending_alerts, alert_urls, alert_tasks
+                ),
+            )
         except Exception:
             # Fail-open covers code bugs too, not just DB errors: derived
             # state is rebuildable, durable events must not be lost.
