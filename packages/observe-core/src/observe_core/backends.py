@@ -146,6 +146,26 @@ class DrainDelivery:
         self.last_ok_at: float | None = None
         self.last_error: str | None = None
         self._last_replay = 0.0
+        self._destination_spools: dict[str, Spool] = {}
+
+    @staticmethod
+    def _destination_identity(drain: Drain) -> str:
+        """Return a stable identity without putting the endpoint in filenames."""
+        configured = getattr(drain, "spool_identity", None)
+        if configured:
+            return str(configured)
+        return f"{getattr(drain, 'name', type(drain).__name__)}\0{getattr(drain, 'endpoint', '')}"
+
+    def _spool_for(self, drain: Drain) -> Spool | None:
+        if self.spool is None:
+            return None
+        identity = self._destination_identity(drain)
+        if identity not in self._destination_spools:
+            destination = getattr(self.spool, "destination", None)
+            if not callable(destination):
+                return None
+            self._destination_spools[identity] = destination(identity)
+        return self._destination_spools[identity]
 
     def endpoints(self) -> list[str]:
         """Remote drain endpoints, for health surfaces."""
@@ -155,11 +175,25 @@ class DrainDelivery:
             if getattr(drain, "is_remote", False)
         ]
 
-    def spool_event(self, event: CanonicalEvent) -> bool:
+    def spool_event(self, event: CanonicalEvent, drain: Drain | None = None) -> bool:
         """Append a critical event to the spool; count failures."""
         from observe_core.runtime import TelemetryError  # noqa: PLC0415
 
-        if self.spool is not None and self.spool.append(event.payload):
+        destinations = (
+            [drain]
+            if drain is not None
+            else [item for item in self.drains if getattr(item, "is_remote", False)]
+        )
+        if destinations:
+            results = [
+                target is not None and target.append(event.payload)
+                for item in destinations
+                for target in [self._spool_for(item)]
+            ]
+            accepted = all(results)
+        else:
+            accepted = self.spool is not None and self.spool.append(event.payload)
+        if accepted:
             self.stats.incr("spooled_events")
             return True
         self.stats.incr("spool_errors")
@@ -191,7 +225,7 @@ class DrainDelivery:
                 if getattr(drain, "is_remote", False) and wants_spool:
                     for event in batch:
                         if event.delivery == Delivery.CRITICAL:
-                            self.spool_event(event)
+                            self.spool_event(event, drain)
         self.stats.incr("emitted_batches")
 
     def flush_drains(self) -> None:
@@ -212,7 +246,7 @@ class DrainDelivery:
 
     def maybe_replay(self) -> None:
         """Replay pending spool segments to remote drains, on an interval."""
-        if self.spool is None or self.spool.pending_segments() == 0:
+        if self.spool is None:
             return
         now = time.monotonic()
         if now - self._last_replay < self.replay_interval_s:
@@ -221,7 +255,9 @@ class DrainDelivery:
         for drain in self.drains:
             if getattr(drain, "is_remote", False):
                 try:
-                    self.spool.replay(drain)
+                    target = self._spool_for(drain)
+                    if target is not None and target.pending_segments():
+                        target.replay(drain)
                 except (KeyboardInterrupt, SystemExit):
                     raise
                 except BaseException as error:

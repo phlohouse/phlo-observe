@@ -14,6 +14,7 @@ diagnosed; disk growth is always bounded.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import itertools
 import logging
 import sys
@@ -45,18 +46,37 @@ class Spool:
         segment_max_bytes: int = 32 * 1024 * 1024,
         on_full: str = "drop_oldest",
         stats: TelemetryStats | None = None,
+        _capacity_root: Path | None = None,
+        _active_paths: set[Path] | None = None,
     ) -> None:
         self.directory = directory
         self.max_bytes = max_bytes
         self.segment_max_bytes = segment_max_bytes
         self.on_full = on_full
         self._stats = stats
+        # Destination spools live below one configured directory.  Accounting
+        # against the root keeps fan-out bounded by the configured budget.
+        self._capacity_root = _capacity_root or directory
+        self._active_paths = _active_paths if _active_paths is not None else set()
         self._seq = itertools.count()
         self._current: Path | None = None
         self._current_size = 0
         self._lock = threading.Lock()
         self._replay_lock = threading.Lock()
         directory.mkdir(parents=True, exist_ok=True)
+
+    def destination(self, identity: str) -> Spool:
+        """Return the durable spool for one destination identity."""
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        return Spool(
+            self.directory / ("dest-" + digest),
+            max_bytes=self.max_bytes,
+            segment_max_bytes=self.segment_max_bytes,
+            on_full=self.on_full,
+            stats=self._stats,
+            _capacity_root=self._capacity_root,
+            _active_paths=self._active_paths,
+        )
 
     # -- write path ---------------------------------------------------------
 
@@ -93,15 +113,33 @@ class Spool:
     def _open_segment(self) -> None:
         name = f"{_SEGMENT_PREFIX}{time.time_ns()}-{next(self._seq)}{_SEGMENT_SUFFIX}"
         self._current = self.directory / name
+        self._active_paths.add(self._current)
         self._current_size = 0
 
     def _rotate_if_needed(self, incoming: int) -> None:
         if self._current is None:
             return
         if self._current_size + incoming > self.segment_max_bytes:
+            self._active_paths.discard(self._current)
             self._current = None
 
     def _segments(self) -> list[Path]:
+        """Return this spool's segments, including destination children.
+
+        The recursive view keeps existing diagnostics able to inspect the
+        configured spool root. Replay internals use ``_segments_local`` so a
+        legacy root replay never guesses which destination owns a child.
+        """
+        return sorted(
+            (
+                p
+                for p in self.directory.rglob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}")
+                if p.is_file()
+            ),
+            key=lambda p: p.name,
+        )
+
+    def _segments_local(self) -> list[Path]:
         return sorted(
             self.directory.glob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}"),
             key=lambda p: p.name,
@@ -115,7 +153,11 @@ class Spool:
         # Quarantined segments still occupy disk: they must count toward
         # max_bytes or a poison-payload flood grows the directory unboundedly.
         try:
-            return sum(p.stat().st_size for p in self._all_files())
+            return sum(
+                p.stat().st_size
+                for p in self._capacity_root.rglob(f"{_SEGMENT_PREFIX}*")
+                if p.is_file()
+            )
         except OSError:
             return 0
 
@@ -123,8 +165,14 @@ class Spool:
         # Oldest pending segment first (never the active one); when nothing
         # pending can go, evict the oldest quarantined file — dead/corrupt
         # segments still count toward the disk budget.
-        pending = [p for p in self._segments() if p != self._current]
-        candidates = pending or [p for p in self._all_files() if p != self._current]
+        all_segments = sorted(
+            (p for p in self._capacity_root.rglob(f"{_SEGMENT_PREFIX}*") if p.is_file()),
+            key=lambda p: p.name,
+        )
+        pending = [
+            p for p in all_segments if p.suffix == _SEGMENT_SUFFIX and p not in self._active_paths
+        ]
+        candidates = pending or [p for p in all_segments if p not in self._active_paths]
         if not candidates:
             return False
         try:
@@ -141,7 +189,7 @@ class Spool:
 
     def pending_segments(self) -> int:
         """Number of spool segments on disk."""
-        return len(self._segments())
+        return len(self._segments_local())
 
     def replay(self, drain: Drain, *, max_events: int | None = None) -> int:
         """Replay oldest segments through ``drain``. Returns events replayed.
@@ -162,10 +210,12 @@ class Spool:
             with self._lock:
                 # Seal the open segment: no writer touches it again, so its
                 # complete records can be replayed and the file removed.
+                if self._current is not None:
+                    self._active_paths.discard(self._current)
                 self._current = None
                 self._current_size = 0
             replayed = 0
-            for segment in self._segments():
+            for segment in self._segments_local():
                 if max_events is not None and replayed >= max_events:
                     break
                 with self._lock:

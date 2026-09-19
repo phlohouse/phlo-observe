@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 
+from observe_core.backends import DrainDelivery
+from observe_core.drains.base import CanonicalEvent, DrainFailure
 from observe_core.drains.memory import MemoryDrain
+from observe_core.models import Delivery
 from observe_core.spool import Spool
 from observe_core.stats import TelemetryStats
 
@@ -13,6 +16,30 @@ def _payload(i: int) -> bytes:
     return json.dumps(
         {"event_id": f"01J{i:021d}", "event": "wap.promote", "delivery": "critical"}
     ).encode()
+
+
+class _Remote(MemoryDrain):
+    is_remote = True
+
+    def __init__(self, endpoint: str, failing: bool = False):
+        super().__init__()
+        self.endpoint = endpoint
+        self.failing = failing
+
+    def emit_batch(self, events):
+        if self.failing:
+            raise DrainFailure("observer down")
+        super().emit_batch(events)
+
+    def emit_raw(self, payloads):
+        if self.failing:
+            raise DrainFailure("observer down")
+        super().emit_raw(payloads)
+
+
+def _event(i: int) -> CanonicalEvent:
+    payload = _payload(i)
+    return CanonicalEvent(json.loads(payload), payload, Delivery.CRITICAL)
 
 
 class TestWrite:
@@ -174,3 +201,56 @@ class TestRuntimeIntegration:
             json.loads(p)["event_id"] == json.loads(_payload(7))["event_id"]
             for p in drain.raw_payloads
         )
+
+
+class TestDestinationReplay:
+    def test_failure_after_healthy_destination_replays_only_to_failed_destination(self, tmp_path):
+        first = _Remote("https://one.example/ingest")
+        second = _Remote("https://two.example/ingest", failing=True)
+        delivery = DrainDelivery(
+            [first, second], TelemetryStats(), Spool(tmp_path), replay_interval_s=0
+        )
+
+        delivery.deliver([_event(1)])
+        assert len(first.events) == 1
+        assert len(second.events) == 0
+        second.failing = False
+        delivery.maybe_replay()
+
+        assert len(first.events) == 1
+        assert len(second.raw_payloads) == 1
+
+    def test_queue_overflow_spools_one_copy_for_each_destination(self, tmp_path):
+        first = _Remote("https://one.example/ingest")
+        second = _Remote("https://two.example/ingest")
+        spool = Spool(tmp_path, max_bytes=10**6)
+        delivery = DrainDelivery([first, second], TelemetryStats(), spool, replay_interval_s=0)
+
+        assert delivery.spool_event(_event(2))
+        assert len(list(tmp_path.glob("dest-*/seg-*.jsonl"))) == 2
+        delivery.maybe_replay()
+        assert len(first.raw_payloads) == 1
+        assert len(second.raw_payloads) == 1
+
+    def test_destination_spool_survives_restart_and_endpoint_change_isolated(self, tmp_path):
+        old = _Remote("https://old.example/ingest")
+        spool = Spool(tmp_path)
+        delivery = DrainDelivery([old], TelemetryStats(), spool, replay_interval_s=0)
+        assert delivery.spool_event(_event(3))
+
+        replacement = _Remote("https://new.example/ingest")
+        restarted = DrainDelivery(
+            [replacement], TelemetryStats(), Spool(tmp_path), replay_interval_s=0
+        )
+        restarted.maybe_replay()
+        assert replacement.raw_payloads == []
+        assert list(tmp_path.glob("dest-*/seg-*.jsonl"))
+
+    def test_shared_destination_capacity_keeps_existing_bound(self, tmp_path):
+        first = _Remote("https://one.example/ingest")
+        second = _Remote("https://two.example/ingest")
+        spool = Spool(tmp_path, max_bytes=500, segment_max_bytes=120)
+        delivery = DrainDelivery([first, second], TelemetryStats(), spool)
+        for i in range(30):
+            delivery.spool_event(_event(i))
+        assert spool.pending_bytes() <= 500 + 200
