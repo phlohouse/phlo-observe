@@ -12,12 +12,14 @@ merge wholesale and silently lose it.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from typing import Any
 
 from observe_core.timestamps import utcnow
 from sqlalchemy import delete, func, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import make_transient
 
 from phlo_observer import insights
 from phlo_observer import state_engine as se
@@ -31,6 +33,115 @@ from phlo_observer.models import (
     Relationship,
     Run,
 )
+
+
+class LifecycleRebuildError(RuntimeError):
+    """Rebuild refused to guess the identity of manual lifecycle rows."""
+
+
+def _producer_ids(row: Insight) -> set[str]:
+    return {
+        str(item.get("eid"))
+        for item in (row.attributes or {}).get("producers", [])
+        if isinstance(item, dict) and item.get("eid")
+    } | {str(item) for item in row.evidence_event_ids or []}
+
+
+async def _snapshot_lifecycle(
+    session: AsyncSession,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    insights_rows = (await session.execute(select(Insight))).scalars().all()
+    incident_rows = (await session.execute(select(Incident))).scalars().all()
+    return (
+        [
+            {
+                "row": row,
+                "state": row.state,
+                "manual": row.state != "open"
+                or bool((row.attributes or {}).get("resolved_manually")),
+                "producers": _producer_ids(row),
+                "attributes": deepcopy(row.attributes or {}),
+            }
+            for row in insights_rows
+        ],
+        [
+            {"row": row, "manual": row.state != "open", "members": set(row.insight_ids or [])}
+            for row in incident_rows
+        ],
+    )
+
+
+async def _restore_lifecycle(
+    session: AsyncSession,
+    insight_snapshot: list[dict[str, Any]],
+    incident_snapshot: list[dict[str, Any]],
+) -> None:
+    """Restore operator-owned identity/state after deterministic replay."""
+    current = list((await session.execute(select(Insight))).scalars())
+    mappings: dict[str, str] = {}
+    used: set[Any] = set()
+    for old in (item for item in insight_snapshot if item["manual"]):
+        row = old["row"]
+        candidates = [
+            fresh
+            for fresh in current
+            if fresh.rule_id == row.rule_id
+            and fresh.rule_version == row.rule_version
+            and fresh.dedupe_key == row.dedupe_key
+            and fresh.entity_id == row.entity_id
+            and old["producers"] & _producer_ids(fresh)
+        ]
+        candidates = [fresh for fresh in candidates if fresh.insight_id not in used]
+        if len(candidates) > 1:
+            raise LifecycleRebuildError(
+                f"ambiguous manual insight episode {row.insight_id}; rebuild rolled back"
+            )
+        if candidates:
+            fresh = candidates[0]
+            used.add(fresh.insight_id)
+            mappings[str(fresh.insight_id)] = str(row.insight_id)
+            fresh.insight_id = row.insight_id
+            fresh.state = row.state
+            fresh.created_at = row.created_at
+            fresh.updated_at = row.updated_at
+            fresh.attributes = deepcopy(row.attributes or {}) | {
+                k: v for k, v in (fresh.attributes or {}).items() if k not in row.attributes
+            }
+        else:
+            # Evidence may have expired; retaining an evidenced operator row is
+            # safer than silently discarding a human decision.
+            make_transient(row)
+            session.add(row)
+            mappings[str(row.insight_id)] = str(row.insight_id)
+    await session.flush()
+    incidents = list((await session.execute(select(Incident))).scalars())
+    for incident in incidents:
+        members = (incident.attributes or {}).get("members") or []
+        for member in members:
+            if str(member.get("iid")) in mappings:
+                member["iid"] = mappings[str(member["iid"])]
+        incident.attributes = {**(incident.attributes or {}), "members": members}
+        incident.insight_ids = [m.get("iid") for m in members if m.get("iid")]
+    for old in (item for item in incident_snapshot if item["manual"]):
+        row = old["row"]
+        old_members = {mappings.get(str(i), str(i)) for i in old["members"]}
+        candidates = [
+            incident for incident in incidents if set(incident.insight_ids or []) == old_members
+        ]
+        if len(candidates) > 1:
+            raise LifecycleRebuildError(
+                f"ambiguous manual incident episode {row.incident_id}; rebuild rolled back"
+            )
+        if candidates:
+            fresh = candidates[0]
+            fresh.incident_id = row.incident_id
+            fresh.state = row.state
+            fresh.updated_at = row.updated_at
+            fresh.resolved_at = row.resolved_at
+        else:
+            make_transient(row)
+            session.add(row)
+
 
 _PROJECTION_LOCK_KEY = 0x70686C70
 """Advisory lock serializing derived-state writes against full/scoped rebuilds.
@@ -561,6 +672,9 @@ async def rebuild_projections(
     no fold can be dropped by the delete+replay window.
     """
     await lock_rebuild(session)
+    lifecycle_snapshot: tuple[list[dict[str, Any]], list[dict[str, Any]]] = ([], [])
+    if not run_id:
+        lifecycle_snapshot = await _snapshot_lifecycle(session)
     counts = {
         "events": 0,
         "runs": 0,
@@ -788,6 +902,7 @@ async def rebuild_projections(
         )
         counts["runs"] += 1
     if not run_id:
+        await _restore_lifecycle(session, *lifecycle_snapshot)
         counts["baselines"] = await session.scalar(select(func.count()).select_from(Baseline)) or 0
         counts["insights"] = await session.scalar(select(func.count()).select_from(Insight)) or 0
         counts["incidents"] = await session.scalar(select(func.count()).select_from(Incident)) or 0

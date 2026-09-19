@@ -22,6 +22,7 @@ from phlo_observer.models import (
     RawEvent,
     Run,
 )
+from phlo_observer.projections import _PROJECTION_LOCK_KEY
 from phlo_observer.settings import ObserverSettings
 
 _TERMINAL_INSIGHT_STATES = ("resolved", "suppressed", "expired")
@@ -61,6 +62,10 @@ async def run_retention_once(
             # Another instance holds the retention lock; it releases on commit.
             report.skipped = True
             return report
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock_shared(:key)"),
+            {"key": _PROJECTION_LOCK_KEY},
+        )
         raw_cutoff = now  # expires_at was stamped at insert
         result = await session.execute(delete(RawEvent).where(RawEvent.expires_at <= raw_cutoff))
         report.raw_events = _rowcount(result)
