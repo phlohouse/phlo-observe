@@ -48,6 +48,7 @@ class Spool:
         stats: TelemetryStats | None = None,
         _capacity_root: Path | None = None,
         _active_paths: set[Path] | None = None,
+        _capacity_lock: threading.Lock | None = None,
     ) -> None:
         self.directory = directory
         self.max_bytes = max_bytes
@@ -61,22 +62,26 @@ class Spool:
         self._seq = itertools.count()
         self._current: Path | None = None
         self._current_size = 0
-        self._lock = threading.Lock()
+        self._lock = _capacity_lock or threading.Lock()
         self._replay_lock = threading.Lock()
         directory.mkdir(parents=True, exist_ok=True)
 
     def destination(self, identity: str) -> Spool:
         """Return the durable spool for one destination identity."""
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        return Spool(
-            self.directory / ("dest-" + digest),
-            max_bytes=self.max_bytes,
-            segment_max_bytes=self.segment_max_bytes,
-            on_full=self.on_full,
-            stats=self._stats,
-            _capacity_root=self._capacity_root,
-            _active_paths=self._active_paths,
-        )
+        try:
+            return Spool(
+                self.directory / ("dest-" + digest),
+                max_bytes=self.max_bytes,
+                segment_max_bytes=self.segment_max_bytes,
+                on_full=self.on_full,
+                stats=self._stats,
+                _capacity_root=self._capacity_root,
+                _active_paths=self._active_paths,
+                _capacity_lock=self._lock,
+            )
+        except OSError:
+            raise
 
     # -- write path ---------------------------------------------------------
 
@@ -189,6 +194,8 @@ class Spool:
 
     def pending_segments(self) -> int:
         """Number of spool segments on disk."""
+        if self.directory == self._capacity_root:
+            return len(self._segments())
         return len(self._segments_local())
 
     def replay(self, drain: Drain, *, max_events: int | None = None) -> int:

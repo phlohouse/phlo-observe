@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from pathlib import Path
 
 from observe_core.backends import DrainDelivery
 from observe_core.drains.base import CanonicalEvent, DrainFailure
@@ -254,3 +256,32 @@ class TestDestinationReplay:
         for i in range(30):
             delivery.spool_event(_event(i))
         assert spool.pending_bytes() <= 500 + 200
+
+    def test_shared_capacity_is_serialized_across_destinations(self, tmp_path):
+        first = _Remote("https://one.example/ingest")
+        second = _Remote("https://two.example/ingest")
+        spool = Spool(tmp_path, max_bytes=200, on_full="drop_newest")
+        delivery = DrainDelivery([first, second], TelemetryStats(), spool)
+        barrier = threading.Barrier(3)
+
+        def append(i):
+            barrier.wait()
+            delivery.spool_event(_event(i))
+
+        threads = [threading.Thread(target=append, args=(i,)) for i in (1, 2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert spool.pending_bytes() <= 200 + len(_payload(1)) + 1
+
+    def test_unavailable_destination_directory_is_a_spool_failure(self, tmp_path, monkeypatch):
+        spool = Spool(tmp_path)
+        delivery = DrainDelivery([_Remote("https://one.example/ingest")], TelemetryStats(), spool)
+
+        def fail_mkdir(*args, **kwargs):
+            raise OSError("read-only")
+
+        monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+        assert not delivery.spool_event(_event(4))

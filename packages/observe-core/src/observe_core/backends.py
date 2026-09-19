@@ -164,7 +164,12 @@ class DrainDelivery:
             destination = getattr(self.spool, "destination", None)
             if not callable(destination):
                 return None
-            self._destination_spools[identity] = destination(identity)
+            try:
+                self._destination_spools[identity] = destination(identity)
+            except OSError as error:
+                self.stats.incr("spool_errors")
+                _diag(f"destination spool unavailable: {error}")
+                return None
         return self._destination_spools[identity]
 
     def endpoints(self) -> list[str]:
