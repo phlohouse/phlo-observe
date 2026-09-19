@@ -69,19 +69,16 @@ class Spool:
     def destination(self, identity: str) -> Spool:
         """Return the durable spool for one destination identity."""
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
-        try:
-            return Spool(
-                self.directory / ("dest-" + digest),
-                max_bytes=self.max_bytes,
-                segment_max_bytes=self.segment_max_bytes,
-                on_full=self.on_full,
-                stats=self._stats,
-                _capacity_root=self._capacity_root,
-                _active_paths=self._active_paths,
-                _capacity_lock=self._lock,
-            )
-        except OSError:
-            raise
+        return Spool(
+            self.directory / ("dest-" + digest),
+            max_bytes=self.max_bytes,
+            segment_max_bytes=self.segment_max_bytes,
+            on_full=self.on_full,
+            stats=self._stats,
+            _capacity_root=self._capacity_root,
+            _active_paths=self._active_paths,
+            _capacity_lock=self._lock,
+        )
 
     # -- write path ---------------------------------------------------------
 
@@ -246,7 +243,7 @@ class Spool:
                     continue
                 except Exception:
                     break  # transient: keep for the next replay interval
-                with contextlib.suppress(OSError):
+                with self._lock, contextlib.suppress(OSError):
                     segment.unlink()
                 replayed += len(lines)
                 if self._stats:
@@ -256,7 +253,7 @@ class Spool:
             self._replay_lock.release()
 
     def _quarantine(self, segment: Path, suffix: str, reason: str) -> None:
-        with contextlib.suppress(OSError):
+        with self._lock, contextlib.suppress(OSError):
             segment.rename(segment.with_suffix(suffix))
         if self._stats:
             self._stats.incr("spool_quarantined")

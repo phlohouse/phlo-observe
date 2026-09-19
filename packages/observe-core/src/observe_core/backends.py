@@ -147,6 +147,7 @@ class DrainDelivery:
         self.last_error: str | None = None
         self._last_replay = 0.0
         self._destination_spools: dict[str, Spool] = {}
+        self._destination_lock = threading.Lock()
 
     @staticmethod
     def _destination_identity(drain: Drain) -> str:
@@ -160,17 +161,18 @@ class DrainDelivery:
         if self.spool is None:
             return None
         identity = self._destination_identity(drain)
-        if identity not in self._destination_spools:
-            destination = getattr(self.spool, "destination", None)
-            if not callable(destination):
-                return None
-            try:
-                self._destination_spools[identity] = destination(identity)
-            except OSError as error:
-                self.stats.incr("spool_errors")
-                _diag(f"destination spool unavailable: {error}")
-                return None
-        return self._destination_spools[identity]
+        with self._destination_lock:
+            if identity not in self._destination_spools:
+                destination = getattr(self.spool, "destination", None)
+                if not callable(destination):
+                    return None
+                try:
+                    self._destination_spools[identity] = destination(identity)
+                except OSError as error:
+                    self.stats.incr("spool_errors")
+                    _diag(f"destination spool unavailable: {error}")
+                    return None
+            return self._destination_spools[identity]
 
     def endpoints(self) -> list[str]:
         """Remote drain endpoints, for health surfaces."""

@@ -66,7 +66,7 @@ class TestWrite:
         spool = Spool(tmp_path, max_bytes=500, on_full="drop_newest")
         results = [spool.append(_payload(i)) for i in range(20)]
         assert not all(results)  # writes refused once full
-        assert spool.pending_bytes() <= 500 + 200  # one-line overshoot at most
+        assert spool.pending_bytes() <= 500  # one-line overshoot at most
 
     def test_max_bytes_evicts_oldest_sealed_segment(self, tmp_path):
         stats = TelemetryStats()
@@ -255,7 +255,7 @@ class TestDestinationReplay:
         delivery = DrainDelivery([first, second], TelemetryStats(), spool)
         for i in range(30):
             delivery.spool_event(_event(i))
-        assert spool.pending_bytes() <= 500 + 200
+        assert spool.pending_bytes() <= 500
 
     def test_shared_capacity_is_serialized_across_destinations(self, tmp_path):
         first = _Remote("https://one.example/ingest")
@@ -274,7 +274,7 @@ class TestDestinationReplay:
         barrier.wait()
         for thread in threads:
             thread.join()
-        assert spool.pending_bytes() <= 200 + len(_payload(1)) + 1
+        assert spool.pending_bytes() <= 200
 
     def test_unavailable_destination_directory_is_a_spool_failure(self, tmp_path, monkeypatch):
         spool = Spool(tmp_path)
@@ -285,3 +285,30 @@ class TestDestinationReplay:
 
         monkeypatch.setattr(Path, "mkdir", fail_mkdir)
         assert not delivery.spool_event(_event(4))
+
+
+def test_concurrent_destination_lookup_reuses_one_spool(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    spool = Spool(tmp_path)
+    drain = _Remote("https://one.example/ingest")
+    delivery = DrainDelivery([drain], TelemetryStats(), spool)
+    original = spool.destination
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def slow_destination(identity):
+        calls.append(identity)
+        started.set()
+        assert release.wait(2)
+        return original(identity)
+
+    monkeypatch.setattr(spool, "destination", slow_destination)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(delivery._spool_for, drain)
+        assert started.wait(2)
+        second = pool.submit(delivery._spool_for, drain)
+        release.set()
+        assert first.result(2) is second.result(2)
+    assert len(calls) == 1
