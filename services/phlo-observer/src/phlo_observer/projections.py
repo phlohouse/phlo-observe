@@ -177,6 +177,13 @@ async def _restore_lifecycle(
                     )
                 final_open.add(columns["dedupe_key"])
 
+    # Release partial-unique open keys before reopening a different episode.
+    # A single flush may otherwise update the reopened row before its closure.
+    for fresh, old in old_by_fresh.items():
+        if fresh.state == "open" and old["manual"] and old["columns"]["state"] != "open":
+            fresh.state = old["columns"]["state"]
+    await session.flush()
+
     for old in insight_snapshot:
         fresh = matches.get(old["id"])
         columns = old["columns"]

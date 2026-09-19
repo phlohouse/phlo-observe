@@ -15,7 +15,11 @@ from sqlalchemy import delete, select
 pytestmark = pytest.mark.asyncio
 
 
-def _failure(event_id: str | None = None, run_id: str = "stable-run") -> dict[str, Any]:
+def _failure(
+    event_id: str | None = None,
+    run_id: str = "stable-run",
+    observed_at: str = "2025-01-01T00:00:00Z",
+) -> dict[str, Any]:
     return {
         "schema_version": "1.0",
         "event_id": event_id or str(uuid.uuid4()),
@@ -24,11 +28,18 @@ def _failure(event_id: str | None = None, run_id: str = "stable-run") -> dict[st
         "outcome": "failure",
         "severity": "critical",
         "delivery": "telemetry",
-        "observed_at": "2025-01-01T00:00:00Z",
+        "observed_at": observed_at,
         "service": {"name": "lifecycle-test"},
         "correlation": {"run_id": run_id},
         "attributes": {},
     }
+
+
+def _success(event_id: str, run_id: str, observed_at: str) -> dict[str, Any]:
+    event = _failure(event_id, run_id, observed_at)
+    event["outcome"] = "success"
+    event["severity"] = "info"
+    return event
 
 
 async def _rebuild_twice(session_factory: Any) -> None:
@@ -200,3 +211,49 @@ async def test_transition_waits_for_rebuild_lock_and_keeps_identity(
     async with session_factory() as session:
         row = await session.get(Insight, uuid.UUID(insight_id))
         assert row is not None and row.state == "acknowledged"
+
+
+async def test_resolved_and_reopened_episode_ids_survive_rebuild(
+    client: Any, session_factory: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id = f"recurring-{uuid.uuid4()}"
+    first_id, success_id, second_id = (str(uuid.uuid4()) for _ in range(3))
+    assert (
+        await client.post("/v1/events", json=_failure(first_id, run_id, "2025-01-01T00:00:00Z"))
+    ).status_code == 202
+    assert (
+        await client.post("/v1/events", json=_success(success_id, run_id, "2025-01-01T00:01:00Z"))
+    ).status_code == 202
+    assert (
+        await client.post("/v1/events", json=_failure(second_id, run_id, "2025-01-01T00:02:00Z"))
+    ).status_code == 202
+    async with session_factory() as session:
+        rows = list((await session.execute(select(Insight))).scalars())
+        assert len(rows) == 2
+        first = next(row for row in rows if first_id in row.evidence_event_ids)
+        second = next(row for row in rows if second_id in row.evidence_event_ids)
+        first_id_db, second_id_db = str(first.insight_id), str(second.insight_id)
+        assert first.state == "resolved" and second.state == "open"
+    assert (
+        await client.post(f"/v2/insights/{second_id_db}/transition", json={"state": "suppressed"})
+    ).status_code == 200
+    assert (
+        await client.post(f"/v2/insights/{first_id_db}/transition", json={"state": "open"})
+    ).status_code == 200
+    # Ensure SQLAlchemy would reopen A before closing B in a single flush.
+    from itertools import count
+    from types import SimpleNamespace
+
+    from phlo_observer import insights
+
+    replay_ids = count(1)
+    monkeypatch.setattr(
+        insights, "uuid", SimpleNamespace(uuid4=lambda: uuid.UUID(int=next(replay_ids)))
+    )
+    await _rebuild_twice(session_factory)
+    async with session_factory() as session:
+        first = await session.get(Insight, uuid.UUID(first_id_db))
+        second = await session.get(Insight, uuid.UUID(second_id_db))
+        assert first is not None and second is not None
+        assert first.state == "open"
+        assert second.state == "suppressed"
