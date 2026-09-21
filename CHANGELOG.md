@@ -1,5 +1,25 @@
 # Changelog
 
+## [4 packages] - 2026-09-19
+
+### Added
+- observe-query: add V2 operations — search, SSE stream, alert webhooks, quarantine admin
+
+### Fixed
+- observe-core: redact deeply nested error details ([#11](https://github.com/phlohouse/phlo-observe/issues/11))
+- observe-core: retain spool delivery per destination ([#12](https://github.com/phlohouse/phlo-observe/issues/12))
+- observe-core: wait for all pre-flush deliveries ([#14](https://github.com/phlohouse/phlo-observe/issues/14))
+- phlo-observer: preserve lifecycle decisions and identities during rebuild ([#15](https://github.com/phlohouse/phlo-observe/issues/15))
+- phlo-observer: publish local notifications only after commit ([#16](https://github.com/phlohouse/phlo-observe/issues/16))
+- phlo-observer: track and repair durable projection gaps ([#17](https://github.com/phlohouse/phlo-observe/issues/17))
+
+### Contributors
+Thanks to our contributors for this release:
+- @iamgp (7 commits)
+
+---
+Full Changelog: https://github.com/phlohouse/phlo-observe/compare/phlo-observer/v0.2.1...v0.4.0
+
 ## [3 packages] - 2026-09-18
 
 ### Added
