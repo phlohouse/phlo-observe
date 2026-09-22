@@ -27,6 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       mode: ${{ steps.check.outputs.mode }}
+      publish_observe_core: ${{ steps.packages.outputs.observe_core }}
+      publish_observe_query: ${{ steps.packages.outputs.observe_query }}
+      publish_phlo_observe: ${{ steps.packages.outputs.phlo_observe }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -56,6 +59,18 @@ jobs:
               echo "mode=noop" >> "$GITHUB_OUTPUT"
             fi
           fi
+
+      - name: Identify Python packages in the release
+        id: packages
+        run: |
+          selected() {
+            jq -r --arg name "$1" \
+              'any(.packages[]?; .name == $name and .selected)' \
+              .relx/release-manifest.json
+          }
+          echo "observe_core=$(selected observe-core)" >> "$GITHUB_OUTPUT"
+          echo "observe_query=$(selected observe-query)" >> "$GITHUB_OUTPUT"
+          echo "phlo_observe=$(selected phlo-observe)" >> "$GITHUB_OUTPUT"
 
       - name: Tag merged release PR
         if: steps.check.outputs.mode == 'tag'
@@ -92,15 +107,101 @@ jobs:
         if: steps.check.outputs.mode == 'noop'
         run: echo "No releasable package changes pending on main."
 
-  build-wheels:
-    name: build + verify wheels after tagging
+  build-python:
+    name: build + verify Python distributions
     runs-on: ubuntu-latest
     needs: release
     if: needs.release.outputs.mode == 'tag'
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - run: uv build --all-packages --out-dir dist
-      - run: ls -la dist
-      # Publishing to PyPI is intentionally manual-gated: enable
-      # [publish] in relx.toml plus OIDC trusted publishing first.
+      - name: Build publishable packages
+        run: |
+          uv build --package observe-core --out-dir dist/observe-core
+          uv build --package observe-query --out-dir dist/observe-query
+          uv build --package phlo-observe --out-dir dist/phlo-observe
+      - name: Verify distribution metadata
+        run: |
+          uvx --from twine twine check dist/observe-core/*
+          uvx --from twine twine check dist/observe-query/*
+          uvx --from twine twine check dist/phlo-observe/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: observe-core-dist
+          path: dist/observe-core
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: observe-query-dist
+          path: dist/observe-query
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phlo-observe-dist
+          path: dist/phlo-observe
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-observe-core:
+    name: publish observe-core to PyPI
+    runs-on: ubuntu-latest
+    needs: [release, build-python]
+    if: needs.release.outputs.publish_observe_core == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/observe-core
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: observe-core-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-observe-query:
+    name: publish observe-query to PyPI
+    runs-on: ubuntu-latest
+    needs: [release, build-python]
+    if: needs.release.outputs.publish_observe_query == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/observe-query
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: observe-query-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-phlo-observe:
+    name: publish phlo-observe to PyPI
+    runs-on: ubuntu-latest
+    needs: [release, build-python]
+    if: needs.release.outputs.publish_phlo_observe == 'true'
+    environment:
+      name: pypi
+      url: https://pypi.org/p/phlo-observe
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: phlo-observe-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
