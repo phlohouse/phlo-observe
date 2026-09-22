@@ -132,6 +132,7 @@ def _event_row(data: dict[str, Any], received_at: Any, raw_event_id: uuid.UUID |
         trace_id=corr.get("trace_id"),
         span_id=corr.get("span_id"),
         run_id=corr.get("run_id"),
+        root_run_id=corr.get("root_run_id"),
         job_id=corr.get("job_id"),
         invocation_id=corr.get("invocation_id"),
         asset_key=corr.get("asset_key"),
@@ -452,7 +453,11 @@ async def persist_events(
                     if row.run_id:
                         _publish(
                             "run.changed",
-                            {"run_id": row.run_id, "event": row.event},
+                            {
+                                "run_id": row.run_id,
+                                "root_run_id": row.root_run_id,
+                                "event": row.event,
+                            },
                         )
                 # Register contract schemas seen on envelopes (spec §8.3):
                 # an event carrying contract.schema_id upserts the registry
@@ -660,6 +665,7 @@ async def query_events(
         (Event.service_name, "service"),
         (Event.environment, "environment"),
         (Event.run_id, "run_id"),
+        (Event.root_run_id, "root_run_id"),
         (Event.asset_key, "asset_key"),
         (Event.partition_key, "partition_key"),
         (Event.branch, "branch"),

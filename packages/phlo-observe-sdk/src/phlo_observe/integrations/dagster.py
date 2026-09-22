@@ -46,8 +46,10 @@ def dagster_run_scope(context: Any, *, asset_key: str | None = None) -> Iterator
     context). Identifiers are pulled from its public attributes.
     """
     run = _attr(context, "run", "dagster_run")
+    run_id = _attr(context, "run_id", "run.run_id", "dagster_run.run_id")
     values: dict[str, Any] = {
-        "run_id": _attr(context, "run_id", "run.run_id", "dagster_run.run_id"),
+        "run_id": run_id,
+        "root_run_id": _attr(run, "root_run_id") or run_id,
         "job_id": _attr(context, "job_name", "dagster_run.job_name"),
         "job_name": _attr(context, "job_name", "dagster_run.job_name"),
         "partition_key": _attr(context, "partition_key", "run.partition_key"),
@@ -95,6 +97,7 @@ def emit_materialization(
     """Wrap an asset materialization inside a Dagster step."""
     key = asset_key or _dagster_asset_key(context)
     run_id = _attr(context, "run_id", "run.run_id")
+    root_run_id = _attr(context, "run.root_run_id") or run_id
     attrs = {"rows_out": rows, "bytes_written": bytes_written, **attributes}
     entities: dict[str, Any] = {}
     if run_id:
@@ -107,6 +110,7 @@ def emit_materialization(
         attributes={k: v for k, v in attrs.items() if v is not None},
         correlation={
             "run_id": run_id,
+            "root_run_id": root_run_id,
             "asset_key": key,
             "partition_key": _attr(context, "partition_key", "run.partition_key"),
         },
@@ -125,6 +129,7 @@ def emit_asset_check(
 ) -> None:
     """Emit a ``quality.check`` event for a Dagster asset check result."""
     run_id = _attr(context, "run_id", "run.run_id")
+    root_run_id = _attr(context, "run.root_run_id") or run_id
     key = _dagster_asset_key(context)
     entities: dict[str, Any] = {}
     if run_id:
@@ -144,6 +149,7 @@ def emit_asset_check(
         },
         correlation={
             "run_id": run_id,
+            "root_run_id": root_run_id,
             "asset_key": key,
         },
         entities=entities,

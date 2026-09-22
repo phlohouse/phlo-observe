@@ -106,6 +106,7 @@
         "span_id": {"type": ["string", "null"]},
         "parent_span_id": {"type": ["string", "null"]},
         "run_id": {"type": ["string", "null"]},
+        "root_run_id": {"type": ["string", "null"]},
         "job_id": {"type": ["string", "null"]},
         "invocation_id": {"type": ["string", "null"]},
         "asset_key": {"type": ["string", "null"]},

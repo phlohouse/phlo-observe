@@ -124,6 +124,46 @@ async def test_run_projection_and_timeline(client: AsyncClient, make_event: Any)
 
 
 @pytest.mark.asyncio
+async def test_root_run_timeline_includes_nested_run_events(
+    client: AsyncClient, make_event: Any
+) -> None:
+    root_run_id = f"run-{uuid.uuid4().hex[:8]}"
+    child_run_id = f"dlt-{uuid.uuid4().hex[:8]}"
+    await _post(
+        client,
+        make_event(
+            event="pipeline.run",
+            outcome="unknown",
+            observed_at="2025-01-01T00:00:00Z",
+            correlation={"run_id": root_run_id, "root_run_id": root_run_id},
+        ),
+    )
+    await _post(
+        client,
+        make_event(
+            event="dlt.pipeline.run",
+            observed_at="2025-01-01T00:00:05Z",
+            correlation={"run_id": child_run_id, "root_run_id": root_run_id},
+        ),
+    )
+
+    timeline = (await client.get(f"/v1/runs/{root_run_id}/timeline")).json()
+    assert [event["event"] for event in timeline["events"]] == [
+        "pipeline.run",
+        "dlt.pipeline.run",
+    ]
+    assert timeline["events"][1]["correlation"] == {
+        "trace_id": None,
+        "span_id": None,
+        "run_id": child_run_id,
+        "root_run_id": root_run_id,
+        "asset_key": None,
+        "partition_key": None,
+        "branch": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_late_arriving_event_updates_run(client: AsyncClient, make_event: Any) -> None:
     run_id = f"run-{uuid.uuid4().hex[:8]}"
     await _post(

@@ -41,6 +41,7 @@ def _event_json(row: Event) -> dict[str, Any]:
         "duration_ms": row.duration_ms,
         "correlation": {
             "run_id": row.run_id,
+            "root_run_id": row.root_run_id,
             "asset_key": row.asset_key,
             "table": row.table_name,
             "branch": row.branch,

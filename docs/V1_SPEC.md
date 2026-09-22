@@ -316,6 +316,7 @@ Canonical keys:
   "span_id": null,
   "parent_span_id": null,
   "run_id": null,
+  "root_run_id": null,
   "job_id": null,
   "invocation_id": null,
   "asset_key": null,
@@ -330,6 +331,10 @@ Canonical keys:
 ```
 
 Unknown correlation keys MUST go in `correlation.extra`, not be added ad hoc at the top level.
+
+`root_run_id` identifies the top-level orchestrator run when `run_id` belongs
+to a nested system run. Top-level run events SHOULD set both fields to the
+same value. Nested runs retain their own `run_id` and inherit `root_run_id`.
 
 ### 7.5 Attributes
 
@@ -1254,6 +1259,7 @@ events
 - trace_id text null
 - span_id text null
 - run_id text null
+- root_run_id text null
 - job_id text null
 - invocation_id text null
 - asset_key text null
@@ -1272,6 +1278,7 @@ Indexes MUST include:
 
 - `observed_at`;
 - `run_id, observed_at`;
+- `root_run_id, observed_at`;
 - `asset_key, observed_at`;
 - `event, observed_at`;
 - `outcome, observed_at`;

@@ -97,8 +97,9 @@ def test_enums():
 
 
 def test_correlation_extra():
-    corr = Correlation(run_id="R1", extra={"dagster_run": "xyz"})
-    assert corr.canonical_dict()["run_id"] == "R1"
+    corr = Correlation(run_id="R1-child", root_run_id="R1", extra={"dagster_run": "xyz"})
+    assert corr.canonical_dict()["run_id"] == "R1-child"
+    assert corr.canonical_dict()["root_run_id"] == "R1"
     assert "dagster_run" not in corr.canonical_dict()
     assert corr.extra == {"dagster_run": "xyz"}
 

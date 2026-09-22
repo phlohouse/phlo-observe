@@ -41,6 +41,7 @@ def test_dagster_run_scope_binds(captured: tuple[Runtime, MemoryDrain]):
     (ev,) = _data(drain)
     corr = ev["correlation"]
     assert corr["run_id"] == "dagster-run-1"
+    assert corr["root_run_id"] == "dagster-run-1"
     assert corr["job_id"] == "daily_ingestion"
     assert corr["partition_key"] == "2026-09-14"
     assert corr["asset_key"] == "silver.samples"
@@ -57,6 +58,7 @@ def test_dagster_emit_materialization(captured: tuple[Runtime, MemoryDrain]):
     (ev,) = _data(drain)
     assert ev["event"] == "asset.materialize"
     assert ev["correlation"]["asset_key"] == "silver.samples"
+    assert ev["correlation"]["root_run_id"] == "dagster-run-1"
     assert ev["attributes"]["rows_out"] == 100
     assert ev["source"]["producer"] == "dagster"
 
@@ -68,6 +70,7 @@ def test_dagster_asset_check(captured: tuple[Runtime, MemoryDrain]):
     assert ev["event"] == "quality.check"
     assert ev["outcome"] == "failure"
     assert ev["severity"] == "error"
+    assert ev["correlation"]["root_run_id"] == "dagster-run-1"
     assert ev["attributes"]["check_name"] == "no_nulls"
 
 
@@ -255,6 +258,18 @@ def test_dlt_pipeline_run(captured: tuple[Runtime, MemoryDrain]):
     assert ev["correlation"]["pipeline"] == "github_issues"
     assert ev["attributes"]["destination"] == "iceberg"
     assert ev["source"]["producer"] == "dlt"
+
+
+def test_dlt_run_keeps_dagster_root_run(captured: tuple[Runtime, MemoryDrain]):
+    _, drain = captured
+    with (
+        dagster.dagster_run_scope(_FakeDagsterContext()),
+        dlt.dlt_pipeline_run(_FakePipeline()) as operation,
+    ):
+        operation.set_correlation(run_id="dlt-load-1")
+    (ev,) = _data(drain)
+    assert ev["correlation"]["run_id"] == "dlt-load-1"
+    assert ev["correlation"]["root_run_id"] == "dagster-run-1"
 
 
 def test_dlt_load_info_attributes():

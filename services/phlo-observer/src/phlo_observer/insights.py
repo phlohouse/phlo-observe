@@ -720,6 +720,7 @@ def _resolver_view(row: Event) -> dict[str, Any]:
         "observed_at": row.observed_at,
         "correlation": {
             "run_id": row.run_id,
+            "root_run_id": row.root_run_id,
             "asset_key": row.asset_key,
             "table": row.table_name,
             "branch": row.branch,

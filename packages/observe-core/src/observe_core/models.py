@@ -117,6 +117,7 @@ CORRELATION_KEYS: tuple[str, ...] = (
     "span_id",
     "parent_span_id",
     "run_id",
+    "root_run_id",
     "job_id",
     "invocation_id",
     "asset_key",
@@ -140,6 +141,7 @@ class Correlation(BaseModel):
     span_id: str | None = None
     parent_span_id: str | None = None
     run_id: str | None = None
+    root_run_id: str | None = None
     job_id: str | None = None
     invocation_id: str | None = None
     asset_key: str | None = None

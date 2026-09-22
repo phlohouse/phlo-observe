@@ -83,6 +83,7 @@ class Event(Base):
     trace_id: Mapped[str | None] = mapped_column(String(64))
     span_id: Mapped[str | None] = mapped_column(String(64))
     run_id: Mapped[str | None] = mapped_column(String(128))
+    root_run_id: Mapped[str | None] = mapped_column(String(128))
     job_id: Mapped[str | None] = mapped_column(String(255))
     invocation_id: Mapped[str | None] = mapped_column(String(128))
     asset_key: Mapped[str | None] = mapped_column(String(512))
@@ -111,6 +112,7 @@ class Event(Base):
         Index("ix_events_observed_at", "observed_at"),
         Index("ix_events_received_at", "received_at"),
         Index("ix_events_run_observed", "run_id", "observed_at"),
+        Index("ix_events_root_run_observed", "root_run_id", "observed_at"),
         Index("ix_events_asset_observed", "asset_key", "observed_at"),
         Index("ix_events_event_observed", "event", "observed_at"),
         Index("ix_events_outcome_observed", "outcome", "observed_at"),

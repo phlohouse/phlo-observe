@@ -284,6 +284,7 @@ def _event_view(row: Event) -> dict[str, Any]:
         "correlation": {
             "trace_id": row.trace_id,
             "run_id": row.run_id,
+            "root_run_id": row.root_run_id,
             "job_id": row.job_id,
             "invocation_id": row.invocation_id,
             "asset_key": row.asset_key,

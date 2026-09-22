@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import asc, select
+from sqlalchemy import asc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from phlo_observer.models import Event, Run
@@ -108,6 +108,8 @@ def _event_summary(row: Event) -> dict[str, Any]:
         "correlation": {
             "trace_id": row.trace_id,
             "span_id": row.span_id,
+            "run_id": row.run_id,
+            "root_run_id": row.root_run_id,
             "asset_key": row.asset_key,
             "partition_key": row.partition_key,
             "branch": row.branch,
@@ -134,7 +136,7 @@ async def run_timeline(session: AsyncSession, run_id: str) -> dict[str, Any] | N
     run = await session.get(Run, run_id)
     stmt = (
         select(Event)
-        .where(Event.run_id == run_id)
+        .where(or_(Event.run_id == run_id, Event.root_run_id == run_id))
         .order_by(asc(Event.observed_at), asc(Event.event_id))
         .limit(_MAX_TIMELINE_EVENTS + 1)
     )

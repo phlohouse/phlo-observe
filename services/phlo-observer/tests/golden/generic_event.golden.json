@@ -25,6 +25,7 @@
       "partition_key": null,
       "pipeline": null,
       "request_id": null,
+      "root_run_id": null,
       "run_id": "legacy-run-42",
       "snapshot_id": null,
       "span_id": null,

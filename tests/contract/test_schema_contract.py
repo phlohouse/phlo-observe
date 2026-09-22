@@ -77,6 +77,7 @@ def test_full_envelope(envelope_validator: Validator) -> None:
         service={"name": "svc", "version": "1.2.3", "environment": "prod"},
         correlation={
             "run_id": "r-1",
+            "root_run_id": "root-r-1",
             "trace_id": uuid.uuid4().hex,
             "asset_key": "mart.fct_orders",
             "branch": "wap/audit",
