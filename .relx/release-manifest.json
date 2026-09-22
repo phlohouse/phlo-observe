@@ -4,9 +4,9 @@
   "release_mode": "release_set",
   "preparation_base": {
     "ref_name": "main",
-    "commit": "303b432912c9ec391501af096040e805419d35a6"
+    "commit": "3f8a3515ff5f7198d4c19352b0491c9712f79f99"
   },
-  "source_digest": "8512dff52932f1ce7bc37910677b7f269d5362395f5d8480b0a181c4e751c687",
+  "source_digest": "169eed1680fc4aba2e90e0829af4e812f7749cd7808f92f6364730aa396f8df2",
   "covered_paths": [
     ".relx/release-manifest.json",
     "CHANGELOG.md",
@@ -192,20 +192,100 @@
   ],
   "packages": [
     {
-      "name": "observe-core",
+      "name": "phlo-observe-core",
       "path": "packages/observe-core",
       "selected": true,
-      "selection_reason": "package files changed since observe-core/v0.3.0 and produced a release bump",
-      "current_version": "0.3.0",
-      "next_version": "0.3.1",
-      "bump": "patch",
+      "selection_reason": "package files changed since the start of history and produced a release bump",
+      "current_version": "0.3.1",
+      "next_version": "0.4.0",
+      "bump": "minor",
       "baseline": {
-        "kind": "package_tag",
-        "reference": "observe-core/v0.3.0",
-        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
+        "kind": "first_release",
+        "reference": null,
+        "commit": null
       },
-      "release_tag": "observe-core/v0.3.1",
+      "release_tag": "phlo-observe-core/v0.4.0",
       "changes": [
+        {
+          "id": "c7e50f38f8dfe029accbc172d5e25cf2ba164291",
+          "message": "chore: scaffold monorepo workspace, tooling, and CI\n\n- uv workspace with three components: observe-core, phlo-observe, phlo-observer\n- mise-pinned Python 3.12 and uv toolchain\n- prek pre-commit hooks: ruff check/format, ty check, uv lock check\n- GitHub Actions CI: quality, per-component tests with Postgres, package\n  builds, observer image build + smoke, dependency audit\n- Apache-2.0 license, compose dev environment, mkdocs scaffold"
+        },
+        {
+          "id": "21bad2d071cfcc618e34c2ac0bee6af7a9ba820a",
+          "message": "feat: implement observe-core event pipeline and drains\n\nCanonical event envelope with JSON Schemas, observe() sync/async context\nmanager and decorator, contextvars-based correlation propagation, bounded\nqueue with backpressure policies, deterministic sampling, recursive\nredaction, console/JSONL/HTTP/OTLP/memory drains, critical-event spool\nwith replay, typed OBSERVE_* configuration, and internal health counters.\n\nIncludes 131 tests covering lifecycle, context isolation, redaction,\nsampling, queue policies, drains, spool, schema conformance, and the\nstdlib logging bridge."
+        },
+        {
+          "id": "d1d637f89e705d6fd6d16f5ac92ffdecbf914a82",
+          "message": "feat: implement phlo-observer ingestion, persistence, and query service\n\nFastAPI service that receives canonical events plus Dagster/dbt/generic/OTLP\nsource payloads, preserves raw payloads in Postgres, normalizes via a pluggable\nadapter registry, correlates events into run projections, and serves filtered\nevent/run/timeline queries.\n\n- canonical /v1/events ingestion: single, batch, gzip, size + batch limits\n- idempotent event_id handling: identical resubmission deduped, divergent\n  resubmission rejected as INTEGRITY_CONFLICT\n- adapter registry: canonical, dagster, dbt run_results/artifacts, generic\n- deterministic correlation (explicit run_id, trace_id linking) and\n  incremental run projections surviving late-arriving events\n- token auth (ingest/read sets, _FILE secret variants, dev-mode fallback)\n- /healthz, /readyz with schema version, /metrics with spec metric names\n- hourly retention sweep honoring raw/event/run retention settings\n- Alembic migration 0001 (async engine) + CLI: serve/migrate/downgrade/\n  check/config\n- optional OTLP forwarding, Dockerfile (non-root, slim), compose fix\n- 39 Postgres-backed tests: auth, ingestion, idempotency, conflicts, gzip,\n  limits, filters, pagination, timeline, late events, retention, migrations\n- docs: architecture, event-model, configuration, integrations, deployment,\n  troubleshooting"
+        },
+        {
+          "id": "2d8ea06326dbf413075899a22868fa35f6a77805",
+          "message": "feat: add observe replay-spool CLI command\n\nReplays a local critical-event spool directory into the first configured\ndrain, closing remaining spec coverage for operational spool recovery."
+        },
+        {
+          "id": "a0a3d34219945645d01655f9db7f048d19302110",
+          "message": "fix: harden observer ingestion, auth, and spec compliance for V1\n\nCorrectness:\n- per-item canonical validation; malformed events reject 4xx, never 500\n- race-safe run upsert with row locks; no lost counter updates\n- ended_at only on real terminal outcomes; late signals cannot downgrade\n- correlation failures after durable event writes are contained\n- controlled 400s for bad cursors, date filters, event ids, adapter payloads\n- bulk event insert + batched run pre-creation (~10k/s canonical ingest)\n\nSecurity:\n- *_FILE secret variants honored in the serve path; require_tokens() wired\n- hard bounds on wire and decompressed request bodies\n- bounded metrics route labels (no attacker-controlled cardinality)\n- segment-aware secret key redaction with a bounded verdict cache\n- observe config masks drain secrets; replay-spool targets remote drains only\n- self-observation rejects http drains (no self-ingest loop)\n\nSpec gaps closed:\n- /health/live, /health/ready (+ /healthz, /readyz aliases)\n- /v1/assets|branches|tables/{name}/events scoped queries (path converter)\n- timeline carries observer-owned labels, summaries, phases, steps\n- configure_phlo() SDK entry point; keystone example uses observe-core only\n- phlo-observer replay-spool command\n- release-please + wheel/image release workflows; real dependency-scan gate\n- drop_oldest preserves flush/shutdown control sentinels\n- performance suite covers all eight spec benchmarks\n\nDocs and compose/collector configs updated to match actual behavior."
+        },
+        {
+          "id": "a4033f1e36f8f9b91c2672fcdf9a7bf01ab0e3c4",
+          "message": "fix: retention cascade, real OTLP forwarding, stricter auth checks\n\n- events.raw_event_id gets ON DELETE SET NULL (migration 0002): raw\n  payloads expire (14d) before the events that reference them (90d), so\n  the retention sweep's raw_events DELETE hit the FK and rolled back the\n  entire cleanup transaction on every pass. The regression test now\n  links an event to the expired raw row.\n- forward_events now speaks OTLP/HTTP JSON: canonical events are\n  exported as resourceLogs log records to the collector's /v1/logs\n  endpoint (bare base URLs get the path appended). It is scheduled as a\n  fire-and-forget background task instead of being awaited in the\n  ingest path, forwards only events that were actually persisted, and\n  pending forwards get a bounded drain at shutdown.\n- AUTH_OPTIONAL_DEV=false now requires both ingest and read tokens; a\n  partially configured token set is not a hardened deployment.\n- Readiness also reports a stopped observe-core worker runtime\n  (Runtime.workers_alive()).\n- Event responses include the stored canonical payload so envelope\n  extensions (correlation.extra and top-level extras) are reachable via\n  the query API."
+        },
+        {
+          "id": "b9628ccec61e98150d8da365e3b9827fa481563a",
+          "message": "fix: stop silent critical-event loss and spool replay stalls\n\nCritical events could be silently dropped under drop_oldest queue\npressure and one permanently-rejected spool segment blocked replay of\nall later segments forever. Also fixes dead config/API surface, broken\ndocs, and spec gaps found in review.\n\nobserve-core:\n- drop_oldest evicts the oldest non-critical event first; an evicted\n  critical goes to the spool instead of counting a drop\n- control sentinels (_FlushRequest/_STOP) are never evicted; held items\n  that fail re-queue under contention are spooled (critical) or counted\n- spool replay seals the active segment first, skips segments still\n  open for write, and takes a non-blocking replay lock\n- PermanentDrainFailure quarantines poison segments as .dead so\n  transient failures keep segments but permanent ones cannot stall\n  replay head-of-line; malformed segments quarantine as .corrupt\n- quarantined files count toward max_bytes and are evictable so a\n  poison flood cannot grow the spool unboundedly\n- wire HttpDrainConfig.spool_on_failure; non-retryable 4xx raises\n  PermanentDrainFailure; OtlpDrain treats unparseable replay payloads\n  as permanent\n- worker loop survives drain exceptions beyond Exception\n- per-operation capture_stacktrace override on observe()/event()\n- JsonlDrain writes/flushes under a lock for multi-worker safety\n- operation duration reconciled against wall clock so envelope\n  invariants hold when the clock shifts\n\nphlo-observer:\n- real OTLP adapter: one canonical event per logRecord with severity,\n  correlation, service, and attribute mapping; /v1/ingest/otlp routes\n  to it\n- store_raw honors adapter keep_payload, caps payload size\n  (PHLO_OBSERVER_MAX_RAW_PAYLOAD_BYTES) with SHA-256 digest fallback,\n  and retains X-Source-Version\n- X-Run-Id / X-Trace-Id / X-Request-Id / X-Asset-Key ingestion headers\n  feed RawPayload.metadata; generic adapter merges transport metadata\n  and body fields so external events correlate into runs\n- phlo_observer_queue_depth gauge now reflects the self-observation\n  queue at scrape time\n- timeline output bounded at 10,000 events with a truncated flag\n- PHLO_OBSERVER_DATABASE_URL_FILE precedence fixed so explicit\n  constructor args are not silently overridden\n\nsdk + docs + tests:\n- phlo-observe[dbt] extra; docs now reference the real SDK API and\n  event names\n- sanitized fixtures + golden canonical events for all adapters\n- failure-injection tests: db down/reconnect, drain exceptions in the\n  worker, shutdown with queued events; regression tests for every fix"
+        },
+        {
+          "id": "a6bc156ce55b13eddb79d7c65da7ca171214c865",
+          "message": "fix: correlation inheritance, env list parsing, and ingest status accounting\n\n- event() inside an observe() block now inherits run_id/trace_id/span\n  coordinates from the active operation context (precedence: explicit >\n  operation > ambient); CorrelationFilter uses the same effective set.\n- error.details are normalized like attributes so one unserializable\n  detail cannot drop a critical event.\n- OBSERVE_*/PHLO_OBSERVER_* list settings accept comma-separated or JSON\n  values via NoDecode, and _FILE token variants no longer double-count\n  the plain env value.\n- Invalid configuration renders an operator-facing message (env var\n  name, received value with secrets masked, docs pointer) instead of a\n  raw ValidationError traceback, in both CLIs.\n- raw.normalization_status and the ingest batch metric now reflect\n  persist-stage rejections; readiness reports schema_incompatible\n  instead of a 500 when the events schema is missing.\n- OTLP drain attributes move to the observe.* namespace so core stays\n  generic.\n- correlation_method counts trace_id correlations once."
+        },
+        {
+          "id": "76bf47d543762dc15af01dae777cc82e34ce9f31",
+          "message": "fix: provision the test database in compose and drop dead rotation branch\n\ndocker compose postgres now creates phlo_observer_test via initdb, so the\nobserver, integration and performance suites run against the default URL\n(localhost:5432/phlo_observer_test) with no manual setup — matching CI and\nCONTRIBUTING. JsonlDrain._rotate loses the unreachable unlink branch."
+        },
+        {
+          "id": "f38432bd7089c58ab39465e269dbc020d3756bc4",
+          "message": "fix: restore OTLP round-trip fidelity and close fail-open gaps\n\n- emit() re-raises TelemetryError even when fail_fast is off, so\n  telemetry_required actually fails closed on oversized events instead\n  of silently dropping them\n- add observe_core.otlp_mapping: one shared canonical-event <-> OTLP\n  attribute encoder used by the OTLP drain and the observer forwarder\n- OTLP ingest adapter restores observe.*-encoded records (marked by\n  observe.event_id) to their original envelope: event id/name,\n  correlation incl. run/trace ids and extra, timing, severity, service,\n  error and source; plain OTel records keep the generic mapping\n- @observe wraps sync and async generators so the operation spans the\n  whole iteration and mid-iteration failures emit failure events\n- _evict_oldest_event drains the queue and re-queues survivors in\n  original order; oldest critical is removed by identity\n- readyz probes the events table with SELECT ... LIMIT 1 instead of\n  count(*), and drops the events_stored field\n- adapters (canonical, dagster, dbt, generic, otlp) report per-record\n  normalization errors against original source positions via\n  NormalizedBatch.indices; persist_events maps them back and guards\n  against index-length mismatches\n- parse Content-Encoding case-insensitively and per-token for gzip\n- _dagster_asset_key returns None for callable values instead of\n  stringifying a bound method\n- phlo-observer depends on observe-core[otlp] so the self-observe OTLP\n  drain works in the shipped environment; LogRecord now imports from\n  opentelemetry._logs (moved in OTel SDK 1.44)\n- drop the unused session_scope helper\n- document the observe.* OTLP attribute mapping in integrations.md\n  (spec section 13.4)\n- tests: oversized-event raise, generator decorators, eviction order,\n  OTLP drain record, mapping unit tests, OTLP ingest round-trip golden\n  + end-to-end run correlation, per-item adapter errors, and the\n  redaction legs for the HTTP and spool sinks (spec section 16)"
+        },
+        {
+          "id": "33c5790d7fed565b936a383ba389bb16745c641d",
+          "message": "chore: switch release automation from release-please to ReleaseX\n\n- relx.toml: monorepo per_package mode for observe-core, phlo-observe and\n  phlo-observer; independent <package>/v<version> tags and release PRs\n- release-python workflow: relx status gate on main pushes, release pr\n  for pending packages, release tag on merged chore(release) commits\n- release-observer workflow: trigger on phlo-observer/v* tags and derive\n  the image tag from the version component\n- drop release-please config/manifest; reset package baselines to 0.0.0\n  so the first release PRs ship 0.1.0"
+        },
+        {
+          "id": "de41fd01a01ea5db7ab2c66fa746e419a5514396",
+          "message": "fix: keep observer image smoke green and pin ReleaseX action\n\n- runtime: degrade to spool=None when the spool directory cannot be\n  created instead of crashing startup (unwritable home in the non-root\n  image made every boot fail before serving liveness)\n- Dockerfile: create /var/lib/phlo-observe owned by the observer user and\n  point OBSERVE_SPOOL_DIR at it\n- release-python: pin iamgp/ReleaseX to v1.9.4 (no floating v1 tag)"
+        },
+        {
+          "id": "0b651959dc360293f90572cbd9b12ea649672e2f",
+          "message": "chore(release): 3 packages (#5)\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+        },
+        {
+          "id": "5bdfabac90c8205a20581a513612163ca7c70c06",
+          "message": "feat(observe-core): V2 phase 1 — contracts, schema registry, backends, propagation\n\n- EventContract registry with typed fields, metadata (description,\n  sensitive, cardinality, deprecated, examples), and off/warn/strict\n  validation wired into the emit path\n- Schema registry: deterministic JSON Schema export and\n  breaking/non-breaking change classification (spec §44)\n- Canonical entity identifiers: <namespace>://<path> URIs with typed\n  helpers (asset/run/table/iceberg/branch/model/source/snapshot/\n  service/incident)\n- V2 envelope: entities, tags, contract ref; additive and omitted when\n  empty so 1.x emissions stay byte-compatible; envelope_version setting\n- RuntimeBackend protocol with worker (default), sync, and capture\n  transports; runtime keeps finalization and delegates transport\n- Context propagation across process boundaries: base64url context\n  envelope via OBSERVE_CONTEXT or --observe-context\n- Policy-based dynamic sampling (ordered rules, run-level rates,\n  failure/critical retention guarantees, recorded decisions) and a\n  bounded tail sampler\n- MetricAggregator + metric()/flush_metrics() for event-shaped metrics\n- SDK health surface: backend, queue depth, counters, spool, tail,\n  aggregation series\n- event-envelope-v2.schema.json; contract tests validate V2 and pin V1"
+        },
+        {
+          "id": "a5942aedcbe4bd5de2218458f6f50d5b6c456479",
+          "message": "feat(sdk): emit canonical entities from integrations\n\n- observe() accepts entities=/tags= kwargs, applied to the builder on\n  enter and carried through decorator wrapping\n- dagster: run://dagster/<run_id> + asset://<key> on materializations\n  and asset checks\n- wap: branch://nessie/<branch> plus table:// and snapshot:// when known\n- iceberg: iceberg://<catalog>/<ns>/<table>, branch://nessie,\n  snapshot://<table>/<id> on commits; branch entity on nessie create\n- dlt: source://dlt/<pipeline>; dbt: run://dbt/<invocation> and\n  model://dbt/<name> on run-results events; trino: service://trino"
+        },
+        {
+          "id": "91a32fa29ce19aac0e31ed3750a9090776267bd0",
+          "message": "feat: V2 hardening: equivalence, stress, failure-injection, cross-replica SSE (#7)"
+        },
+        {
+          "id": "360c5da814e4b58ee1b9e2e9e9371da4d2078603",
+          "message": "feat(observe-core): add generic human-readable event renderer (#8)\n\n* feat(observe-core): add generic human-readable event renderer\n\nCanonical events have strong machine representations but poor human\nscannability. PrettyRenderer renders envelopes as concise text driven\nentirely by consumer-supplied presentation rules — labels, visibility\n(primary/secondary/hidden with failure/warning escalation), field paths,\ngeneric formatters, context grouping, and a structured error layout.\nobserve-core owns layout, status vocabulary and terminal behaviour\n(TTY/NO_COLOR/CI detection, Unicode with ASCII fallback, optional\nminimal colour); event semantics stay in the consuming application, so\nthe same renderer works for any application without modification.\n\nRendering is additive: canonical JSON/JSONL serialization is untouched.\n\n* feat(observe-core): incremental rendering, event timestamps, custom drains\n\n- PrettyRenderer.write_event() renders one event at a time while tracking\n  context state across calls, so incremental consumers (drains,\n  tail-followers) get the same grouping render_many gives a complete\n  sequence: one header per context switch, no header per batch.\n- timestamps=True prefixes each event line with the event time\n  (HH:MM:SS.mmm from canonical observed_at, falling back to started_at\n  then ended_at). Missing or malformed times render no column.\n- Runtime.add_drain()/observe_core.add_drain() are the programmatic\n  counterpart of OBSERVE_DRAINS: applications register Drain instances\n  a drain name cannot express, without mutating the environment.\n- configure_phlo accepts the name,name drain shorthand a filtered\n  OBSERVE_DRAINS remainder produces."
+        },
+        {
+          "id": "fe2e29054d7a97f0bd3e334a0a6e9c66384993f1",
+          "message": "chore(release): 3 packages (#6)\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+        },
+        {
+          "id": "0b5ec81cc74afe439cebc9c4dd65dd05bd6b4821",
+          "message": "feat(observe-core): per-field suppress predicates on Field (#9)\n\nFields render nothing for values a consumer declares degenerate —\nplaceholder identifiers, sentinel names, a zero that reads as \"no\nmeasurement\" — via Field(suppress=predicate). The predicate sees the\nresolved value before formatting, so applications can drop noise like\nframework-generated anonymous job names without a full custom\nformatter or a change to the canonical event."
+        },
+        {
+          "id": "b478056dfadd5ff275d7fbaf7171f2319c52d48f",
+          "message": "chore(release): 3 packages (#10)\n\nCo-authored-by: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+        },
         {
           "id": "b0a837115d542c5cceb9ebe29de1d37c2636d169",
           "message": "fix(observe-core): redact deeply nested error details (#11)"
@@ -217,27 +297,43 @@
         {
           "id": "1e79d10cb7902355ffab4e4aa5ffce1adaa5397e",
           "message": "fix(observe-core): wait for all pre-flush deliveries (#14)\n\n* fix worker flush completion barrier\n\n* harden worker flush watermark\n\n* bound drain flush timeout"
+        },
+        {
+          "id": "191d22bd42b449048b1e6f0e2475157a1297ffa2",
+          "message": "chore(release): 4 packages (#19)"
+        },
+        {
+          "id": "3f8a3515ff5f7198d4c19352b0491c9712f79f99",
+          "message": "ci: publish namespaced Python packages with trusted publishing (#22)"
         }
       ]
     },
     {
-      "name": "observe-query",
+      "name": "phlo-observe-query",
       "path": "packages/observe-query",
       "selected": true,
       "selection_reason": "package files changed since the start of history and produced a release bump",
-      "current_version": "0.1.0",
-      "next_version": "0.2.0",
+      "current_version": "0.2.0",
+      "next_version": "0.3.0",
       "bump": "minor",
       "baseline": {
         "kind": "first_release",
         "reference": null,
         "commit": null
       },
-      "release_tag": "observe-query/v0.2.0",
+      "release_tag": "phlo-observe-query/v0.3.0",
       "changes": [
         {
           "id": "db264286ac363035a34a15afc91af6a71f95f3f7",
           "message": "feat(observer): add V2 operations — search, SSE stream, alert webhooks, quarantine admin\n\n- GET /v2/search: Postgres ILIKE over event name, error message, asset,\n  table, service plus existing structured filters (spec 23)\n- GET /v2/stream: SSE notification channel with bounded subscriber set;\n  run.changed/insight.opened/incident.updated published from ingest (§26)\n- alert_webhook_urls setting: fire-and-forget insight/incident POSTs,\n  tracked task set, never blocks ingest (§34)\n- observe_ingest_failures quarantine: payload-level normalization\n  failures land here; GET /v2/admin/quarantine lists them and\n  POST /v2/admin/quarantine/{id}/replay re-runs the adapter (§34)\n- admin_tokens scope: separate admin authorization with read-token\n  fallback (§19.4 keeps agent reads read-only)\n- new observe-query package: ObserverClient read-only typed client +\n  AGENT_TOOLS dispatch table for the spec 19.2 tool surface"
+        },
+        {
+          "id": "191d22bd42b449048b1e6f0e2475157a1297ffa2",
+          "message": "chore(release): 4 packages (#19)"
+        },
+        {
+          "id": "3f8a3515ff5f7198d4c19352b0491c9712f79f99",
+          "message": "ci: publish namespaced Python packages with trusted publishing (#22)"
         }
       ]
     },
@@ -246,43 +342,40 @@
       "path": "packages/phlo-observe-sdk",
       "selected": true,
       "selection_reason": "cascade bump: depends on a package with a version bump",
-      "current_version": "0.2.1",
-      "next_version": "0.2.2",
+      "current_version": "0.2.2",
+      "next_version": "0.2.3",
       "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observe/v0.2.1",
-        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
+        "reference": "phlo-observe/v0.2.2",
+        "commit": "191d22bd42b449048b1e6f0e2475157a1297ffa2"
       },
-      "release_tag": "phlo-observe/v0.2.2",
-      "changes": []
+      "release_tag": "phlo-observe/v0.2.3",
+      "changes": [
+        {
+          "id": "3f8a3515ff5f7198d4c19352b0491c9712f79f99",
+          "message": "ci: publish namespaced Python packages with trusted publishing (#22)"
+        }
+      ]
     },
     {
       "name": "phlo-observer",
       "path": "services/phlo-observer",
       "selected": true,
-      "selection_reason": "package files changed since phlo-observer/v0.2.1 and produced a release bump",
-      "current_version": "0.2.1",
-      "next_version": "0.2.2",
+      "selection_reason": "cascade bump: depends on a package with a version bump",
+      "current_version": "0.2.2",
+      "next_version": "0.2.3",
       "bump": "patch",
       "baseline": {
         "kind": "package_tag",
-        "reference": "phlo-observer/v0.2.1",
-        "commit": "b478056dfadd5ff275d7fbaf7171f2319c52d48f"
+        "reference": "phlo-observer/v0.2.2",
+        "commit": "191d22bd42b449048b1e6f0e2475157a1297ffa2"
       },
-      "release_tag": "phlo-observer/v0.2.2",
+      "release_tag": "phlo-observer/v0.2.3",
       "changes": [
         {
-          "id": "79e260f25a6c7e193912a1d1c6cbd3a945454511",
-          "message": "fix(observer): preserve lifecycle decisions and identities during rebuild (#15)\n\n* Preserve lifecycle state across projection rebuilds\n\n* Harden lifecycle identity matching\n\n* Preserve lifecycle identities and refuse ambiguous replay\n\n* Close replayed episodes before restoring reopened state"
-        },
-        {
-          "id": "f0cd80124c6de4f457cba1911c2814a0c22fee98",
-          "message": "fix(observer): publish local notifications only after commit (#16)"
-        },
-        {
-          "id": "46b0d06f78a6e63aa2e561f0586627d7cd4fc4d3",
-          "message": "fix(observer): track and repair durable projection gaps (#17)"
+          "id": "3f8a3515ff5f7198d4c19352b0491c9712f79f99",
+          "message": "ci: publish namespaced Python packages with trusted publishing (#22)"
         }
       ]
     }
