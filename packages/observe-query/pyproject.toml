@@ -8,7 +8,7 @@ dependencies = [
     "pydantic>=2.8",
 ]
 description = "Typed read client for the phlo-observer V2 query API: runs, assets, lineage, insights, incidents and agent-facing tool functions (spec 19)."
-name = "observe-query"
+name = "phlo-observe-query"
 readme = "README.md"
 requires-python = ">=3.12"
 version = "0.2.0"

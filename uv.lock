@@ -11,10 +11,10 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "observe-core",
-    "observe-query",
     "phlo-observe",
+    "phlo-observe-core",
     "phlo-observe-dev",
+    "phlo-observe-query",
     "phlo-observer",
 ]
 
@@ -981,54 +981,6 @@ wheels = [
 ]
 
 [[package]]
-name = "observe-core"
-version = "0.3.1"
-source = { editable = "packages/observe-core" }
-dependencies = [
-    { name = "httpx" },
-    { name = "orjson" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-]
-otlp = [
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "observe-core", extras = ["otlp"], marker = "extra == 'all'", editable = "packages/observe-core" },
-    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.27" },
-    { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = ">=1.27" },
-    { name = "orjson", specifier = ">=3.10" },
-    { name = "pydantic", specifier = ">=2.8" },
-    { name = "pydantic-settings", specifier = ">=2.4" },
-]
-provides-extras = ["all", "otlp"]
-
-[[package]]
-name = "observe-query"
-version = "0.2.0"
-source = { editable = "packages/observe-query" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28" },
-    { name = "pydantic", specifier = ">=2.8" },
-]
-
-[[package]]
 name = "opentelemetry-api"
 version = "1.44.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1252,8 +1204,8 @@ name = "phlo-observe"
 version = "0.2.2"
 source = { editable = "packages/phlo-observe-sdk" }
 dependencies = [
-    { name = "observe-core" },
-    { name = "observe-query" },
+    { name = "phlo-observe-core" },
+    { name = "phlo-observe-query" },
     { name = "pydantic" },
 ]
 
@@ -1281,14 +1233,47 @@ trino = [
 requires-dist = [
     { name = "dagster", marker = "extra == 'dagster'", specifier = ">=1.8" },
     { name = "dlt", marker = "extra == 'dlt'", specifier = ">=1.0" },
-    { name = "observe-core", editable = "packages/observe-core" },
-    { name = "observe-query", editable = "packages/observe-query" },
     { name = "pandera", marker = "extra == 'pandera'", specifier = ">=0.20" },
     { name = "phlo-observe", extras = ["dagster", "dbt", "dlt", "pandera", "trino"], marker = "extra == 'all'", editable = "packages/phlo-observe-sdk" },
+    { name = "phlo-observe-core", editable = "packages/observe-core" },
+    { name = "phlo-observe-query", editable = "packages/observe-query" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "trino", marker = "extra == 'trino'", specifier = ">=0.330" },
 ]
 provides-extras = ["all", "dagster", "dbt", "dlt", "pandera", "trino"]
+
+[[package]]
+name = "phlo-observe-core"
+version = "0.3.1"
+source = { editable = "packages/observe-core" }
+dependencies = [
+    { name = "httpx" },
+    { name = "orjson" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
+otlp = [
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.27" },
+    { name = "opentelemetry-sdk", marker = "extra == 'otlp'", specifier = ">=1.27" },
+    { name = "orjson", specifier = ">=3.10" },
+    { name = "phlo-observe-core", extras = ["otlp"], marker = "extra == 'all'", editable = "packages/observe-core" },
+    { name = "pydantic", specifier = ">=2.8" },
+    { name = "pydantic-settings", specifier = ">=2.4" },
+]
+provides-extras = ["all", "otlp"]
 
 [[package]]
 name = "phlo-observe-dev"
@@ -1328,6 +1313,21 @@ dev = [
 ]
 
 [[package]]
+name = "phlo-observe-query"
+version = "0.2.0"
+source = { editable = "packages/observe-query" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28" },
+    { name = "pydantic", specifier = ">=2.8" },
+]
+
+[[package]]
 name = "phlo-observer"
 version = "0.2.2"
 source = { editable = "services/phlo-observer" }
@@ -1336,9 +1336,9 @@ dependencies = [
     { name = "asyncpg" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "observe-core", extra = ["otlp"] },
     { name = "orjson" },
     { name = "phlo-observe" },
+    { name = "phlo-observe-core", extra = ["otlp"] },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1353,9 +1353,9 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "observe-core", extras = ["otlp"], editable = "packages/observe-core" },
     { name = "orjson", specifier = ">=3.10" },
     { name = "phlo-observe", editable = "packages/phlo-observe-sdk" },
+    { name = "phlo-observe-core", extras = ["otlp"], editable = "packages/observe-core" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.4" },

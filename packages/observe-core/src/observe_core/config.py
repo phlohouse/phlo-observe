@@ -68,7 +68,7 @@ class HttpDrainConfig(BaseModel):
 
 
 class OtlpDrainConfig(BaseModel):
-    """Export events to an OpenTelemetry collector (requires ``observe-core[otlp]``)."""
+    """Export events to an OpenTelemetry collector (requires ``phlo-observe-core[otlp]``)."""
 
     model_config = ConfigDict(extra="forbid")
 

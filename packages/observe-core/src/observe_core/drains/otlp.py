@@ -7,7 +7,7 @@ identifiers are preserved verbatim under ``observe.correlation.*`` (plus
 ``observe.trace_id``/``observe.span_id`` shortcuts) so events can be joined to
 real traces downstream.
 
-Requires the ``observe-core[otlp]`` extra.
+Requires the ``phlo-observe-core[otlp]`` extra.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from observe_core.models import Severity
 from observe_core.otlp_mapping import event_to_otlp_attributes
 from observe_core.serialization import loads
 
-try:  # optional extra: observe-core[otlp]
+try:  # optional extra: phlo-observe-core[otlp]
     from opentelemetry._logs import LogRecord
     from opentelemetry._logs.severity import SeverityNumber
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -55,7 +55,8 @@ class OtlpDrain:
     ) -> None:
         if not _HAS_OTEL:
             raise DrainFailure(
-                "OTLP drain requires the 'observe-core[otlp]' extra: pip install observe-core[otlp]"
+                "OTLP drain requires the 'phlo-observe-core[otlp]' extra: "
+                "pip install phlo-observe-core[otlp]"
             )
 
         self._severity_number = SeverityNumber

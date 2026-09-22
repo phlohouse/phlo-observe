@@ -4,9 +4,9 @@ A coherent observability system for Phlo and related Python applications.
 
 The system has four components:
 
-- **`observe-core`** — generic wide-event observability, context propagation, structured errors, buffering, redaction, sampling and drains.
-- **`phlo-observe-sdk`** — Phlo-specific contexts and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino.
-- **`observe-query`** — read-only query client and agent tools for investigation.
+- **`phlo-observe-core`** — generic wide-event observability, context propagation, structured errors, buffering, redaction, sampling and drains.
+- **`phlo-observe`** — Phlo-specific contexts and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino.
+- **`phlo-observe-query`** — read-only query client and agent tools for investigation.
 - **`phlo-observer`** — central ingestion, normalization, correlation, persistence and query service for Observatory and downstream telemetry systems.
 
 The implementation contracts are in [`docs/V1_SPEC.md`](docs/V1_SPEC.md) and
@@ -15,10 +15,10 @@ query API, state engine, insights, and operator workflows.
 
 ## First event in under five minutes
 
-`observe-core` needs nothing but Python 3.12+ — no database, no server:
+`phlo-observe-core` needs nothing but Python 3.12+ — no database, no server:
 
 ```bash
-pip install observe-core
+pip install phlo-observe-core
 ```
 
 ```python
@@ -57,7 +57,7 @@ curl -X POST localhost:8080/v1/events -H 'content-type: application/json' -d "{
 }"
 ```
 
-Instrumented apps emit through `observe-core` (see `examples/`); the observer
+Instrumented apps emit through `phlo-observe-core` (see `examples/`); the observer
 normalizes, correlates and serves `GET /v1/events`, `/v1/runs/{id}/timeline`,
 `/health/live`, `/health/ready`, `/metrics`. Auth via `PHLO_OBSERVER_INGEST_TOKENS` /
 `PHLO_OBSERVER_READ_TOKENS` (bearer or `X-API-Key`).
