@@ -1201,7 +1201,7 @@ wheels = [
 
 [[package]]
 name = "phlo-observe"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "packages/phlo-observe-sdk" }
 dependencies = [
     { name = "phlo-observe-core" },
@@ -1244,7 +1244,7 @@ provides-extras = ["all", "dagster", "dbt", "dlt", "pandera", "trino"]
 
 [[package]]
 name = "phlo-observe-core"
-version = "0.3.1"
+version = "0.4.0"
 source = { editable = "packages/observe-core" }
 dependencies = [
     { name = "httpx" },
@@ -1314,7 +1314,7 @@ dev = [
 
 [[package]]
 name = "phlo-observe-query"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "packages/observe-query" }
 dependencies = [
     { name = "httpx" },
@@ -1329,7 +1329,7 @@ requires-dist = [
 
 [[package]]
 name = "phlo-observer"
-version = "0.2.2"
+version = "0.2.3"
 source = { editable = "services/phlo-observer" }
 dependencies = [
     { name = "alembic" },

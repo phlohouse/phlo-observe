@@ -22,7 +22,7 @@ description = "Central ingestion, normalization, correlation, persistence and qu
 name = "phlo-observer"
 readme = "README.md"
 requires-python = ">=3.12"
-version = "0.2.2"
+version = "0.2.3"
 
 [[project.authors]]
 name = "Phlo"
@@ -37,8 +37,8 @@ phlo-observer = "phlo_observer.cli:main"
 module-name = "phlo_observer"
 module-root = "src"
 
-[tool.uv.sources.phlo-observe-core]
+[tool.uv.sources.phlo-observe]
 workspace = true
 
-[tool.uv.sources.phlo-observe]
+[tool.uv.sources.phlo-observe-core]
 workspace = true
