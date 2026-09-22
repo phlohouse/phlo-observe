@@ -31,7 +31,10 @@ packages = [
 ]
 release_mode = "release_set"
 legacy_releases = []
-first_release_packages = ["observe-core", "observe-query", "phlo-observe", "phlo-observer"]
+# PyPI distribution names now use the phlo-observe namespace. ReleaseX derives
+# tag identity from these names, so the renamed packages begin a new tag series;
+# existing observe-core/v* and observe-query/v* tags remain historical releases.
+first_release_packages = ["phlo-observe-core", "phlo-observe-query", "phlo-observe", "phlo-observer"]
 
 [changelog]
 contributors = true

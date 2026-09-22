@@ -42,6 +42,21 @@ uv run pytest services/phlo-observer/tests tests/integration
 Point `PHLO_OBSERVER_TEST_DATABASE_URL` elsewhere to use a different instance.
 Tests skip cleanly when Postgres is unreachable.
 
+## Releases
+
+ReleaseX opens a release PR for changed workspace packages. Merging that PR
+creates package tags and GitHub Releases. The same run builds and checks the
+three public distributions (`phlo-observe-core`, `phlo-observe-query`, and
+`phlo-observe`) before publishing only the packages selected in the release
+manifest. The observer service is released as its existing container image and
+is never uploaded to PyPI.
+
+Publishing uses PyPI trusted publishing: configure a trusted publisher (or a
+pending publisher before the first upload) for each PyPI project with GitHub
+owner `phlohouse`, repository `phlo-observe`, workflow
+`release-python.yml`, and its package environment: `pypi-core`, `pypi-query`,
+or `pypi-sdk`. No PyPI API token or repository secret is required.
+
 ## Code standards
 
 - Python 3.12+, fully typed; `ty` must pass.

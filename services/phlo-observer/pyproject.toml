@@ -4,7 +4,7 @@ requires = ["uv_build>=0.8,<0.13"]
 
 [project]
 dependencies = [
-    "observe-core[otlp]",
+    "phlo-observe-core[otlp]",
     "phlo-observe",
     "fastapi>=0.115",
     "uvicorn>=0.30",
@@ -37,7 +37,7 @@ phlo-observer = "phlo_observer.cli:main"
 module-name = "phlo_observer"
 module-root = "src"
 
-[tool.uv.sources.observe-core]
+[tool.uv.sources.phlo-observe-core]
 workspace = true
 
 [tool.uv.sources.phlo-observe]

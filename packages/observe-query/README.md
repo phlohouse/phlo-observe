@@ -1,4 +1,4 @@
-# observe-query
+# phlo-observe-query
 
 Typed, read-only client for the phlo-observer V2 query API (spec §19).
 

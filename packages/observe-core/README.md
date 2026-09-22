@@ -1,4 +1,4 @@
-# observe-core
+# phlo-observe-core
 
 Generic wide-event observability for Python applications: operation-scoped events,
 `contextvars` propagation, structured errors, bounded asynchronous emission,

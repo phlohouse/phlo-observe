@@ -4,8 +4,8 @@ requires = ["uv_build>=0.8,<0.13"]
 
 [project]
 dependencies = [
-    "observe-core",
-    "observe-query",
+    "phlo-observe-core",
+    "phlo-observe-query",
     "pydantic>=2.8",
 ]
 description = "Phlo-specific observability SDK: domain contexts, typed event attributes and integrations for Dagster, dbt, DLT, Pandera, WAP, Iceberg/Nessie and Trino."
@@ -35,8 +35,8 @@ phlo-observe = "phlo_observe.cli:main"
 module-name = "phlo_observe"
 module-root = "src"
 
-[tool.uv.sources.observe-core]
+[tool.uv.sources.phlo-observe-core]
 workspace = true
 
-[tool.uv.sources.observe-query]
+[tool.uv.sources.phlo-observe-query]
 workspace = true

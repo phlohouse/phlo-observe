@@ -1805,7 +1805,7 @@ If regulated workflows later depend on it as a system of record, separate requir
 README MUST make this possible in under five minutes:
 
 ```bash
-pip install observe-core
+pip install phlo-observe-core
 ```
 
 ```python
