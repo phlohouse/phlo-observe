@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # release-python.yml dispatches this for ReleaseX release PRs: their
+  # GITHUB_TOKEN-authored pull_request events cannot start workflows.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

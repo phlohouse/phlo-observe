@@ -103,6 +103,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # The release PR is pushed with GITHUB_TOKEN, so its pull_request event
+      # cannot start ci.yml. workflow_dispatch is exempt from that rule, and the
+      # run's checks attach to the release PR's head commit.
+      - name: Run CI on release PRs
+        if: steps.check.outputs.mode == 'pr'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branches="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" \
+            --jq '.[] | select(.head.repo.full_name == env.GITHUB_REPOSITORY and (.head.ref | startswith("relx/"))) | .head.ref')"
+          if [ -z "$branches" ]; then
+            echo "::error::relx release pr ran but no open relx/ release PR was found"
+            exit 1
+          fi
+          for branch in $branches; do
+            gh workflow run ci.yml --ref "$branch"
+            echo "Dispatched ci for $branch"
+          done
+
       - name: Nothing releasable
         if: steps.check.outputs.mode == 'noop'
         run: echo "No releasable package changes pending on main."
